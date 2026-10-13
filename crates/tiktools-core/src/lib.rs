@@ -145,6 +145,8 @@ pub struct AppCore {
     pub(crate) plugin_last_events:
         Mutex<BTreeMap<String, crate::plugin_diagnostics::PluginLastEvent>>,
     pub(crate) plugin_event_drops: Mutex<BTreeMap<String, u64>>,
+    pub(crate) plugin_delivery:
+        Mutex<BTreeMap<String, crate::plugin_events::fanout::PluginDeliveryStats>>,
     pub(crate) hotkey_sync_state: Mutex<crate::plugin_diagnostics::HotkeySyncState>,
     shutdown_started: AtomicBool,
     pub(crate) transport_state: TransportHealthState,
@@ -272,6 +274,7 @@ impl AppCore {
             processor_state: ProcessorRuntimeState::default(),
             plugin_last_events: Mutex::new(BTreeMap::new()),
             plugin_event_drops: Mutex::new(BTreeMap::new()),
+            plugin_delivery: Mutex::new(BTreeMap::new()),
             hotkey_sync_state: Mutex::new(crate::plugin_diagnostics::HotkeySyncState::default()),
             shutdown_started: AtomicBool::new(false),
             transport_state: TransportHealthState::default(),

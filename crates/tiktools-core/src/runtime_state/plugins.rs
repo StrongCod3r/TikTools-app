@@ -25,11 +25,17 @@ impl AppCore {
     pub(crate) fn set_plugin_activation(&self, id: &str, installed: bool, enabled: bool) {
         recover_rwlock_write(&self.plugin_state.activation, "plugin activation")
             .insert(id.to_owned(), PluginActivation { installed, enabled });
+        self.plugin_state
+            .activation_revision
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     #[cfg(feature = "plugin-install")]
     pub(crate) fn clear_plugin_activation(&self, id: &str) {
         recover_rwlock_write(&self.plugin_state.activation, "plugin activation").remove(id);
+        self.plugin_state
+            .activation_revision
+            .fetch_add(1, Ordering::AcqRel);
     }
 
     pub(crate) fn plugin_retry_allowed(&self, id: &str) -> bool {

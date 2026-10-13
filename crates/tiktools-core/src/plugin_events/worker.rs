@@ -28,6 +28,9 @@ pub(crate) async fn run_plugin_queue(
             },
         };
 
+        // The item left the queue: release the gauge before delivery so
+        // queue depth reflects genuinely pending work, not in-flight calls.
+        core.record_plugin_taken(&plugin_id);
         // Drop everything queued while the plugin was disabled/stopped. The
         // lifecycle operation owns the authoritative state; event delivery
         // must never restart a plugin as a side effect.
@@ -44,7 +47,7 @@ pub(crate) async fn run_plugin_queue(
             // Let the loader deadline retire failed process generations.
             // Dropping this future on cancellation skips that cleanup path.
             let delivered =
-                deliver_event(&core, &invoker, &plugin_id, generation, gap, false).await;
+                deliver_event(&core, &invoker, &plugin_id, generation, &gap, false).await;
             if !delivered {
                 // Keep the summary if a transient delivery failure happened
                 // while the plugin remained active; a stopped/crashed plugin
@@ -62,7 +65,7 @@ pub(crate) async fn run_plugin_queue(
             &invoker,
             &plugin_id,
             generation,
-            queued.envelope,
+            &queued.envelope,
             queued.lossy,
         )
         .await;

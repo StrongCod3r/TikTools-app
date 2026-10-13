@@ -83,10 +83,10 @@ async fn cancelled_queue_worker_releases_core_and_pending_events() {
     for _ in 0..PLUGIN_EVENT_QUEUE_CAPACITY {
         sender
             .try_send(super::queue::QueuedPluginEvent {
-                envelope: tiktools_plugin_api::DomainEventEnvelope::new(
+                envelope: Arc::new(tiktools_plugin_api::DomainEventEnvelope::new(
                     "test",
                     serde_json::json!({}),
-                ),
+                )),
                 lossy: true,
             })
             .unwrap();
@@ -107,6 +107,145 @@ async fn cancelled_queue_worker_releases_core_and_pending_events() {
     .expect("cancelled worker must terminate without draining or delivering");
     assert!(sender.is_closed());
     assert_eq!(Arc::strong_count(&core), baseline);
+}
+
+#[test]
+fn fanout_entry_matches_exact_wildcard_and_match_all() {
+    use super::fanout::FanoutEntry;
+    let entry = FanoutEntry {
+        id: "exact".to_owned(),
+        exact: vec!["points.changed".to_owned()],
+        prefixes: vec![],
+        match_all: false,
+        static_eligible: true,
+    };
+    assert!(entry.matches("points.changed"));
+    assert!(!entry.matches("points.other"));
+    assert!(!entry.matches("points.changed.extra"));
+
+    let wildcard = FanoutEntry {
+        id: "wild".to_owned(),
+        exact: vec![],
+        prefixes: vec!["live".to_owned()],
+        match_all: false,
+        static_eligible: true,
+    };
+    assert!(wildcard.matches("live.event"));
+    assert!(wildcard.matches("live.ui-event"));
+    // Namespace boundary: `liveevent` and bare `live` are not `live.*`.
+    assert!(!wildcard.matches("liveevent"));
+    assert!(!wildcard.matches("live"));
+    assert!(!wildcard.matches("points.changed"));
+
+    let all = FanoutEntry {
+        id: "all".to_owned(),
+        exact: vec![],
+        prefixes: vec![],
+        match_all: true,
+        static_eligible: true,
+    };
+    assert!(all.matches("anything.at.all"));
+}
+
+#[test]
+fn fanout_matcher_agrees_with_subscription_semantics() {
+    use tiktools_plugin_api::event_subscription_matches;
+    let cases = [
+        ("*", "live.event", true),
+        ("live.*", "live.event", true),
+        ("live.*", "live", false),
+        ("live.*", "liveevent", false),
+        ("points.changed", "points.changed", true),
+        ("points.changed", "points.changed.extra", false),
+        ("points.*", "points.changed.extra", true),
+    ];
+    for (subscription, topic, expected) in cases {
+        assert_eq!(
+            event_subscription_matches(subscription, topic),
+            expected,
+            "reference semantics for {subscription:?} vs {topic:?}"
+        );
+    }
+}
+
+#[test]
+fn fanout_cache_matches_registry_and_tracks_revisions() {
+    use super::fanout::FanoutCache;
+    use std::sync::atomic::Ordering;
+    let core = AppCore::new(Arc::new(NoopEmitter));
+    let loader_before = core.plugins.registry_revision();
+    {
+        let cache = FanoutCache::current(&core);
+        // Every cached match is statically eligible and genuinely
+        // subscribed; the gap broadcast reaches every entry.
+        for topic in [
+            "live.event",
+            "points.changed",
+            "tiktok.chat",
+            "plugin.event",
+        ] {
+            let matched = cache.matching(topic, false);
+            let forced = cache.matching(topic, true);
+            for index in &matched {
+                let entry = cache.entry(*index);
+                assert!(entry.static_eligible, "{} must be eligible", entry.id);
+                assert!(entry.matches(topic), "{} must match {topic}", entry.id);
+                assert!(
+                    forced.contains(index),
+                    "gap broadcast must include {topic} subscribers"
+                );
+            }
+        }
+    }
+    // Activation writes invalidate the cache; the next dispatch rebuilds
+    // without touching the loader revision.
+    core.set_plugin_activation("ghost", true, false);
+    assert_eq!(
+        core.plugin_state
+            .activation_revision
+            .load(Ordering::Acquire),
+        2
+    );
+    {
+        let rebuilt = FanoutCache::current(&core);
+        let _ = rebuilt.matching("live.event", false);
+    }
+    assert_eq!(core.plugins.registry_revision(), loader_before);
+}
+
+#[test]
+fn delivery_counters_distinguish_overload_from_failure() {
+    let core = AppCore::new(Arc::new(NoopEmitter));
+    core.record_plugin_accepted("fast");
+    core.record_plugin_accepted("fast");
+    core.record_plugin_taken("fast");
+    core.record_plugin_delivered("fast", 12, false, false);
+    core.record_plugin_queue_drop("slow");
+    core.record_plugin_drops("slow", 1);
+    core.record_plugin_delivered("slow", 5_000, true, true);
+    core.record_plugin_worker_start("slow");
+    core.record_plugin_worker_start("slow");
+    let diagnostics = core.plugin_diagnostics();
+    diagnostics["plugins"].as_array().expect("plugin array");
+    let stats = crate::recover_mutex(&core.plugin_delivery, "plugin delivery");
+    let delivery = super::fanout::delivery_snapshot(&stats);
+    let fast = delivery
+        .iter()
+        .find(|entry| entry["pluginId"] == "fast")
+        .expect("fast stats");
+    assert_eq!(fast["accepted"], 2);
+    assert_eq!(fast["queued"], 1);
+    assert_eq!(fast["completed"], 1);
+    assert_eq!(fast["failed"], 0);
+    assert_eq!(fast["meanLatencyMs"], 12.0);
+    let slow = delivery
+        .iter()
+        .find(|entry| entry["pluginId"] == "slow")
+        .expect("slow stats");
+    assert_eq!(slow["dropped"], 1);
+    assert_eq!(slow["failed"], 1);
+    assert_eq!(slow["timeouts"], 1);
+    assert_eq!(slow["restarts"], 2);
 }
 
 #[test]

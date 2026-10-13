@@ -1,27 +1,16 @@
 //! Subscription matching and delivery eligibility policy.
+//!
+//! Per-event subscription matching now lives in the precomputed
+//! [`FanoutCache`](super::fanout::FanoutCache); this module keeps the
+//! topic-independent delivery check used for pruning dead workers.
 
 use crate::AppCore;
 use tiktools_plugin_api::capabilities::EVENTS_SUBSCRIBE;
-use tiktools_plugin_api::event_subscription_matches;
 use tiktools_plugin_loader::DiscoveredPlugin;
 
-pub(crate) fn eligible_for_event(
-    core: &AppCore,
-    plugin: &DiscoveredPlugin,
-    topic: &str,
-    force_all_subscribers: bool,
-) -> bool {
-    eligible_for_delivery(core, plugin)
-        && (force_all_subscribers
-            || plugin
-                .manifest
-                .event_subscriptions
-                .iter()
-                .any(|subscription| event_subscription_matches(subscription, topic)))
-}
-
-/// Topic-independent delivery eligibility. Used both for per-event fan-out
-/// and for pruning workers whose plugin can no longer receive events.
+/// Topic-independent delivery eligibility for pruning workers whose plugin
+/// can no longer receive events. Per-event fan-out consults the cached
+/// static facts plus live generation/readiness reads instead.
 pub(crate) fn eligible_for_delivery(core: &AppCore, plugin: &DiscoveredPlugin) -> bool {
     // Declarative packages have no process call boundary and cannot implement
     // the SDK event hook. A plugin must also be both enabled and running;

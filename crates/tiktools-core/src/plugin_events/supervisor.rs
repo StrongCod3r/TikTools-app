@@ -1,6 +1,7 @@
 //! Event-bus subscription, worker registry, and dispatch fan-out.
 
-use super::eligibility::{eligible_for_delivery, eligible_for_event};
+use super::eligibility::eligible_for_delivery;
+use super::fanout::FanoutCache;
 use super::queue::{QueuedPluginEvent, WorkerHandle, PLUGIN_EVENT_QUEUE_CAPACITY};
 use super::worker::run_plugin_queue;
 use crate::events::{DomainEvent, DomainRecvError};
@@ -37,6 +38,8 @@ pub(crate) async fn run_observer(
                 workers.retain(|_, handle| !handle.sender.is_closed());
             },
             _ = maintenance.tick() => {
+                // Cold path (4 Hz): a full registry read here is fine. The
+                // per-event hot path below never clones the registry.
                 reconcile_workers(&core, &core.plugins.list(), &mut workers);
                 workers.retain(|_, handle| !handle.sender.is_closed());
             },
@@ -119,15 +122,41 @@ fn dispatch_envelope(
     tasks: &mut tokio::task::JoinSet<()>,
     shutdown: &CancellationToken,
 ) {
-    let plugins = core.plugins.list();
-    for plugin in &plugins {
-        if !eligible_for_event(core, plugin, &envelope.topic, force_all_subscribers) {
+    // Hot path: one revision check plus a topic-index lookup. The registry
+    // is cloned only when install/uninstall/start/stop/enable/disable (or
+    // a generation retirement) moved a revision — never per event.
+    let cache = FanoutCache::current(core);
+    let matched = cache.matching(&envelope.topic, force_all_subscribers);
+    // One shared envelope: N `Arc` clones at fan-out instead of N deep
+    // JSON clones. Workers clone for serialization at delivery time, off
+    // the hot path and after admission.
+    let shared = Arc::new(envelope);
+    // The cache guard borrows the fanout mutex; matching above copied out
+    // the subscriber indices, so release the guard before any live
+    // per-plugin reads below (lock ordering: fanout never nests).
+    let matched: Vec<(String, bool)> = matched
+        .into_iter()
+        .map(|index| {
+            let entry = cache.entry(index);
+            (entry.id.clone(), entry.static_eligible)
+        })
+        .collect();
+    drop(cache);
+    for (plugin_id, static_eligible) in matched {
+        if !static_eligible {
             continue;
         }
-        let plugin_id = plugin.manifest.id.clone();
+        // Fast-changing facts stay live reads: the running generation
+        // fences delivery, and activation readiness resolves races between
+        // lifecycle changes and dispatch. Delivery must never resurrect a
+        // stopped plugin, so workers for replaced generations are pruned
+        // here, exactly as before.
         let Some(generation) = core.plugins.running_generation(&plugin_id) else {
             continue;
         };
+        if !core.plugin_ready(&plugin_id) {
+            continue;
+        }
         if workers
             .get(&plugin_id)
             .is_some_and(|handle| handle.generation != generation)
@@ -141,6 +170,7 @@ fn dispatch_envelope(
             let pending_reliable_gaps = Arc::new(AtomicU64::new(0));
             let token = shutdown.child_token();
             let core = Arc::clone(core);
+            core.record_plugin_worker_start(&plugin_id);
             tasks.spawn(run_plugin_queue(
                 core,
                 plugin_id.clone(),
@@ -157,7 +187,7 @@ fn dispatch_envelope(
             }
         });
         let result = handle.sender.try_send(QueuedPluginEvent {
-            envelope: envelope.clone(),
+            envelope: Arc::clone(&shared),
             lossy,
         });
         if let Err(error) = result {
@@ -166,17 +196,13 @@ fn dispatch_envelope(
                     // Lossy events may be shed by design. Reliable events
                     // make the subscriber's stream incomplete, so surface a
                     // host-wide gap just as other reliable transports do.
-                    if !lossy && envelope.topic != "event.gap" {
+                    if !lossy && shared.topic != "event.gap" {
                         core.record_event_gap();
                         handle.pending_reliable_gaps.fetch_add(1, Ordering::Relaxed);
                     }
                     core.record_plugin_drops(&plugin_id, 1);
-                    tracing::warn!(
-                        plugin = %plugin_id,
-                        topic = %envelope.topic,
-                        lossy,
-                        "plugin event queue is full; event dropped"
-                    );
+                    core.record_plugin_queue_drop(&plugin_id);
+                    note_dispatch_overload(core, &plugin_id, &shared.topic, lossy);
                 }
                 mpsc::error::TrySendError::Closed(_) => {
                     if let Some(handle) = workers.remove(&plugin_id) {
@@ -185,9 +211,38 @@ fn dispatch_envelope(
                     tracing::debug!(plugin = %plugin_id, "plugin event queue worker is closed");
                 }
             }
+        } else {
+            core.record_plugin_accepted(&plugin_id);
         }
     }
-    reconcile_workers(core, &plugins, workers);
+    // No per-event reconcile: the 250 ms maintenance tick prunes dead
+    // workers, and generation fencing above handles replacement inline.
+}
+
+/// Rate-limited overload log: the per-plugin counters stay exact while
+/// the log stays sparse under sustained saturation.
+fn note_dispatch_overload(core: &AppCore, plugin_id: &str, topic: &str, lossy: bool) {
+    let now = now_millis();
+    let last = core
+        .plugin_state
+        .fanout_overload_warned_at
+        .load(Ordering::Acquire);
+    if last != 0 && now.saturating_sub(last) < 1_000 {
+        return;
+    }
+    if core
+        .plugin_state
+        .fanout_overload_warned_at
+        .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        tracing::warn!(
+            plugin = %plugin_id,
+            topic = %topic,
+            lossy,
+            "plugin event queue is full; event dropped (further drops within 1 s counted silently)"
+        );
+    }
 }
 
 /// Drops workers whose plugin can no longer receive events (uninstalled,

@@ -7,6 +7,7 @@
 
 mod delivery;
 mod eligibility;
+pub(crate) mod fanout;
 mod queue;
 mod supervisor;
 #[cfg(test)]

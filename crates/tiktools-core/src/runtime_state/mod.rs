@@ -35,6 +35,7 @@ use std::{
 use tokio::sync::Notify;
 
 use crate::{
+    plugin_events::fanout::FanoutCache,
     plugin_processors::{
         ContributionIndex, ProcessorKey, ProcessorMetrics, ProcessorSettingsStore,
         MAX_TOTAL_PROCESSOR_SLOTS,
@@ -82,6 +83,15 @@ impl Default for AutomationRuntimeState {
 pub(crate) struct PluginRuntimeState {
     pub(crate) health: Mutex<BTreeMap<String, PluginHealth>>,
     pub(crate) activation: RwLock<BTreeMap<String, PluginActivation>>,
+    /// Bumped on every activation write (enable/disable/install). The
+    /// event fan-out cache validates against this instead of re-reading
+    /// activation per plugin per event.
+    pub(crate) activation_revision: AtomicU64,
+    /// Precomputed subscription fan-out, rebuilt only when the loader or
+    /// activation revision moves.
+    pub(crate) fanout: Mutex<FanoutCache>,
+    /// Last fan-out overload warn (millis) for rate-limited logging.
+    pub(crate) fanout_overload_warned_at: AtomicU64,
     pub(crate) poll_started: AtomicBool,
     pub(crate) poll_shutdown: Arc<Notify>,
     pub(crate) poll_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -97,6 +107,9 @@ impl Default for PluginRuntimeState {
         Self {
             health: Mutex::new(BTreeMap::new()),
             activation: RwLock::new(BTreeMap::new()),
+            activation_revision: AtomicU64::new(1),
+            fanout: Mutex::new(FanoutCache::default()),
+            fanout_overload_warned_at: AtomicU64::new(0),
             poll_started: AtomicBool::new(false),
             poll_shutdown: Arc::new(Notify::new()),
             poll_task: Mutex::new(None),

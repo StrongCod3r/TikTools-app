@@ -77,11 +77,70 @@ impl AppCore {
             .sum()
     }
 
+    /// Records one accepted queue admission for per-plugin throughput
+    /// accounting. The worker decrements the queued gauge on take.
+    pub(crate) fn record_plugin_accepted(&self, plugin_id: &str) {
+        let mut stats = recover_mutex(&self.plugin_delivery, "plugin delivery");
+        let entry = stats.entry(plugin_id.to_owned()).or_default();
+        entry.accepted = entry.accepted.saturating_add(1);
+        entry.queued = entry.queued.saturating_add(1);
+    }
+
+    /// Records one shed queue admission (full queue).
+    pub(crate) fn record_plugin_queue_drop(&self, plugin_id: &str) {
+        let mut stats = recover_mutex(&self.plugin_delivery, "plugin delivery");
+        let entry = stats.entry(plugin_id.to_owned()).or_default();
+        entry.dropped = entry.dropped.saturating_add(1);
+    }
+
+    /// Releases one queued item once the worker takes it (before delivery).
+    pub(crate) fn record_plugin_taken(&self, plugin_id: &str) {
+        let mut stats = recover_mutex(&self.plugin_delivery, "plugin delivery");
+        let entry = stats.entry(plugin_id.to_owned()).or_default();
+        entry.queued = entry.queued.saturating_sub(1);
+    }
+
+    /// Records one finished delivery with its latency. Timeouts count both
+    /// as failures and as timeouts so overload is distinguishable from
+    /// ordinary plugin errors.
+    pub(crate) fn record_plugin_delivered(
+        &self,
+        plugin_id: &str,
+        latency_ms: u64,
+        failed: bool,
+        timed_out: bool,
+    ) {
+        let mut stats = recover_mutex(&self.plugin_delivery, "plugin delivery");
+        let entry = stats.entry(plugin_id.to_owned()).or_default();
+        if failed {
+            entry.failed = entry.failed.saturating_add(1);
+        } else {
+            entry.completed = entry.completed.saturating_add(1);
+        }
+        if timed_out {
+            entry.timeouts = entry.timeouts.saturating_add(1);
+        }
+        entry.latency_sum_ms = entry.latency_sum_ms.saturating_add(latency_ms);
+        entry.latency_samples = entry.latency_samples.saturating_add(1);
+    }
+
+    /// Records one worker (re)start for restart accounting.
+    pub(crate) fn record_plugin_worker_start(&self, plugin_id: &str) {
+        let mut stats = recover_mutex(&self.plugin_delivery, "plugin delivery");
+        let entry = stats.entry(plugin_id.to_owned()).or_default();
+        entry.restarts = entry.restarts.saturating_add(1);
+    }
+
     /// Read-only diagnostics snapshot for the `plugins.diagnostics` RPC:
-    /// per-plugin last event, host-side drops, and hotkey sync state.
+    /// per-plugin last event, host-side drops, delivery throughput, and
+    /// hotkey sync state.
     pub fn plugin_diagnostics(&self) -> Value {
         let last_events = recover_mutex(&self.plugin_last_events, "plugin last-event").clone();
         let drops = recover_mutex(&self.plugin_event_drops, "plugin drops").clone();
+        let delivery = crate::plugin_events::fanout::delivery_snapshot(&recover_mutex(
+            &self.plugin_delivery,
+            "plugin delivery",
+        ));
         let sync = recover_mutex(&self.hotkey_sync_state, "hotkey sync").clone();
         let desired = self.hotkey_sync_revision.load(Ordering::Acquire);
         let applied = self.hotkey_synced_revision.load(Ordering::Acquire);
@@ -92,6 +151,13 @@ impl AppCore {
             .map(|plugin| {
                 let id = plugin.manifest.id.clone();
                 let last = last_events.get(&id);
+                let throughput = delivery
+                    .iter()
+                    .find(|entry| {
+                        entry.get("pluginId").and_then(Value::as_str) == Some(id.as_str())
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
                 json!({
                     "pluginId": id,
                     "running": plugin.running,
@@ -100,6 +166,7 @@ impl AppCore {
                     "lastEventType": last.map(|event| event.event_type.clone()),
                     "lastEvent": last.map(|event| event.detail.clone()),
                     "droppedEvents": drops.get(&id).copied().unwrap_or(0),
+                    "delivery": throughput,
                 })
             })
             .collect();

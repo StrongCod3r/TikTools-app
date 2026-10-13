@@ -106,6 +106,10 @@ pub struct PluginManager {
     lifecycle: Mutex<()>,
     next_token: AtomicU64,
     emit_bus: broadcast::Sender<EmittedEvent>,
+    /// Bumped on every registry/instance mutation (scan, start, stop,
+    /// generation retirement). The host's event fan-out cache validates
+    /// against this instead of re-cloning the registry per event.
+    registry_revision: AtomicU64,
 }
 
 /// Push-bus buffer: burst headroom for guest-emitted events while core
@@ -127,7 +131,20 @@ impl PluginManager {
             lifecycle: Mutex::new(()),
             next_token: AtomicU64::new(1),
             emit_bus: broadcast::channel(EMIT_BUS_CAPACITY).0,
+            registry_revision: AtomicU64::new(1),
         }
+    }
+
+    /// Monotonic revision of registry/instance state. Any change that can
+    /// alter event delivery (install, uninstall, start, stop, generation
+    /// retirement) bumps it; the host rebuilds its cached fan-out only
+    /// when this moves.
+    pub fn registry_revision(&self) -> u64 {
+        self.registry_revision.load(Ordering::Acquire)
+    }
+
+    fn bump_registry_revision(&self) {
+        self.registry_revision.fetch_add(1, Ordering::AcqRel);
     }
 
     pub fn roots(&self) -> &[PluginRoot] {
@@ -210,6 +227,8 @@ impl PluginManager {
             .cloned()
             .map(|plugin| (plugin.manifest.id.clone(), plugin))
             .collect();
+        drop(registry);
+        self.bump_registry_revision();
         Ok(result)
     }
 
@@ -628,6 +647,7 @@ impl PluginManager {
         {
             plugin.running = running;
         }
+        self.bump_registry_revision();
     }
 
     fn remove_instance(&self, id: &str) -> Option<Arc<RunningInstance>> {

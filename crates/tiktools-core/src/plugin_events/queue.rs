@@ -11,7 +11,9 @@ pub(crate) const PLUGIN_EVENT_QUEUE_CAPACITY: usize = 64;
 
 #[derive(Debug, Clone)]
 pub(crate) struct QueuedPluginEvent {
-    pub(crate) envelope: DomainEventEnvelope,
+    /// Shared across the fan-out: one `Arc` clone per subscriber instead of
+    /// one deep JSON clone. Workers clone for serialization at delivery.
+    pub(crate) envelope: Arc<DomainEventEnvelope>,
     pub(crate) lossy: bool,
 }
 
