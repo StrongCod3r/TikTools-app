@@ -617,9 +617,26 @@ const INIT_SCRIPT: &str = r#"(function () {
     return;
   }
   window.__tiktools_transport__ = 'native';
+  if (window.__tiktools_broker_dispose__) window.__tiktools_broker_dispose__();
   var sequence = 0;
   var pending = new Map();
   var listeners = new Map();
+  var disposed = false;
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    pending.forEach(function (entry) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error('plugin host was closed'));
+    });
+    pending.clear();
+    listeners.clear();
+    window.removeEventListener('pagehide', dispose);
+    window.removeEventListener('beforeunload', dispose);
+  }
+  window.__tiktools_broker_dispose__ = dispose;
+  window.addEventListener('pagehide', dispose);
+  window.addEventListener('beforeunload', dispose);
   function fire(topic, data) {
     var watchers = listeners.get(topic);
     if (!watchers) return;
@@ -628,7 +645,7 @@ const INIT_SCRIPT: &str = r#"(function () {
     });
   }
   window.__tiktools_broker_push__ = function (envelope) {
-    if (!envelope || envelope.apiVersion !== 1) return;
+    if (disposed || !envelope || envelope.apiVersion !== 1) return;
     if (typeof envelope.event === 'string') {
       fire(envelope.event, envelope.data);
       return;
@@ -637,15 +654,28 @@ const INIT_SCRIPT: &str = r#"(function () {
     var entry = pending.get(envelope.id);
     if (!entry) return;
     pending.delete(envelope.id);
+    clearTimeout(entry.timer);
     if (envelope.ok === true) entry.resolve(envelope.result);
     else entry.reject(new Error(typeof envelope.error === 'string' ? envelope.error : 'broker error'));
   };
   function call(method, params) {
+    if (disposed) return Promise.reject(new Error('plugin host was closed'));
+    if (pending.size >= 128) return Promise.reject(new Error('plugin broker request limit reached'));
     sequence += 1;
     var id = 'plg-' + sequence;
     return new Promise(function (resolve, reject) {
-      pending.set(id, { resolve: resolve, reject: reject });
-      ipc.postMessage(JSON.stringify({ apiVersion: 1, id: id, method: method, params: params || {} }));
+      var timer = setTimeout(function () {
+        pending.delete(id);
+        reject(new Error('plugin broker request timed out'));
+      }, 30000);
+      pending.set(id, { resolve: resolve, reject: reject, timer: timer });
+      try {
+        ipc.postMessage(JSON.stringify({ apiVersion: 1, id: id, method: method, params: params || {} }));
+      } catch (error) {
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
   }
   window.tiktools = {

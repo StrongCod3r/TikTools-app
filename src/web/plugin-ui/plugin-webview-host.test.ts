@@ -233,3 +233,16 @@ test('frame URLs reject identifier and path injection', () => {
     else scope['window'] = previous;
   }
 });
+
+test('dispose during a pending backend call prevents responses to the old frame', async () => {
+  const { host, backend, send, posted } = harness();
+  let complete!: (value: Record<string, unknown>) => void;
+  backend.getSettings = () => new Promise((resolve) => { complete = resolve; });
+  const pending = send('pending', 'settings.get');
+  host.dispose();
+  host.dispose();
+  complete({ voice: 'M1' });
+  await pending;
+  await send('stale', 'events.subscribe', { topics: ['plugin.event'] });
+  expect(posted).toHaveLength(0);
+});
