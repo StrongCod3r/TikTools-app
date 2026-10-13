@@ -28,18 +28,12 @@
 //!   the pump on them would trade explicit local counters for
 //!   unpredictable upstream broadcast loss.
 //!
-//! Every admitted item is stamped with the connection generation observed
-//! at ingress. The worker drops data items from an older generation once a
-//! newer connection exists, so a reconnect can never credit stale events
-//! to the new creator. Lifecycle items always pass: they establish the
-//! generation the fence compares against.
+//! Transport stamps the original generation before publication, including
+//! lifecycle transitions. Admission never assigns identities from processing
+//! state. The worker fences superseded lifecycle and data items alike.
 //!
-//! Honest limits: the queue bounds *count* (2,048). Individual payloads
-//! are decoded TikTok structs without attachments, so worst-case retained
-//! memory is ~2,048 × one decoded event (low single-digit MiB). Upstream
-//! broadcast lag (network disconnects, replay limits) and downstream disk
-//! failures remain explicitly reported, not absorbed: a bounded queue
-//! cannot promise lossless ingestion.
+//! Capacity bounds event count, not decoded payload bytes. A transport-level
+//! payload-size policy remains required before claiming a hard byte bound.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -80,6 +74,8 @@ pub(crate) struct LiveIngressStats {
     pub(crate) stale: AtomicU64,
     /// Approximate queued items (incremented on admit, decremented on take).
     pub(crate) queued: AtomicU64,
+    /// Admitted payloads released on shutdown before processing.
+    pub(crate) cancelled: AtomicU64,
     /// Summed worker processing latency (ms) for mean computation.
     pub(crate) processing_latency_sum_ms: AtomicU64,
     /// Finished items behind the latency sum.
@@ -98,6 +94,7 @@ impl Default for LiveIngressStats {
             lagged: AtomicU64::new(0),
             stale: AtomicU64::new(0),
             queued: AtomicU64::new(0),
+            cancelled: AtomicU64::new(0),
             processing_latency_sum_ms: AtomicU64::new(0),
             processing_samples: AtomicU64::new(0),
             last_overload_warn_at: AtomicU64::new(0),
@@ -111,6 +108,7 @@ impl LiveIngressStats {
         json!({
             "capacity": INGRESS_QUEUE_CAPACITY,
             "queued": self.queued.load(Ordering::Relaxed),
+            "cancelled": self.cancelled.load(Ordering::Relaxed),
             "accepted": self.accepted.load(Ordering::Relaxed),
             "processed": self.processed.load(Ordering::Relaxed),
             "droppedData": self.dropped_data.load(Ordering::Relaxed),
@@ -185,12 +183,29 @@ pub(crate) fn classify_data_event(event: &NativeLiveEvent) -> DataClass {
 /// Admits one broadcast event into the bounded ingress queue without
 /// awaiting processing. Returns `false` only when the pump should stop
 /// (never for shed decisions: those are counted, not propagated).
-#[cfg(feature = "native-tiktok")]
+#[cfg(test)]
 pub(crate) async fn admit_event(
     core: &AppCore,
     sender: &tokio::sync::mpsc::Sender<IngressItem>,
     event: ClientEvent,
 ) {
+    admit_stamped_event(
+        core,
+        sender,
+        tiktools_tiktok::StampedClientEvent {
+            generation: core.connection_sequence.load(Ordering::Acquire),
+            event,
+        },
+    )
+    .await;
+}
+
+pub(crate) async fn admit_stamped_event(
+    core: &AppCore,
+    sender: &tokio::sync::mpsc::Sender<IngressItem>,
+    stamped: tiktools_tiktok::StampedClientEvent,
+) {
+    let tiktools_tiktok::StampedClientEvent { generation, event } = stamped;
     let stats = &core.live_ingress;
     match event {
         // Lifecycle transitions are rare and ordering-sensitive: wait for
@@ -198,44 +213,47 @@ pub(crate) async fn admit_event(
         lifecycle @ (ClientEvent::Connected(_)
         | ClientEvent::Reconnecting { .. }
         | ClientEvent::Disconnected { .. }
-        | ClientEvent::Error { .. }) => {
-            let generation = core.connection_sequence.load(Ordering::Acquire);
-            if sender
-                .send(IngressItem {
+        | ClientEvent::Error { .. }) => match sender.reserve().await {
+            Ok(permit) => publish_reserved(
+                stats,
+                permit,
+                IngressItem {
                     generation,
                     event: lifecycle,
-                })
-                .await
-                .is_err()
-            {
-                tracing::debug!("live ingress worker is gone; pump stops");
-            } else {
-                stats.accepted.fetch_add(1, Ordering::Relaxed);
-                stats.queued.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+                },
+            ),
+            Err(_) => tracing::debug!("live ingress worker is gone; pump stops"),
+        },
         ClientEvent::Event(data) => {
-            let generation = core.connection_sequence.load(Ordering::Acquire);
             let item = IngressItem {
                 generation,
                 event: ClientEvent::Event(data),
             };
             // Fast path: capacity available.
-            match sender.try_send(item) {
-                Ok(()) => {
-                    stats.accepted.fetch_add(1, Ordering::Relaxed);
-                    stats.queued.fetch_add(1, Ordering::Relaxed);
-                }
+            match sender.try_reserve() {
+                Ok(permit) => publish_reserved(stats, permit, item),
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                     tracing::debug!("live ingress worker is gone; pump stops");
                 }
-                Err(tokio::sync::mpsc::error::TrySendError::Full(item)) => {
-                    // Full queue: classify and shed or push back below.
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                     admit_full(core, sender, item).await;
                 }
             }
         }
     }
+}
+
+/// Account before publishing: the receiver may run on another Tokio worker
+/// immediately after `send`. A reserved slot has no payload and cancellation
+/// before this synchronous section simply releases the permit.
+fn publish_reserved(
+    stats: &LiveIngressStats,
+    permit: tokio::sync::mpsc::Permit<'_, IngressItem>,
+    item: IngressItem,
+) {
+    stats.accepted.fetch_add(1, Ordering::Relaxed);
+    stats.queued.fetch_add(1, Ordering::Relaxed);
+    permit.send(item);
 }
 
 #[cfg(feature = "native-tiktok")]
@@ -257,11 +275,8 @@ async fn admit_full(
     // Critical data: bounded backpressure, then an explicit, gap-reported
     // drop. Delivery beyond this point cannot be guaranteed, and the
     // counters say exactly that.
-    match tokio::time::timeout(CRITICAL_SEND_TIMEOUT, sender.send(item)).await {
-        Ok(Ok(())) => {
-            stats.accepted.fetch_add(1, Ordering::Relaxed);
-            stats.queued.fetch_add(1, Ordering::Relaxed);
-        }
+    match tokio::time::timeout(CRITICAL_SEND_TIMEOUT, sender.reserve()).await {
+        Ok(Ok(permit)) => publish_reserved(stats, permit, item),
         Ok(Err(_)) => {
             tracing::debug!("live ingress worker is gone; pump stops");
         }
@@ -303,18 +318,19 @@ pub(crate) async fn run_ingress_worker(
         // item belongs to an older session and must not be credited to the
         // current creator. Lifecycle items always pass; they establish the
         // generation this fence compares against.
-        if let ClientEvent::Event(_) = &item.event {
-            let current = core.connection_sequence.load(Ordering::Acquire);
-            if item.generation < current {
-                core.live_ingress.stale.fetch_add(1, Ordering::Relaxed);
-                core.live_ingress.processed.fetch_add(1, Ordering::Relaxed);
-                tracing::debug!(
-                    ingress_generation = item.generation,
-                    current_generation = current,
-                    "fenced stale live event from a superseded connection"
-                );
-                continue;
-            }
+        let current = core
+            .live
+            .connection_snapshot()
+            .generation
+            .max(core.connection_sequence.load(Ordering::Acquire));
+        if item.generation < current {
+            core.live_ingress.stale.fetch_add(1, Ordering::Relaxed);
+            core.live_ingress.processed.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        if matches!(&item.event, ClientEvent::Connected(_)) {
+            core.connection_sequence
+                .store(item.generation, Ordering::Release);
         }
         let started = now_millis();
         core.handle_native_event(item.event).await;
@@ -328,6 +344,10 @@ pub(crate) async fn run_ingress_worker(
     }
     // Cancellation releases every retained payload still in the queue.
     receiver.close();
+    while receiver.try_recv().is_ok() {
+        core.live_ingress.queued.fetch_sub(1, Ordering::Relaxed);
+        core.live_ingress.cancelled.fetch_add(1, Ordering::Relaxed);
+    }
     tracing::info!("live ingress worker stopped");
 }
 
@@ -605,6 +625,7 @@ mod tests {
             })
             .await
             .unwrap();
+        core.live_ingress.queued.fetch_add(1, Ordering::Relaxed);
         let shutdown = tokio_util::sync::CancellationToken::new();
         let worker = tokio::spawn(run_ingress_worker(
             Arc::clone(&core),
@@ -625,5 +646,126 @@ mod tests {
         let diagnostics = core.live_ingress.diagnostics();
         assert_eq!(diagnostics["capacity"], INGRESS_QUEUE_CAPACITY);
         assert_eq!(diagnostics["staleFenced"], 1);
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn concurrent_consumption_never_underflows_admission_gauge() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<IngressItem>(64);
+        let consumer_core = Arc::clone(&core);
+        let consumer = tokio::spawn(async move {
+            let mut taken = 0;
+            while receiver.recv().await.is_some() {
+                let before = consumer_core
+                    .live_ingress
+                    .queued
+                    .fetch_sub(1, Ordering::Relaxed);
+                assert!((1..=65).contains(&before), "invalid queue depth: {before}");
+                taken += 1;
+            }
+            taken
+        });
+        for _ in 0..100_000 {
+            // Lifecycle admission always waits, so this exercises 100,000
+            // genuine publications and concurrent takes without shedding.
+            admit_event(
+                &core,
+                &sender,
+                ClientEvent::Reconnecting {
+                    attempt: 1,
+                    delay_ms: 0,
+                },
+            )
+            .await;
+        }
+        drop(sender);
+        assert_eq!(consumer.await.unwrap(), 100_000);
+        assert_eq!(core.live_ingress.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.accepted.load(Ordering::Relaxed), 100_000);
+    }
+
+    #[tokio::test]
+    async fn cancelled_full_queue_releases_payloads_and_accounting() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, receiver) = tokio::sync::mpsc::channel(64);
+        for _ in 0..64 {
+            admit_event(&core, &sender, ClientEvent::Event(chat())).await;
+        }
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        shutdown.cancel();
+        run_ingress_worker(Arc::clone(&core), receiver, shutdown).await;
+        assert_eq!(core.live_ingress.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.cancelled.load(Ordering::Relaxed), 64);
+        assert_eq!(core.live_ingress.processed.load(Ordering::Relaxed), 0);
+        assert!(sender.is_closed());
+        assert!(core.points.viewer("spectator").is_none());
+    }
+    #[tokio::test]
+    async fn admission_preserves_original_generation_before_connected_processing() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+        for event in [
+            ClientEvent::Reconnecting {
+                attempt: 1,
+                delay_ms: 0,
+            },
+            ClientEvent::Event(chat()),
+            ClientEvent::Disconnected {
+                reason: "old".into(),
+            },
+        ] {
+            admit_stamped_event(
+                &core,
+                &sender,
+                tiktools_tiktok::StampedClientEvent {
+                    generation: 7,
+                    event,
+                },
+            )
+            .await;
+        }
+        core.connection_sequence.store(9, Ordering::Release);
+        for _ in 0..3 {
+            let item = receiver.recv().await.unwrap();
+            assert_eq!(item.generation, 7);
+            core.live_ingress.queued.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    #[tokio::test]
+    async fn superseded_disconnect_cannot_clear_new_session() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        core.connection_sequence.store(9, Ordering::Release);
+        *recover_rwlock_write(&core.connection_context, "connection context") = Some(LiveContext {
+            unique_id: "new".into(),
+            room_id: "9".into(),
+            connection_id: "connection-9".into(),
+        });
+        let (sender, receiver) = tokio::sync::mpsc::channel(8);
+        admit_stamped_event(
+            &core,
+            &sender,
+            tiktools_tiktok::StampedClientEvent {
+                generation: 2,
+                event: ClientEvent::Disconnected {
+                    reason: "stale".into(),
+                },
+            },
+        )
+        .await;
+        drop(sender);
+        run_ingress_worker(
+            Arc::clone(&core),
+            receiver,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        assert_eq!(
+            recover_rwlock_read(&core.connection_context, "connection context")
+                .as_ref()
+                .unwrap()
+                .unique_id,
+            "new"
+        );
+        assert_eq!(core.live_ingress.stale.load(Ordering::Relaxed), 1);
     }
 }

@@ -177,6 +177,11 @@ impl AppCore {
         );
         #[cfg(not(feature = "native-tiktok"))]
         let (live_pump_alive, live_worker_alive) = (false, false);
+        #[cfg(feature = "native-tiktok")]
+        let live_connection =
+            serde_json::to_value(self.live.connection_snapshot()).expect("connection snapshot");
+        #[cfg(not(feature = "native-tiktok"))]
+        let live_connection = Value::Null;
         json!({
             "status": if degraded.is_empty() { "ok" } else { "degraded" },
             "reasons": degraded,
@@ -187,6 +192,7 @@ impl AppCore {
             },
             "liveConnected": self.live.is_connected(),
             "liveGeneration": recover_rwlock_read(&self.connection_context, "connection context").as_ref().map(|context| context.connection_id.clone()),
+            "liveConnection": live_connection,
             "liveGenerationSeq": live_generation_seq,
             "liveIngress": live_ingress,
             "liveDedup": live_dedup,

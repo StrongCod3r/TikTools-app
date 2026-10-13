@@ -6,7 +6,13 @@ impl AppCore {
     #[cfg(feature = "native-tiktok")]
     pub(crate) async fn handle_native_event(self: &Arc<Self>, event: ClientEvent) {
         match event {
-            ClientEvent::Connected(info) => self.handle_connected(info).await,
+            ClientEvent::Connected(info) => {
+                let generation = self.connection_sequence.load(Ordering::Acquire);
+                self.publish_disconnected_event().await;
+                if self.live.connection_snapshot().generation == generation {
+                    self.handle_connected(info).await;
+                }
+            }
             ClientEvent::Event(event) => self.handle_live_event(event).await,
             ClientEvent::Reconnecting { attempt, delay_ms } => {
                 // Domain topic only: the legacy push was removed once the
@@ -18,7 +24,6 @@ impl AppCore {
                     });
             }
             ClientEvent::Disconnected { reason } => {
-                self.live.disconnect().await;
                 self.publish_disconnected_event().await;
                 // Native drops publish the same domain events as an explicit
                 // RPC disconnect so every origin converges on one topic.
@@ -43,7 +48,7 @@ impl AppCore {
     }
     #[cfg(feature = "native-tiktok")]
     pub(crate) async fn handle_connected(self: &Arc<Self>, info: tiktools_tiktok::ConnectionInfo) {
-        let sequence = self.connection_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        let sequence = self.connection_sequence.load(Ordering::Acquire);
         let context = LiveContext {
             unique_id: info.unique_id.clone(),
             room_id: info.room_id.clone(),
@@ -126,6 +131,19 @@ impl AppCore {
 
         #[cfg(not(feature = "persistence"))]
         let app_state = std::collections::BTreeMap::new();
+
+        if self.live.connection_snapshot().generation != sequence {
+            return;
+        }
+        self.events
+            .publish_domain(crate::events::DomainEvent::LiveConnected {
+                unique_id: Some(info.unique_id.clone()),
+                room_id: Some(info.room_id.clone()),
+            });
+        self.events
+            .publish_domain(crate::events::DomainEvent::CreatorChanged {
+                unique_id: Some(info.unique_id.clone()),
+            });
 
         // Connection/creator state travels on `live.connected` plus
         // `creator.changed` now; their legacy pushes were removed with the

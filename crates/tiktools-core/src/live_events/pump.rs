@@ -1,5 +1,5 @@
 #[cfg(feature = "native-tiktok")]
-use super::ingress::{admit_event, run_ingress_worker, INGRESS_QUEUE_CAPACITY};
+use super::ingress::{admit_stamped_event, run_ingress_worker, INGRESS_QUEUE_CAPACITY};
 use crate::*;
 
 impl AppCore {
@@ -8,7 +8,7 @@ impl AppCore {
         if self.live_pump_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        let mut receiver = self.live.subscribe();
+        let mut receiver = self.live.subscribe_stamped();
         let pump_core = Arc::clone(self);
         let lag_core = Arc::clone(self);
         tracing::info!("native TikTok event pump started");
@@ -28,13 +28,13 @@ impl AppCore {
                 match event {
                     Ok(event) => {
                         tracing::debug!(
-                            kind = client_event_kind(&event),
+                            kind = client_event_kind(&event.event),
                             "native TikTok event received"
                         );
                         tokio::select! {
                             biased;
                             () = pump_shutdown.cancelled() => break,
-                            () = admit_event(&pump_core, &sender, event) => {},
+                            () = admit_stamped_event(&pump_core, &sender, event) => {},
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
