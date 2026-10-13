@@ -121,6 +121,8 @@ pub struct AppCore {
     http_client_error: Option<String>,
     #[cfg(feature = "native-tiktok")]
     connection_sequence: AtomicU64,
+    #[cfg(feature = "native-tiktok")]
+    live_points_work: services::points_work::PointsWorkService,
     connection_context: RwLock<Option<LiveContext>>,
     #[cfg(feature = "native-tiktok")]
     live_pump_started: AtomicBool,
@@ -230,9 +232,14 @@ impl AppCore {
             }
         };
 
+        let points = Arc::new(PointsService::new(db.clone()));
+        #[cfg(feature = "native-tiktok")]
+        let live_points_work = services::points_work::PointsWorkService::new(Arc::clone(&points));
         let core = Self {
             live: Arc::new(live),
-            points: Arc::new(PointsService::new(db.clone())),
+            points,
+            #[cfg(feature = "native-tiktok")]
+            live_points_work,
             automation,
             capabilities,
             media,
@@ -514,7 +521,12 @@ impl AppCore {
         // Join the owned points writer last: every earlier shutdown step may
         // still award points (disconnect handling included), and accepted
         // writes must reach SQLite before the process exits.
-        self.points.shutdown();
+        #[cfg(feature = "native-tiktok")]
+        self.live_points_work.shutdown().await;
+        let points = Arc::clone(&self.points);
+        if let Err(error) = tokio::task::spawn_blocking(move || points.shutdown()).await {
+            tracing::error!(%error, "points writer shutdown failed");
+        }
     }
 }
 

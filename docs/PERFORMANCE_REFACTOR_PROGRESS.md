@@ -97,4 +97,34 @@ Batch 2 commit: `46ac837`.
 - Validation: all five transport lifecycle tests passed; workspace Clippy passed
   with warnings denied after removing unit-valued send bindings.
 
-Batch 3 commit: `5a-placeholder` (updated in the next documentation batch).
+Batch 3 commit: `f24e1ea` (updated in the next documentation batch).
+
+
+### Batch 5: owned bounded LIVE points execution
+
+- One `live-points` OS thread and a 128-job queue replace per-event
+  `spawn_blocking` calls and the timeout that abandoned running awards.
+- Ingress awaits the award outcome in order. Queue admission is cancellable;
+  queued callers already dropped are skipped. Executing synchronous work is not
+  forcibly cancelled and is not reported as cancelled by this service.
+- Worker retains PointsService only, not AppCore. Explicit shutdown closes
+  admission, joins the execution worker and joins the durable writer off Tokio.
+- Validation: 128 worker creation/shutdown cycles apply 1,024 exact awards,
+  return the PointsService owner count to one after each join, and reject later
+  admission. Core feature-enabled library suite: 290 passed, one RSS test ignored.
+- This fixes execution ownership, not the unresolved durable writer's sequence,
+  synchronous fallback, failure/recovery or dirty-cache correctness defects.
+- Extra lifecycle regression covers 32 simultaneous connection requests.
+- Upstream EmbeddedSigner owns an internal OS thread without an exposed join
+  handle; complete signer teardown verification remains a phase-1 limitation.
+
+Batch 4 commit: `9f1102e`.
+
+
+### Batch 6: plugin queue accounting
+
+- Per-plugin admission now reserves capacity and records acceptance before
+  publishing; consumers cannot take items ahead of their gauge increment.
+- Cancelled workers close admission and account for queued payloads they release.
+  Saturated-cancellation regression now verifies the queue gauge returns to zero.
+- Plugin queue/fan-out tests are rerun for this change.

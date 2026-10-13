@@ -182,6 +182,10 @@ impl AppCore {
             serde_json::to_value(self.live.connection_snapshot()).expect("connection snapshot");
         #[cfg(not(feature = "native-tiktok"))]
         let live_connection = Value::Null;
+        #[cfg(feature = "native-tiktok")]
+        let live_points_work = self.live_points_work.diagnostics();
+        #[cfg(not(feature = "native-tiktok"))]
+        let live_points_work = Value::Null;
         json!({
             "status": if degraded.is_empty() { "ok" } else { "degraded" },
             "reasons": degraded,
@@ -190,9 +194,11 @@ impl AppCore {
                 "reliableGaps": event_gaps,
                 "lastGapAt": last_gap_at,
             },
+            "pid": std::process::id(),
             "liveConnected": self.live.is_connected(),
             "liveGeneration": recover_rwlock_read(&self.connection_context, "connection context").as_ref().map(|context| context.connection_id.clone()),
             "liveConnection": live_connection,
+            "livePointsWork": live_points_work,
             "liveGenerationSeq": live_generation_seq,
             "liveIngress": live_ingress,
             "liveDedup": live_dedup,

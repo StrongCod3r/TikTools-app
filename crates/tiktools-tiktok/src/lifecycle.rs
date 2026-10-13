@@ -363,4 +363,32 @@ mod tests {
         assert!(owner.active.lock().await.is_none());
         owner.disconnect().await.unwrap();
     }
+    #[tokio::test]
+    async fn simultaneous_requests_keep_one_authoritative_task() {
+        let owner = Arc::new(ConnectionOwner::new());
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut requests = tokio::task::JoinSet::new();
+        for _ in 0..32 {
+            let owner = Arc::clone(&owner);
+            let count = Arc::clone(&active);
+            requests.spawn(async move {
+                owner
+                    .connect(move |generation, stop, state, ready| async move {
+                        assert_eq!(count.fetch_add(1, Ordering::SeqCst), 0);
+                        state.transition(generation, ConnectionState::Connected);
+                        let _ = ready.send(Ok(info()));
+                        stop.cancelled().await;
+                        count.fetch_sub(1, Ordering::SeqCst);
+                    })
+                    .await
+            });
+        }
+        while let Some(result) = requests.join_next().await {
+            let _ = result.unwrap();
+        }
+        assert_eq!(owner.snapshot().generation, 32);
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        owner.disconnect().await.unwrap();
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
 }

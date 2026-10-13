@@ -1,5 +1,5 @@
 use crate::*;
-#[cfg(feature = "native-tiktok")]
+#[cfg(all(feature = "native-tiktok", feature = "persistence"))]
 use std::time::Duration;
 
 impl AppCore {
@@ -226,24 +226,15 @@ impl AppCore {
         );
         let point_award = if should_award {
             let unique_id = ui_event["author"].as_str().unwrap_or("viewer").to_owned();
-            let points = Arc::clone(&self.points);
-            match tokio::time::timeout(
-                Duration::from_secs(2),
-                tokio::task::spawn_blocking(move || {
-                    points.award_points(&unique_id, action, options)
-                }),
-            )
-            .await
+            match self
+                .live_points_work
+                .award(unique_id, action, options)
+                .await
             {
-                Ok(Ok(award)) => award,
-                Ok(Err(error)) => {
-                    tracing::error!(%error, "points worker failed while handling TikTok event");
-                    None
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "points persistence exceeded 2 seconds; continuing live event delivery"
-                    );
+                Ok(award) => award,
+                Err(error) => {
+                    tracing::error!(%error, "LIVE points work was not completed");
+                    self.record_event_gap();
                     None
                 }
             }

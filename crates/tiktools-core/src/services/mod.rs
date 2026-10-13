@@ -8,6 +8,8 @@ mod live;
 mod media;
 pub(crate) mod option_sources;
 mod points;
+#[cfg(feature = "native-tiktok")]
+pub(crate) mod points_work;
 mod script;
 pub mod templates;
 pub(crate) mod token_provision;
