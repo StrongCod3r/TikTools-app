@@ -153,6 +153,17 @@ impl AppCore {
     }
     #[cfg(feature = "native-tiktok")]
     pub(crate) async fn handle_live_event(self: &Arc<Self>, event: NativeLiveEvent) {
+        // Canonical replay guard: one choke point before points,
+        // analytics, automation, and UI fan out, so a replay is either
+        // fully applied or fully skipped everywhere. The frontend keeps
+        // its own guard as defense in depth.
+        if self.live_dedup.check_duplicate(&event) {
+            tracing::debug!(
+                msg_id = event.msg_id(),
+                "skipping replayed live event; no side effects applied"
+            );
+            return;
+        }
         let automation_event = self.normalize_native_event(&event);
         let Some((mut ui_event, action, options, reason)) = self.ui_event_and_points(&event) else {
             if let Some(event) = automation_event {

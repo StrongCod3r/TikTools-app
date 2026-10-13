@@ -1,3 +1,5 @@
+#[cfg(feature = "native-tiktok")]
+pub(crate) mod dedup;
 mod handlers;
 #[cfg(feature = "native-tiktok")]
 pub(crate) mod ingress;

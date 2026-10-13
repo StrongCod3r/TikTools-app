@@ -134,6 +134,11 @@ pub struct AppCore {
     /// lagged, fenced). Always present with the native transport.
     #[cfg(feature = "native-tiktok")]
     pub(crate) live_ingress: crate::live_events::ingress::LiveIngressStats,
+    /// Canonical replay guard: exact `(type, msg_id)` replays are skipped
+    /// with a counter before any side effect. Survives reconnects by
+    /// design (replays arrive after them); bounded by TTL plus capacity.
+    #[cfg(feature = "native-tiktok")]
+    pub(crate) live_dedup: crate::live_events::dedup::LiveDedup,
     option_sources: OptionSourceService,
     pub(crate) plugin_state: PluginRuntimeState,
     pub(crate) processor_state: ProcessorRuntimeState,
@@ -257,6 +262,8 @@ impl AppCore {
             live_ingress_task: Mutex::new(None),
             #[cfg(feature = "native-tiktok")]
             live_ingress: crate::live_events::ingress::LiveIngressStats::default(),
+            #[cfg(feature = "native-tiktok")]
+            live_dedup: crate::live_events::dedup::LiveDedup::default(),
             option_sources: OptionSourceService::new(),
             plugin_state: PluginRuntimeState {
                 activation: RwLock::new(plugin_activation),

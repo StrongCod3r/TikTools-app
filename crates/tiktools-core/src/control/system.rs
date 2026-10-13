@@ -99,6 +99,10 @@ impl AppCore {
         let live_ingress = self.live_ingress.diagnostics();
         #[cfg(not(feature = "native-tiktok"))]
         let live_ingress = Value::Null;
+        #[cfg(feature = "native-tiktok")]
+        let live_dedup = self.live_dedup.diagnostics();
+        #[cfg(not(feature = "native-tiktok"))]
+        let live_dedup = Value::Null;
         json!({
             "status": if degraded.is_empty() { "ok" } else { "degraded" },
             "reasons": degraded,
@@ -110,6 +114,7 @@ impl AppCore {
             "liveConnected": self.live.is_connected(),
             "liveGeneration": recover_rwlock_read(&self.connection_context, "connection context").as_ref().map(|context| context.connection_id.clone()),
             "liveIngress": live_ingress,
+            "liveDedup": live_dedup,
             "analytics": analytics,
             "automationActiveTasks": automation_active,
             "plugins": {
