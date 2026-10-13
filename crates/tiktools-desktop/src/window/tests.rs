@@ -328,7 +328,7 @@ async fn lagged_burst_emits_gap_and_forwarder_survives() {
             forwarded
                 .lock()
                 .expect("forwarded lock poisoned")
-                .push(notification);
+                .push(notification.to_string());
         }))
     };
     // Only terminate once the post-burst message is through, so the
@@ -389,7 +389,7 @@ async fn lossy_burst_forwards_without_gap_signal() {
             forwarded
                 .lock()
                 .expect("forwarded lock poisoned")
-                .push(notification);
+                .push(notification.to_string());
         }))
     };
     // Wait for the retained lossy backlog, then terminate cleanly.

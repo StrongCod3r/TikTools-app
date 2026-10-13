@@ -92,6 +92,9 @@ fn classify_value(value: &serde_json::Value) -> WebviewMessageClass {
     WebviewMessageClass::Critical
 }
 
+/// String entry point kept for the classification contract tests; the
+/// production paths parse once (`push`) or never (`push_value`).
+#[cfg(test)]
 pub(crate) fn classify_webview_message(message: &str) -> WebviewMessageClass {
     match serde_json::from_str::<serde_json::Value>(message) {
         Ok(value) => classify_value(&value),
@@ -193,51 +196,16 @@ impl WebviewOutbox {
         self.dropped_while_failed = 0;
     }
 
-    pub(crate) fn push(&mut self, body: String) {
-        if classify_webview_message(&body) == WebviewMessageClass::Critical {
-            if self.transport_failed {
-                self.dropped_while_failed += 1;
-                if self.dropped_while_failed == 1 || self.dropped_while_failed.is_multiple_of(256) {
-                    tracing::error!(
-                        dropped = self.dropped_while_failed,
-                        "WebView transport failed; refusing reliable backlog for a dead page"
-                    );
-                }
-                return;
-            }
-            self.reliable_bytes += body.len();
-            self.reliable.push_back(body);
-            // Loud backlog instead of silent drops: warn once when the
-            // budget is crossed, then once per additional budget of lag.
-            let backlog = self.reliable.len();
-            if backlog == MAX_RELIABLE_WEBVIEW_BACKLOG + 1
-                || (backlog > MAX_RELIABLE_WEBVIEW_BACKLOG
-                    && backlog.is_multiple_of(MAX_RELIABLE_WEBVIEW_BACKLOG))
-            {
-                tracing::error!(
-                    backlog,
-                    "WebView reliable backlog growing; RPC responses and transitions are held, not dropped"
-                );
-            }
-            // Safety policy: never evict to stay under the bounds — fail
-            // the whole transport loudly instead.
-            if self.reliable.len() > MAX_RELIABLE_MESSAGES
-                || self.reliable_bytes > MAX_RELIABLE_BYTES
-            {
-                self.transport_failed = true;
-                self.failure_pending = true;
-                tracing::error!(
-                    messages = self.reliable.len(),
-                    bytes = self.reliable_bytes,
-                    "WebView reliable backlog exceeded the safety policy; failing the transport loudly"
-                );
-            }
+    /// Enqueues an already-parsed notification: one serialization, zero
+    /// parses. The domain forwarder uses this so the hot path never
+    /// round-trips through a string.
+    pub(crate) fn push_value(&mut self, value: &serde_json::Value) {
+        let class = classify_value(value);
+        if class == WebviewMessageClass::Critical {
+            self.push_reliable(value.to_string());
             return;
         }
-        let coalesce_key = serde_json::from_str::<serde_json::Value>(&body)
-            .ok()
-            .and_then(|value| webview_coalesce_key(&value));
-        let class = classify_webview_message(&body);
+        let coalesce_key = webview_coalesce_key(value);
         if class == WebviewMessageClass::Coalescable {
             // Keep only the latest snapshot per coalesce key.
             if let Some(key) = coalesce_key.as_deref() {
@@ -246,13 +214,89 @@ impl WebviewOutbox {
             }
         }
         self.lossy.push_back(QueuedWebviewMessage {
-            body,
+            body: value.to_string(),
             class,
             coalesce_key,
         });
-        // Bounded lossy lane: shed oldest droppable feed first, then the
-        // oldest snapshot. Reliable messages live in the other lane and
-        // are never candidates here.
+        self.shed_lossy_overflow();
+    }
+
+    pub(crate) fn push(&mut self, body: String) {
+        // One parse per enqueue: the class and the coalesce key come from
+        // the same parsed value instead of parsing twice.
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(parsed) => {
+                let class = classify_value(&parsed);
+                if class == WebviewMessageClass::Critical {
+                    self.push_reliable(body);
+                    return;
+                }
+                let coalesce_key = webview_coalesce_key(&parsed);
+                if class == WebviewMessageClass::Coalescable {
+                    // Keep only the latest snapshot per coalesce key.
+                    if let Some(key) = coalesce_key.as_deref() {
+                        self.lossy
+                            .retain(|queued| queued.coalesce_key.as_deref() != Some(key));
+                    }
+                }
+                self.lossy.push_back(QueuedWebviewMessage {
+                    body,
+                    class,
+                    coalesce_key,
+                });
+                self.shed_lossy_overflow();
+            }
+            Err(_) => {
+                // Unparseable shapes default to Critical per the core rule.
+                self.push_reliable(body);
+            }
+        }
+    }
+
+    /// Reliable-lane enqueue shared by both entry points: never shed, with
+    /// the loud-backlog warnings and the fail-loud safety policy.
+    fn push_reliable(&mut self, body: String) {
+        if self.transport_failed {
+            self.dropped_while_failed += 1;
+            if self.dropped_while_failed == 1 || self.dropped_while_failed.is_multiple_of(256) {
+                tracing::error!(
+                    dropped = self.dropped_while_failed,
+                    "WebView transport failed; refusing reliable backlog for a dead page"
+                );
+            }
+            return;
+        }
+        self.reliable_bytes += body.len();
+        self.reliable.push_back(body);
+        // Loud backlog instead of silent drops: warn once when the
+        // budget is crossed, then once per additional budget of lag.
+        let backlog = self.reliable.len();
+        if backlog == MAX_RELIABLE_WEBVIEW_BACKLOG + 1
+            || (backlog > MAX_RELIABLE_WEBVIEW_BACKLOG
+                && backlog.is_multiple_of(MAX_RELIABLE_WEBVIEW_BACKLOG))
+        {
+            tracing::error!(
+                backlog,
+                "WebView reliable backlog growing; RPC responses and transitions are held, not dropped"
+            );
+        }
+        // Safety policy: never evict to stay under the bounds — fail
+        // the whole transport loudly instead.
+        if self.reliable.len() > MAX_RELIABLE_MESSAGES || self.reliable_bytes > MAX_RELIABLE_BYTES {
+            self.transport_failed = true;
+            self.failure_pending = true;
+            tracing::error!(
+                messages = self.reliable.len(),
+                bytes = self.reliable_bytes,
+                "WebView reliable backlog exceeded the safety policy; failing the transport loudly"
+            );
+        }
+    }
+
+    /// Bounded lossy lane: shed oldest droppable feed first, then the
+    /// oldest snapshot. Reliable messages live in the other lane and
+    /// are never candidates here.
+    fn shed_lossy_overflow(&mut self) {
         while self.lossy.len() > MAX_PENDING_WEBVIEW_MESSAGES {
             if let Some(index) = self
                 .lossy
@@ -298,8 +342,11 @@ pub(crate) struct ForwardMailbox {
 }
 
 impl ForwardMailbox {
-    pub(crate) fn push(&mut self, message: String) -> bool {
-        self.outbox.push(message);
+    /// Value entry point for the domain forwarder: no string round-trip.
+    /// This is the only mailbox admission: every producer funnels through
+    /// the bounded outbox, never around it.
+    pub(crate) fn push_value(&mut self, value: &serde_json::Value) -> bool {
+        self.outbox.push_value(value);
         if self.wake_pending {
             return false;
         }
@@ -332,8 +379,7 @@ mod mailbox_tests {
     fn high_rate_snapshots_have_one_wake_and_one_latest_snapshot() {
         let mut mailbox = ForwardMailbox::default();
         for n in 0..10_000 {
-            let wake =
-                mailbox.push(serde_json::json!({"type":"room-stats", "viewers":n}).to_string());
+            let wake = mailbox.push_value(&serde_json::json!({"type":"room-stats", "viewers":n}));
             assert_eq!(wake, n == 0);
         }
         let (batch, failed, wake) = mailbox.drain();
@@ -347,10 +393,72 @@ mod mailbox_tests {
     }
 
     #[test]
+    fn value_path_classifies_without_reparsing() {
+        let mut mailbox = ForwardMailbox::default();
+        // Critical via the value path lands in the reliable lane.
+        assert!(mailbox.push_value(&serde_json::json!({"type": "rpc-response", "id": 1})));
+        // Feed via the value path is droppable; snapshots coalesce.
+        let feed = serde_json::json!({"method": "event", "params": {"topic": "live.ui-event"}});
+        for _ in 0..10 {
+            mailbox.push_value(&feed);
+        }
+        let stats =
+            serde_json::json!({"method": "event", "params": {"topic": "room.stats", "n": 1}});
+        mailbox.push_value(&stats);
+        let stats2 =
+            serde_json::json!({"method": "event", "params": {"topic": "room.stats", "n": 2}});
+        mailbox.push_value(&stats2);
+        let (batch, failed, wake) = mailbox.drain();
+        assert!(!failed);
+        assert!(!wake);
+        // 1 reliable + 10 feed + 1 coalesced snapshot (n=2 replaced n=1).
+        assert_eq!(batch.len(), 12);
+        assert!(batch[0].contains("rpc-response"));
+        assert!(
+            batch
+                .iter()
+                .filter(|line| line.contains("room.stats"))
+                .count()
+                == 1
+        );
+        assert!(batch.last().is_some_and(|line| line.contains("\"n\":2")));
+    }
+
+    #[test]
+    fn forced_teardown_while_saturated_releases_everything() {
+        let mut mailbox = ForwardMailbox::default();
+        // Saturate the reliable lane past the safety policy while feed
+        // keeps arriving, as during teardown under load.
+        for index in 0..MAX_RELIABLE_MESSAGES + 64 {
+            mailbox.push_value(&serde_json::json!({"type": "rpc-response", "id": index}));
+        }
+        for _ in 0..MAX_PENDING_WEBVIEW_MESSAGES + 64 {
+            mailbox.push_value(
+                &serde_json::json!({"method": "event", "params": {"topic": "live.ui-event"}}),
+            );
+        }
+        // Forced teardown: the page is gone mid-burst.
+        let (batch, failed, wake) = mailbox.drain();
+        assert!(failed, "saturation must surface as transport failure");
+        assert!(
+            batch.is_empty(),
+            "failed transport clears instead of delivering"
+        );
+        assert!(!wake);
+        // Recovery bounds the fresh page: functional, empty, and quiet.
+        mailbox.recover();
+        assert!(mailbox.push_value(&serde_json::json!({"type": "rpc-response", "id": "after"})));
+        let (batch, failed, wake) = mailbox.drain();
+        assert!(!failed);
+        assert!(!wake);
+        assert_eq!(batch.len(), 1);
+    }
+
+    #[test]
     fn reliable_proxy_backlog_fails_loudly_and_recovers() {
         let mut mailbox = ForwardMailbox::default();
         for _ in 0..MAX_RELIABLE_MESSAGES + 1 {
-            mailbox.push("{}".into());
+            mailbox.push_value(&serde_json::json!({}));
         }
         let (batch, failed, wake) = mailbox.drain();
         assert!(failed);
@@ -358,7 +466,7 @@ mod mailbox_tests {
         assert!(!wake);
         assert!(mailbox.outbox.transport_failed());
         mailbox.recover();
-        assert!(mailbox.push("{}".into()));
+        assert!(mailbox.push_value(&serde_json::json!({})));
         assert_eq!(mailbox.drain().0.len(), 1);
     }
 }

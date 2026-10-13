@@ -119,7 +119,7 @@ impl DesktopApp {
                 let wake = mailbox
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .push(notification);
+                    .push_value(notification);
                 if wake {
                     let _ =
                         proxy.send_event(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch));

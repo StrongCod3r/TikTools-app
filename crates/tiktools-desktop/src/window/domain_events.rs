@@ -9,10 +9,14 @@ use tiktools_core::AppCore;
 /// complete stream; lossy lag just skips. Only a closed channel or the
 /// shutdown event terminates the forwarder, so a temporary burst never
 /// permanently disables WebView events.
+///
+/// The sink receives the notification [`Value`](serde_json::Value), not a
+/// string: serializing here only to re-parse at the outbox would waste a
+/// full round-trip per event on the hot path.
 pub(crate) async fn forward_domain_events(
     mut events: tiktools_core::events::DomainSubscription,
     core: Arc<AppCore>,
-    mut send: impl FnMut(String),
+    mut send: impl FnMut(&serde_json::Value),
 ) {
     use tiktools_core::events::DomainRecvError;
     loop {
@@ -24,7 +28,7 @@ pub(crate) async fn forward_domain_events(
                     "WebView domain event receiver lagged on the reliable lane"
                 );
                 core.record_event_gap();
-                send(tiktools_control_api::gap_notification(lost).to_string());
+                send(&tiktools_control_api::gap_notification(lost));
                 continue;
             }
             Err(DomainRecvError::LossyLagged(skipped)) => {
@@ -38,7 +42,7 @@ pub(crate) async fn forward_domain_events(
         };
         let shutdown = matches!(event, tiktools_core::events::DomainEvent::Shutdown);
         let notification = tiktools_control_api::event_notification(&event);
-        send(notification.to_string());
+        send(&notification);
         if shutdown {
             break;
         }
