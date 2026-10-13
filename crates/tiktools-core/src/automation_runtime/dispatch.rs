@@ -296,19 +296,46 @@ impl AppCore {
             matched = matched.len(),
             "automation matching completed"
         );
-        self.run_matched_records(matched, &event).await;
+        // Live revalidation: matched records waited behind bounded
+        // admission, and a record (or its owning plugin) may have been
+        // disabled or removed meanwhile. Stale clones never execute here.
+        // Explicit manual fires bypass this via `run_matched_records`.
+        let started = now_millis();
+        let live: Vec<Value> = matched
+            .into_iter()
+            .filter(|record| self.automation.is_record_live(record))
+            .collect();
+        self.run_matched_records(live, &event).await;
+        self.automation_state
+            .events_completed
+            .fetch_add(1, Ordering::Relaxed);
+        self.automation_state
+            .exec_latency_sum_ms
+            .fetch_add(now_millis().saturating_sub(started), Ordering::Relaxed);
     }
 
     /// Claim + execute loop shared by live fan-out and manual fire: one
     /// cooldown claim per record, then every referenced action, for real.
+    /// Outcomes are counted so overload (rejected admissions) stays
+    /// distinguishable from plugin failures.
     async fn run_matched_records(self: &Arc<Self>, records: Vec<Value>, event: &Value) {
         for record in records {
             if !self.automation.claim_event(&record, event, now_millis()) {
                 continue;
             }
             for action in self.automation.actions_for_event(&record) {
-                self.execute_action(&action, event, Some(&record), false)
+                let run = self
+                    .execute_action(&action, event, Some(&record), false)
                     .await;
+                if run.get("status").and_then(Value::as_str) == Some("ok") {
+                    self.automation_state
+                        .actions_ok
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.automation_state
+                        .actions_failed
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }

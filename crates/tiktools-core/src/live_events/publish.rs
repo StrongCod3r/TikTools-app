@@ -44,17 +44,35 @@ impl AppCore {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
         let Ok(permit) = Arc::clone(&self.automation_state.slots).try_acquire_owned() else {
+            self.automation_state
+                .rejected
+                .fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 event_type,
                 "automation concurrency limit reached; dropping automation work only (domain event already delivered)"
             );
             return;
         };
+        self.automation_state
+            .admitted
+            .fetch_add(1, Ordering::Relaxed);
         let core = Arc::clone(self);
+        let shutdown = self.plugin_state.observer_shutdown.clone();
         tokio::spawn(async move {
+            // Cancellation is observed between stages: a shutdown never
+            // waits for queued automation, and queued work never runs
+            // after the observers it reports to are gone.
+            if shutdown.is_cancelled() {
+                return;
+            }
             // Enrichment runs inside the automation slot so a slow processor
             // delays only its own event; failures fail open to the raw event.
+            // It already short-circuits when no processors match, so idle
+            // rooms pay no enrichment cost.
             let enriched = core.enrich_automation_event(event).await;
+            if shutdown.is_cancelled() {
+                return;
+            }
             core.remember_automation_event(&enriched);
             Box::pin(core.run_automation_event(enriched)).await;
             drop(permit);

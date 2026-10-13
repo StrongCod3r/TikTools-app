@@ -62,6 +62,15 @@ pub(crate) struct AutomationRuntimeState {
     /// backlog.
     #[cfg(feature = "native-tiktok")]
     pub(crate) slots: Arc<tokio::sync::Semaphore>,
+    /// Saturation diagnostics: admitted vs. rejected automation work.
+    pub(crate) admitted: AtomicU64,
+    pub(crate) rejected: AtomicU64,
+    /// Execution diagnostics: finished live events, action outcomes, and
+    /// summed execution latency (ms) for mean computation.
+    pub(crate) events_completed: AtomicU64,
+    pub(crate) actions_ok: AtomicU64,
+    pub(crate) actions_failed: AtomicU64,
+    pub(crate) exec_latency_sum_ms: AtomicU64,
 }
 
 impl Default for AutomationRuntimeState {
@@ -75,6 +84,12 @@ impl Default for AutomationRuntimeState {
             sequence: AtomicU64::new(0),
             #[cfg(feature = "native-tiktok")]
             slots: Arc::new(tokio::sync::Semaphore::new(32)),
+            admitted: AtomicU64::new(0),
+            rejected: AtomicU64::new(0),
+            events_completed: AtomicU64::new(0),
+            actions_ok: AtomicU64::new(0),
+            actions_failed: AtomicU64::new(0),
+            exec_latency_sum_ms: AtomicU64::new(0),
         }
     }
 }

@@ -66,6 +66,18 @@ impl AppCore {
             32usize.saturating_sub(self.automation_state.slots.available_permits());
         #[cfg(not(feature = "native-tiktok"))]
         let automation_active = 0usize;
+        let automation_admitted = self.automation_state.admitted.load(Ordering::Relaxed);
+        let automation_rejected = self.automation_state.rejected.load(Ordering::Relaxed);
+        let automation_completed = self
+            .automation_state
+            .events_completed
+            .load(Ordering::Relaxed);
+        let automation_ok = self.automation_state.actions_ok.load(Ordering::Relaxed);
+        let automation_failed = self.automation_state.actions_failed.load(Ordering::Relaxed);
+        let automation_latency = self
+            .automation_state
+            .exec_latency_sum_ms
+            .load(Ordering::Relaxed);
         let plugins = self.plugins.list();
         let running = plugins.iter().filter(|plugin| plugin.running).count();
         let unavailable = plugins.iter().filter(|plugin| !plugin.available).count();
@@ -117,6 +129,19 @@ impl AppCore {
             "liveDedup": live_dedup,
             "analytics": analytics,
             "automationActiveTasks": automation_active,
+            "automation": {
+                "activeTasks": automation_active,
+                "admitted": automation_admitted,
+                "rejected": automation_rejected,
+                "eventsCompleted": automation_completed,
+                "actionsOk": automation_ok,
+                "actionsFailed": automation_failed,
+                "meanLatencyMs": if automation_completed == 0 {
+                    Value::Null
+                } else {
+                    json!(automation_latency as f64 / automation_completed as f64)
+                },
+            },
             "plugins": {
                 "total": plugins.len(),
                 "running": running,

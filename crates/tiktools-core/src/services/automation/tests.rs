@@ -140,3 +140,60 @@ fn poll_responses_keep_only_declared_typed_events() {
     assert!(parsed.events.is_empty());
     assert_eq!(parsed.invalid, 1);
 }
+
+#[test]
+fn cooldown_tracking_stays_bounded_without_changing_decisions() {
+    let service = AutomationService::default();
+    let record = json!({
+        "id": "event", "enabled": true, "trigger": "tiktok.chat",
+        "filters": [], "cooldownMs": 1_000, "cooldownScope": "user",
+        "actionIds": [],
+    });
+    // One claim per distinct viewer: attacker-controlled cardinality.
+    for id in 0..9_000 {
+        let event = json!({"type": "tiktok.chat", "user": {"uniqueId": format!("viewer-{id}")}});
+        assert!(service.claim_event(&record, &event, 1_000));
+    }
+    let retained = service
+        .cooldowns
+        .lock()
+        .map(|map| map.len())
+        .unwrap_or(usize::MAX);
+    assert!(
+        retained <= 8_192,
+        "cooldown map must stay bounded, got {retained}"
+    );
+    // Recent keys still decide correctly after the amortized sweeps.
+    let recent = json!({"type": "tiktok.chat", "user": {"uniqueId": "viewer-8999"}});
+    assert!(!service.claim_event(&record, &recent, 1_500));
+    assert!(service.claim_event(&record, &recent, 2_001));
+}
+
+#[test]
+fn stale_records_are_not_live_after_disable_or_remove() {
+    let service = AutomationService::default();
+    let snapshot = |enabled: bool| {
+        json!({
+            "actions": [{"id": "action", "enabled": true}],
+            "events": [{
+                "id": "event", "enabled": enabled, "trigger": "tiktok.chat",
+                "filters": [], "actionIds": ["action"],
+            }],
+        })
+    };
+    service.replace_snapshot(&snapshot(true));
+    let event = json!({"type": "tiktok.chat", "user": {"uniqueId": "alice"}});
+    let record = service
+        .matching_events(&event)
+        .pop()
+        .expect("record matches while enabled");
+    assert!(service.is_record_live(&record));
+    // Disabled between match and execution: stale, must not execute.
+    service.replace_snapshot(&snapshot(false));
+    assert!(!service.is_record_live(&record));
+    // Removed entirely: stale as well.
+    service.replace_snapshot(&json!({"actions": [], "events": []}));
+    assert!(!service.is_record_live(&record));
+    // Records without identity never execute.
+    assert!(!service.is_record_live(&json!({"enabled": true})));
+}
