@@ -186,33 +186,34 @@ fn dispatch_envelope(
                 pending_reliable_gaps,
             }
         });
-        let result = handle.sender.try_send(QueuedPluginEvent {
-            envelope: Arc::clone(&shared),
-            lossy,
-        });
-        if let Err(error) = result {
-            match error {
-                mpsc::error::TrySendError::Full(_) => {
-                    // Lossy events may be shed by design. Reliable events
-                    // make the subscriber's stream incomplete, so surface a
-                    // host-wide gap just as other reliable transports do.
-                    if !lossy && shared.topic != "event.gap" {
-                        core.record_event_gap();
-                        handle.pending_reliable_gaps.fetch_add(1, Ordering::Relaxed);
-                    }
-                    core.record_plugin_drops(&plugin_id, 1);
-                    core.record_plugin_queue_drop(&plugin_id);
-                    note_dispatch_overload(core, &plugin_id, &shared.topic, lossy);
-                }
-                mpsc::error::TrySendError::Closed(_) => {
-                    if let Some(handle) = workers.remove(&plugin_id) {
-                        handle.token.cancel();
-                    }
-                    tracing::debug!(plugin = %plugin_id, "plugin event queue worker is closed");
-                }
+        let closed = match handle.sender.try_reserve() {
+            Ok(permit) => {
+                // Account before another Tokio worker can take the item.
+                core.record_plugin_accepted(&plugin_id);
+                permit.send(QueuedPluginEvent {
+                    envelope: Arc::clone(&shared),
+                    lossy,
+                });
+                false
             }
-        } else {
-            core.record_plugin_accepted(&plugin_id);
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if !lossy && shared.topic != "event.gap" {
+                    core.record_event_gap();
+                    handle.pending_reliable_gaps.fetch_add(1, Ordering::Relaxed);
+                }
+                core.record_plugin_drops(&plugin_id, 1);
+                core.record_plugin_queue_drop(&plugin_id);
+                note_dispatch_overload(core, &plugin_id, &shared.topic, lossy);
+                false
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => true,
+        };
+        // The reserve result has been dropped before registry mutation.
+        if closed {
+            if let Some(handle) = workers.remove(&plugin_id) {
+                handle.token.cancel();
+            }
+            tracing::debug!(plugin = %plugin_id, "plugin event queue worker is closed");
         }
     }
     // No per-event reconcile: the 250 ms maintenance tick prunes dead

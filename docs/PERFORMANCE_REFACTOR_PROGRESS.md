@@ -127,4 +127,6 @@ Batch 4 commit: `9f1102e`.
   publishing; consumers cannot take items ahead of their gauge increment.
 - Cancelled workers close admission and account for queued payloads they release.
   Saturated-cancellation regression now verifies the queue gauge returns to zero.
-- Plugin queue/fan-out tests are rerun for this change.
+- Validation: all 11 plugin queue/fan-out tests passed, including saturated cancellation accounting.
+
+Batch 5 commit: `0653ffe`.
