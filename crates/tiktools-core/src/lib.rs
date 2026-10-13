@@ -124,6 +124,8 @@ pub struct AppCore {
     connection_context: RwLock<Option<LiveContext>>,
     #[cfg(feature = "native-tiktok")]
     live_pump_started: AtomicBool,
+    #[cfg(feature = "native-tiktok")]
+    live_pump_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     option_sources: OptionSourceService,
     pub(crate) plugin_state: PluginRuntimeState,
     pub(crate) processor_state: ProcessorRuntimeState,
@@ -241,6 +243,8 @@ impl AppCore {
             connection_context: RwLock::new(None),
             #[cfg(feature = "native-tiktok")]
             live_pump_started: AtomicBool::new(false),
+            #[cfg(feature = "native-tiktok")]
+            live_pump_task: Mutex::new(None),
             option_sources: OptionSourceService::new(),
             plugin_state: PluginRuntimeState {
                 activation: RwLock::new(plugin_activation),
@@ -447,6 +451,13 @@ impl AppCore {
         // shutdown no matter when it reaches its select point, and no
         // worker can steal the supervisor's wakeup.
         self.plugin_state.observer_shutdown.cancel();
+        #[cfg(feature = "native-tiktok")]
+        {
+            let pump = recover_mutex(&self.live_pump_task, "LIVE pump").take();
+            if let Some(pump) = pump {
+                let _ = pump.await;
+            }
+        }
         self.events
             .publish_domain(crate::events::DomainEvent::Shutdown);
         self.publish_disconnected_event().await;

@@ -74,13 +74,30 @@ impl AppCore {
         room_id: Option<&str>,
         open: bool,
     ) {
-        self.submit_analytics(crate::db::AnalyticsWrite::Session {
+        let record = crate::db::AnalyticsWrite::Session {
             creator: creator.to_owned(),
             room: room_id.map(str::to_owned),
             open,
             at: analytics_now(),
-        })
-        .await;
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.analytics_writer.submit(record),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(%error, "analytics session write not admitted");
+                self.record_event_gap();
+            }
+            Err(_) => {
+                tracing::error!(
+                    "analytics session admission deadline exceeded; session state incomplete"
+                );
+                self.record_event_gap();
+            }
+        }
         if !open {
             if let Err(error) = self.analytics_writer.flush().await {
                 tracing::error!(%error, "analytics disconnect flush incomplete");

@@ -9,15 +9,25 @@ impl AppCore {
         let mut receiver = self.live.subscribe();
         let core = Arc::clone(self);
         tracing::info!("native TikTok event pump started");
-        tokio::spawn(async move {
+        let shutdown = self.plugin_state.observer_shutdown.clone();
+        let task = tokio::spawn(async move {
             loop {
-                match receiver.recv().await {
+                let event = tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => break,
+                    event = receiver.recv() => event,
+                };
+                match event {
                     Ok(event) => {
                         tracing::debug!(
                             kind = client_event_kind(&event),
                             "native TikTok event received"
                         );
-                        core.handle_native_event(event).await;
+                        tokio::select! {
+                            biased;
+                            () = shutdown.cancelled() => break,
+                            () = core.handle_native_event(event) => {},
+                        }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
                         tracing::warn!(count, "native TikTok event receiver lagged")
@@ -29,6 +39,7 @@ impl AppCore {
                 }
             }
         });
+        *recover_mutex(&self.live_pump_task, "LIVE pump") = Some(task);
     }
     #[cfg(not(feature = "native-tiktok"))]
     pub(crate) fn start_live_event_pump(self: &Arc<Self>) {}
