@@ -489,6 +489,34 @@ impl PluginManager {
         request: &Value,
         deadline: Instant,
     ) -> Result<Value, PluginLoaderError> {
+        self.call_generation_deadline(id, request, deadline, None)
+            .await
+    }
+
+    pub fn running_generation(&self, id: &str) -> Option<u64> {
+        recover_rwlock_read(&self.instances, "plugin instances")
+            .get(id)
+            .map(|instance| instance.token)
+    }
+
+    pub async fn call_with_generation(
+        &self,
+        id: &str,
+        request: &Value,
+        timeout: Duration,
+        generation: u64,
+    ) -> Result<Value, PluginLoaderError> {
+        self.call_generation_deadline(id, request, Instant::now() + timeout, Some(generation))
+            .await
+    }
+
+    async fn call_generation_deadline(
+        &self,
+        id: &str,
+        request: &Value,
+        deadline: Instant,
+        generation: Option<u64>,
+    ) -> Result<Value, PluginLoaderError> {
         let instance = self
             .instances
             .read()
@@ -496,6 +524,11 @@ impl PluginManager {
             .get(id)
             .cloned()
             .ok_or_else(|| PluginLoaderError::NotFound(id.to_owned()))?;
+        if generation.is_some_and(|generation| generation != instance.token) {
+            return Err(PluginLoaderError::RuntimeUnavailable(
+                "plugin generation changed".into(),
+            ));
+        }
         let admission = Arc::clone(&instance.admission)
             .try_acquire_owned()
             .map_err(|_| PluginLoaderError::Overloaded(id.to_owned()))?;
@@ -564,6 +597,17 @@ impl PluginManager {
                 )))
             }
         }
+    }
+
+    /// Aggregate admission occupancy, without request payloads or plugin IDs.
+    pub fn outstanding_call_count(&self) -> usize {
+        recover_rwlock_read(&self.instances, "plugin instances")
+            .values()
+            .map(|instance| {
+                crate::worker::PLUGIN_CALL_CAPACITY
+                    .saturating_sub(instance.admission.available_permits())
+            })
+            .sum()
     }
 
     pub fn start_all(&self) -> Vec<(String, Result<(), PluginLoaderError>)> {

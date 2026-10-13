@@ -17,6 +17,7 @@ impl crate::HostEmitter for NoopEmitter {
 fn worker_handle() -> WorkerHandle {
     let (sender, _) = tokio::sync::mpsc::channel(PLUGIN_EVENT_QUEUE_CAPACITY);
     WorkerHandle {
+        generation: 0,
         sender,
         token: tokio_util::sync::CancellationToken::new(),
         pending_reliable_gaps: Arc::new(AtomicU64::new(0)),
@@ -57,6 +58,7 @@ fn repeated_pruning_cancels_workers_and_releases_queues() {
         let mut workers = BTreeMap::from([(
             "removed".to_owned(),
             WorkerHandle {
+                generation: 0,
                 sender,
                 token: token.clone(),
                 pending_reliable_gaps: Arc::new(AtomicU64::new(0)),
@@ -95,6 +97,7 @@ async fn cancelled_queue_worker_releases_core_and_pending_events() {
         super::worker::run_plugin_queue(
             Arc::clone(&core),
             "removed".to_owned(),
+            0,
             receiver,
             token,
             Arc::new(AtomicU64::new(0)),

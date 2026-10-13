@@ -73,13 +73,23 @@ impl PluginInvoker {
         plugin_id: &str,
         request: &Value,
         timeout: Duration,
+        generation: u64,
     ) -> Result<Value, InvokeError> {
         if !self.plugins.is_running(plugin_id) {
             return Err(InvokeError::Unavailable(format!(
                 "plugin `{plugin_id}` is not running"
             )));
         }
-        self.call_started(plugin_id, request, timeout).await
+        self.plugins
+            .call_with_generation(plugin_id, request, timeout, generation)
+            .await
+            .map_err(|error| match error {
+                PluginLoaderError::Timeout(_) => InvokeError::Timeout,
+                PluginLoaderError::Overloaded(_) | PluginLoaderError::RuntimeUnavailable(_) => {
+                    InvokeError::Unavailable(error.to_string())
+                }
+                error => InvokeError::Plugin(error.to_string()),
+            })
     }
 
     async fn call_started(

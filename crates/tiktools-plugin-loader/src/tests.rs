@@ -851,3 +851,49 @@ async fn napi_vm_plugin_runs_on_a_single_owner_thread() {
     assert!(!manager.is_running("tiktools.napi-vm-echo"));
     let _ = fs::remove_dir_all(root);
 }
+
+#[tokio::test]
+async fn repeated_restart_rejects_stale_generations_without_retiring_the_new_worker() {
+    let root = temp_root();
+    fs::create_dir_all(root.join("demo")).unwrap();
+    fs::write(root.join("demo/plugin.json"), r#"{"schemaVersion":2,"id":"demo","name":"Demo","version":"1.0.0","runtime":"process","entry":"index.bin"}"#).unwrap();
+    fs::write(root.join("demo/index.bin"), b"test").unwrap();
+    let mut runtimes = RuntimeRegistry::default();
+    runtimes.register(Arc::new(TestRuntime));
+    let manager =
+        PluginManager::with_runtimes(plugin_roots(root.clone(), temp_root(), None), runtimes);
+    manager.scan().unwrap();
+    let mut previous = None;
+    for _ in 0..128 {
+        manager.start("demo").unwrap();
+        let generation = manager.running_generation("demo").unwrap();
+        if let Some(stale) = previous {
+            assert!(matches!(
+                manager
+                    .call_with_generation(
+                        "demo",
+                        &serde_json::Value::Null,
+                        Duration::from_secs(1),
+                        stale
+                    )
+                    .await,
+                Err(PluginLoaderError::RuntimeUnavailable(_))
+            ));
+            assert!(manager.is_running("demo"));
+        }
+        manager
+            .call_with_generation(
+                "demo",
+                &serde_json::Value::Null,
+                Duration::from_secs(1),
+                generation,
+            )
+            .await
+            .unwrap();
+        manager.stop("demo").unwrap();
+        assert_eq!(manager.outstanding_call_count(), 0);
+        assert!(manager.running_generation("demo").is_none());
+        previous = Some(generation);
+    }
+    fs::remove_dir_all(root).unwrap();
+}

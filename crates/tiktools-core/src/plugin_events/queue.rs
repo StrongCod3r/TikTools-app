@@ -17,6 +17,7 @@ pub(crate) struct QueuedPluginEvent {
 
 /// Supervisor-owned handle for one plugin delivery worker.
 pub(crate) struct WorkerHandle {
+    pub(crate) generation: u64,
     pub(crate) sender: mpsc::Sender<QueuedPluginEvent>,
     /// Child of the observer shutdown token. Cancelled when the worker is
     /// pruned (plugin gone) or when the observer shuts down.
