@@ -1,3 +1,5 @@
+#[cfg(feature = "native-tiktok")]
+use super::ingress::{admit_event, run_ingress_worker, INGRESS_QUEUE_CAPACITY};
 use crate::*;
 
 impl AppCore {
@@ -7,14 +9,20 @@ impl AppCore {
             return;
         }
         let mut receiver = self.live.subscribe();
-        let core = Arc::clone(self);
+        let pump_core = Arc::clone(self);
+        let lag_core = Arc::clone(self);
         tracing::info!("native TikTok event pump started");
         let shutdown = self.plugin_state.observer_shutdown.clone();
-        let task = tokio::spawn(async move {
+        // The pump only receives and admits: it never awaits processing, so
+        // slow points persistence or slow plugins delay the ordered worker,
+        // never socket reception. Both tasks are owned and joined here.
+        let (sender, ingress_receiver) = tokio::sync::mpsc::channel(INGRESS_QUEUE_CAPACITY);
+        let pump_shutdown = shutdown.clone();
+        let pump = tokio::spawn(async move {
             loop {
                 let event = tokio::select! {
                     biased;
-                    () = shutdown.cancelled() => break,
+                    () = pump_shutdown.cancelled() => break,
                     event = receiver.recv() => event,
                 };
                 match event {
@@ -25,12 +33,13 @@ impl AppCore {
                         );
                         tokio::select! {
                             biased;
-                            () = shutdown.cancelled() => break,
-                            () = core.handle_native_event(event) => {},
+                            () = pump_shutdown.cancelled() => break,
+                            () = admit_event(&pump_core, &sender, event) => {},
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                        core.record_event_gap();
+                        lag_core.live_ingress.lagged.fetch_add(1, Ordering::Relaxed);
+                        lag_core.record_event_gap();
                         tracing::warn!(count, "native TikTok event receiver lagged; analytics and event stream incomplete")
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -39,8 +48,12 @@ impl AppCore {
                     }
                 }
             }
+            // Dropping the sender lets the worker drain and exit.
         });
-        *recover_mutex(&self.live_pump_task, "LIVE pump") = Some(task);
+        let worker_core = Arc::clone(self);
+        let worker = tokio::spawn(run_ingress_worker(worker_core, ingress_receiver, shutdown));
+        *recover_mutex(&self.live_pump_task, "LIVE pump") = Some(pump);
+        *recover_mutex(&self.live_ingress_task, "LIVE ingress worker") = Some(worker);
     }
     #[cfg(not(feature = "native-tiktok"))]
     pub(crate) fn start_live_event_pump(self: &Arc<Self>) {}
@@ -78,5 +91,6 @@ mod tests {
             .unwrap();
         assert_eq!(Arc::strong_count(&core), baseline);
         assert!(recover_mutex(&core.live_pump_task, "LIVE pump").is_none());
+        assert!(recover_mutex(&core.live_ingress_task, "LIVE ingress worker").is_none());
     }
 }

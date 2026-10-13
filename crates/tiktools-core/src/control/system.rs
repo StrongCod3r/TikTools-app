@@ -95,6 +95,10 @@ impl AppCore {
                 "{dropped_plugin_events} plugin event(s) dropped during validation or delivery; see plugins.diagnostics"
             ));
         }
+        #[cfg(feature = "native-tiktok")]
+        let live_ingress = self.live_ingress.diagnostics();
+        #[cfg(not(feature = "native-tiktok"))]
+        let live_ingress = Value::Null;
         json!({
             "status": if degraded.is_empty() { "ok" } else { "degraded" },
             "reasons": degraded,
@@ -105,6 +109,7 @@ impl AppCore {
             },
             "liveConnected": self.live.is_connected(),
             "liveGeneration": recover_rwlock_read(&self.connection_context, "connection context").as_ref().map(|context| context.connection_id.clone()),
+            "liveIngress": live_ingress,
             "analytics": analytics,
             "automationActiveTasks": automation_active,
             "plugins": {

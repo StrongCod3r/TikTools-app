@@ -126,6 +126,14 @@ pub struct AppCore {
     live_pump_started: AtomicBool,
     #[cfg(feature = "native-tiktok")]
     live_pump_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Ordered ingress worker: the sole consumer of the bounded LIVE queue.
+    /// Joined at shutdown after the pump so accepted events drain.
+    #[cfg(feature = "native-tiktok")]
+    live_ingress_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Bounded staged-ingestion admission counters (accepted, shed,
+    /// lagged, fenced). Always present with the native transport.
+    #[cfg(feature = "native-tiktok")]
+    pub(crate) live_ingress: crate::live_events::ingress::LiveIngressStats,
     option_sources: OptionSourceService,
     pub(crate) plugin_state: PluginRuntimeState,
     pub(crate) processor_state: ProcessorRuntimeState,
@@ -245,6 +253,10 @@ impl AppCore {
             live_pump_started: AtomicBool::new(false),
             #[cfg(feature = "native-tiktok")]
             live_pump_task: Mutex::new(None),
+            #[cfg(feature = "native-tiktok")]
+            live_ingress_task: Mutex::new(None),
+            #[cfg(feature = "native-tiktok")]
+            live_ingress: crate::live_events::ingress::LiveIngressStats::default(),
             option_sources: OptionSourceService::new(),
             plugin_state: PluginRuntimeState {
                 activation: RwLock::new(plugin_activation),
@@ -456,6 +468,14 @@ impl AppCore {
             let pump = recover_mutex(&self.live_pump_task, "LIVE pump").take();
             if let Some(pump) = pump {
                 let _ = pump.await;
+            }
+            // The pump's exit drops the ingress sender, so joining the
+            // worker next drains every accepted event before returning.
+            // Shutdown therefore never discards admitted LIVE work, and
+            // both tasks release their `Arc` references here.
+            let worker = recover_mutex(&self.live_ingress_task, "LIVE ingress worker").take();
+            if let Some(worker) = worker {
+                let _ = worker.await;
             }
         }
         self.events
