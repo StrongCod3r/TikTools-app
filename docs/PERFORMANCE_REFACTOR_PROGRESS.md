@@ -173,6 +173,7 @@ frontend type-check and lint passed. Earlier 682/40 counts are historical runs.
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
 | `cargo test --workspace --locked` | Passed; opt-in analytics RSS test ignored here |
 | `cargo test -p tiktools-core --features persistence,native-tiktok --locked` | 290 library tests + 8 throughput tests passed; one RSS test ignored here |
+| `cargo test -p tiktools-tiktok --locked` | 6 lifecycle tests passed |
 | Explicit opt-in analytics RSS test | Passed separately, 24 cycles |
 | Plugin-loader `--all-features --locked` tests | Passed |
 | Native WebView smoke with gate enabled | Passed on configured display |
@@ -181,3 +182,19 @@ frontend type-check and lint passed. Earlier 682/40 counts are historical runs.
 
 The outstanding phase-3/phase-4 work is an implementation gap, not an environment
 blocker. This draft must not be described as meeting the full definition of done.
+
+
+Frontend regression commit: `77b6967`.
+Native WebView smoke was rerun after the core execution-worker changes and passed.
+
+### Reviewable commit sequence
+
+- `4c3cb3e`: connection attempt ownership, transport generation and ingress accounting.
+- `46ac837`: unique subscriber matching and independent poll/push owners.
+- `f24e1ea`: RPC admission and frontend ownership/disposal.
+- `9f1102e`: unexpected task termination status guard.
+- `0653ffe`: owned bounded LIVE points execution and off-Tokio writer joining.
+- `9a656f0`: per-plugin reserve-before-publication and cancellation accounting.
+- `77b6967`: replay age and concurrent refresh regressions plus verification tracking.
+- The following measurement/documentation commit adds the sanitized benchmark record
+  and Python profiler changes; its hash is recorded in the PR and final report.

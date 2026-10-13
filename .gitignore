@@ -26,3 +26,6 @@ playwright/.cache/
 # The napi-vm hotkeys example commits its compiled guest entry for
 # reviewability; its node_modules are staged at build time and ignored.
 !examples/hotkey-napi-plugin/dist/
+
+# Python profiler/test bytecode.
+__pycache__/

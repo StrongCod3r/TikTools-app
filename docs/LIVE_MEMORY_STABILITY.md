@@ -1,6 +1,9 @@
 # LIVE resource ownership and memory diagnostics
 
-Audit baseline: `2f8f088c0817b1f5648ebc8222cc67d4e8fc3520` (`remake`).
+Historical audit baseline: `2f8f088c0817b1f5648ebc8222cc67d4e8fc3520` (`remake`).
+Current draft refactor baseline: `79dd1ab193cf7e8e251575d44e0a6270f7814010`.
+The full refactor remains incomplete; see [progress](PERFORMANCE_REFACTOR_PROGRESS.md)
+and the dated validation section below for unresolved P0 defects.
 
 ## Policies implemented
 
@@ -67,3 +70,31 @@ Native/plugin code already executing can ignore deadlines or block indefinitely.
 Local validation also passed workspace format/Clippy, 583 workspace Rust tests, loader all-feature/native integration, 672 scoped frontend unit tests, frontend type-check/lint/build, and the Linux desktop build. Plain `bun test` picks up Playwright files and fails; one repeat crashed the installed Bun canary. Use the repository scoped script for the passing unit suite.
 
 The processor sibling-isolation fake is explicitly modeled as native blocking code, with its original assertions retained. A real process-generation timeout/failure retires that generation and cancels queued sibling calls; the fake had previously declared process semantics while ignoring process deadlines.
+
+
+## 2026-10-13 reliability branch validation
+
+This branch is a draft refactor, not a completed memory-stability result.
+Transport task ownership, original-generation admission, queue accounting,
+fan-out uniqueness and frontend lifecycle cleanup have regression coverage.
+The upstream signer exposes no join handle for its internal OS thread;
+complete signer teardown and reconnect-in-progress visibility remain unresolved.
+Points durable ordering/recovery, dirty-cache admission and plugin startup,
+retired-worker ownership and uncooperative native isolation remain P0 work.
+
+The latest analytics-only stress run applied 98,304 records over 24 joined
+writer cycles: zero pending after each cleanup, 32 batches per cycle. Cycle 0
+RSS was 19,528 KiB; cycles 1–23 were 19,784 KiB, including warm cycle 3.
+These are post-cleanup samples of the test harness, not host idle/peak samples.
+No full-host or child thread-count comparison and no real-LIVE measurement
+has been collected. RSS remaining elevated after cleanup alone does not imply a leak.
+
+The profiler now accepts `--label` and `--phase idle|load|cleanup`, and reports
+host threads, CPU percentage and transport state/generation. Missing host RSS
+is unknown rather than zero. `system.health.pid` prevents associating another
+host's health with the sampled PID. Linux parsing regressions passed.
+
+Native WebView open/close smoke testing was explicitly enabled on the configured
+display and passed. The main Playwright suite had 3 passed and 36 failed. The
+navigation `globals.list` fake-host failure was reproduced on the exact `79dd1ab`
+baseline; other failures are untriaged and are not called pre-existing or passed.
