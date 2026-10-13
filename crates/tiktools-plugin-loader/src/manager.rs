@@ -32,6 +32,55 @@ use crate::{
 /// child before it can warm up, so the plugin can never recover.
 const PROCESS_FIRST_CALL_GRACE: Duration = Duration::from_secs(10);
 
+/// Default bound for joining a plugin worker during stop/shutdown. A guest
+/// stuck in `onUnload` or native teardown cannot block process shutdown
+/// forever: the wait is abandoned with an explicit error report (the thread
+/// keeps running and its outcome is unknown) instead of hanging. Overridable
+/// per manager so tests can prove the bound without a process-wide knob.
+pub(crate) const PLUGIN_STOP_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Default bound for the napi-vm startup handshake (`onLoad`). It runs while
+/// the global lifecycle lock is held, so it also bounds how long one stuck
+/// plugin can delay every other start/stop.
+pub(crate) const PLUGIN_START_DEADLINE: Duration = Duration::from_secs(15);
+
+/// Upper bound on workers kept for later reaping after a hot-path failure
+/// retirement. Beyond this the oldest are abandoned explicitly (logged), so
+/// a plugin failing in a tight loop cannot grow the list without bound.
+const MAX_RETIRED_WORKERS: usize = 32;
+
+/// Poll interval while a bounded join waits for a worker to finish. The
+/// worker's own exit is the primary signal; this only bounds how long a
+/// missed wakeup delays the joiner.
+const JOIN_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Per-manager lifecycle deadlines. Held together so a single lock covers
+/// both bounds and a test can replace them atomically.
+#[derive(Debug, Clone, Copy)]
+struct PluginDeadlines {
+    stop: Duration,
+    start: Duration,
+}
+
+impl Default for PluginDeadlines {
+    fn default() -> Self {
+        Self {
+            stop: PLUGIN_STOP_DEADLINE,
+            start: PLUGIN_START_DEADLINE,
+        }
+    }
+}
+
+/// A worker whose join handle is owned by the manager rather than by the
+/// caller that observed the failure. The hot path that retires a failed
+/// generation cannot block on a join, so it hands the handle here; reaping
+/// is opportunistic (every later retire/stop/shutdown) and bounded.
+struct RetiredWorker {
+    id: String,
+    token: u64,
+    worker: Option<thread::JoinHandle<Result<(), PluginLoaderError>>>,
+}
+
 /// Maps a poisoned lock to a typed loader error. The poisoning is logged
 /// with the shared lock-recovery target so poisoned failures stay visible
 /// in telemetry instead of crashing the host.
@@ -110,6 +159,17 @@ pub struct PluginManager {
     /// generation retirement). The host's event fan-out cache validates
     /// against this instead of re-cloning the registry per event.
     registry_revision: AtomicU64,
+    /// Lifecycle join bounds. Per manager (not process-wide env reads on the
+    /// stop path) so one manager's deadline cannot be shortened by another
+    /// manager, and tests can inject a short bound without a global.
+    deadlines: Mutex<PluginDeadlines>,
+    /// Workers retired by a failure observed on the hot path, awaiting an
+    /// opportunistic bounded reap. Ownership is retained here: a handle is
+    /// never dropped without its outcome being joined or explicitly
+    /// abandoned.
+    retired: Mutex<Vec<RetiredWorker>>,
+    /// Workers explicitly abandoned past a deadline (outcome unknown).
+    abandoned_workers: AtomicU64,
 }
 
 /// Push-bus buffer: burst headroom for guest-emitted events while core
@@ -132,7 +192,15 @@ impl PluginManager {
             next_token: AtomicU64::new(1),
             emit_bus: broadcast::channel(EMIT_BUS_CAPACITY).0,
             registry_revision: AtomicU64::new(1),
+            deadlines: Mutex::new(PluginDeadlines::default()),
+            retired: Mutex::new(Vec::new()),
+            abandoned_workers: AtomicU64::new(0),
         }
+    }
+
+    /// Lifecycle join bounds in force.
+    fn deadlines(&self) -> PluginDeadlines {
+        *recover_mutex(&self.deadlines, "plugin deadlines")
     }
 
     /// Monotonic revision of registry/instance state. Any change that can
@@ -256,13 +324,29 @@ impl PluginManager {
             .lifecycle
             .lock()
             .map_err(|_| lock_poisoned("plugin lifecycle"))?;
-        if self
-            .instances
-            .read()
-            .map_err(|_| lock_poisoned("plugin instances"))?
-            .contains_key(id)
-        {
-            return Ok(());
+        // A worker that died without a caller observing it still holds its
+        // map entry; `contains_key` alone would report it running forever
+        // and refuse to restart it. Only a live generation short-circuits
+        // here — a finished one is retired (ownership retained) and this
+        // start spawns a fresh generation. The lookup guard is dropped
+        // before retiring: retirement takes the instances write lock, and
+        // an edition-2021 `if let` would otherwise hold the read guard
+        // across that call.
+        let existing = recover_rwlock_read(&self.instances, "plugin instances")
+            .get(id)
+            .cloned();
+        if let Some(existing) = existing {
+            if !existing.worker_finished() {
+                return Ok(());
+            }
+            tracing::warn!(
+                id = %id,
+                token = existing.token,
+                "plugin worker exited without being observed; retiring the dead generation"
+            );
+            if let Some(instance) = self.retire_generation_locked(id, existing.token) {
+                self.retire_instance(id, existing.token, instance);
+            }
         }
         let plugin = self
             .get(id)
@@ -295,7 +379,7 @@ impl PluginManager {
         // Runtimes with an owned worker (napi-vm) serve the call queue on
         // their own thread, bypassing the generic worker: one thread per
         // plugin instead of two, with identical queue/deadline semantics.
-        let worker_ctx = WorkerContext::new(self.emit_bus.clone());
+        let worker_ctx = WorkerContext::new(self.emit_bus.clone(), self.deadlines().start);
         let (tx, worker) = if let Some(owned) =
             runtime.spawn_worker(&plugin.manifest, &plugin.directory, &worker_ctx)
         {
@@ -366,7 +450,20 @@ impl PluginManager {
                 .lifecycle
                 .lock()
                 .map_err(|_| lock_poisoned("plugin lifecycle"))?;
-            self.remove_instance(id)
+            let removed = self.remove_instance(id);
+            if let Some(instance) = removed.as_ref() {
+                // Close admission and ask the worker to stop while the
+                // lifecycle lock is still held: a start of the same id
+                // cannot slip in between the removal and the shutdown
+                // request, so two generations never coexist for one id.
+                instance.admission.close();
+                let _ = instance.tx.send(WorkerMsg::Shutdown);
+            }
+            // The flag flips under the same lock hold that removed the
+            // instance, so an old stop can never clear a newer start's
+            // running state.
+            self.set_running(id, false);
+            removed
         };
         self.finish_stop(id, instance)
     }
@@ -379,17 +476,23 @@ impl PluginManager {
     fn stop_for_shutdown(&self, id: &str) {
         let instance = {
             let _lifecycle = recover_mutex(&self.lifecycle, "plugin lifecycle");
-            self.remove_instance(id)
+            let removed = self.remove_instance(id);
+            if let Some(instance) = removed.as_ref() {
+                instance.admission.close();
+                let _ = instance.tx.send(WorkerMsg::Shutdown);
+            }
+            self.set_running(id, false);
+            removed
         };
         if let Err(error) = self.finish_stop(id, instance) {
             tracing::warn!(id = %id, %error, "plugin shutdown failed");
         }
     }
 
-    /// Shuts down an already-removed instance: asks the worker to stop,
-    /// takes its handle (recovering a poisoned worker lock, since the
-    /// instance is already out of the map), joins it, and clears the
-    /// running flag. Shared by the strict [`Self::stop`] and the
+    /// Joins an already-stopped instance within the stop deadline. The
+    /// caller has already removed it from the map and asked it to stop
+    /// under the lifecycle lock, so a poisoned worker lock recovers instead
+    /// of failing the stop. Shared by the strict [`Self::stop`] and the
     /// best-effort shutdown path.
     fn finish_stop(
         &self,
@@ -397,7 +500,6 @@ impl PluginManager {
         instance: Option<Arc<RunningInstance>>,
     ) -> Result<(), PluginLoaderError> {
         let Some(instance) = instance else {
-            self.set_running(id, false);
             tracing::debug!(id = %id, "plugin stop requested while not running");
             return Ok(());
         };
@@ -406,19 +508,13 @@ impl PluginManager {
         // with no matching `stopped`.
         let stop_started = std::time::Instant::now();
         tracing::info!(id = %id, "plugin stopping");
-        instance.admission.close();
-        let _ = instance.tx.send(WorkerMsg::Shutdown);
         // The instance is already removed from the map here, so a
         // poisoned worker lock recovers instead of failing the stop.
         let worker = recover_mutex(&instance.worker, "plugin worker").take();
         let result = match worker {
-            Some(worker) => worker
-                .join()
-                .map_err(|_| PluginLoaderError::Runtime(format!("plugin `{id}` worker panicked")))
-                .and_then(|inner| inner),
+            Some(worker) => self.join_worker(id, worker, self.deadlines().stop),
             None => Ok(()),
         };
-        self.set_running(id, false);
         match &result {
             Ok(()) => tracing::info!(
                 id = %id,
@@ -432,7 +528,42 @@ impl PluginManager {
                 "plugin stop failed"
             ),
         }
+        self.reap_retired();
         result
+    }
+
+    /// Joins one worker within `deadline`. Polling `is_finished` is the
+    /// only way to bound a std join without handing the handle to another
+    /// thread; on expiry the handle is dropped (the thread detaches) and
+    /// the abandonment is reported explicitly, mirroring the LIVE ingress
+    /// ladder: bounded, with an "outcome unknown" report instead of a hang.
+    fn join_worker(
+        &self,
+        id: &str,
+        worker: thread::JoinHandle<Result<(), PluginLoaderError>>,
+        deadline: Duration,
+    ) -> Result<(), PluginLoaderError> {
+        let started = Instant::now();
+        while !worker.is_finished() {
+            if started.elapsed() >= deadline {
+                self.abandoned_workers.fetch_add(1, Ordering::Relaxed);
+                tracing::error!(
+                    id = %id,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    deadline_ms = deadline.as_millis() as u64,
+                    "plugin worker missed the stop deadline; abandoning the thread (outcome unknown)"
+                );
+                return Err(PluginLoaderError::Runtime(format!(
+                    "plugin `{id}` worker did not stop within {}ms; thread abandoned with unknown outcome",
+                    deadline.as_millis()
+                )));
+            }
+            thread::sleep(JOIN_POLL_INTERVAL);
+        }
+        worker
+            .join()
+            .map_err(|_| PluginLoaderError::Runtime(format!("plugin `{id}` worker panicked")))
+            .and_then(|inner| inner)
     }
 
     pub fn stop_all(&self) {
@@ -443,6 +574,9 @@ impl PluginManager {
         for id in ids {
             self.stop_for_shutdown(&id);
         }
+        // Shutdown is the last structured chance to join retired workers
+        // before the manager itself is dropped.
+        self.reap_retired();
     }
 
     pub async fn call(&self, id: &str, request: &Value) -> Result<Value, PluginLoaderError> {
@@ -654,12 +788,13 @@ impl PluginManager {
         recover_rwlock_write(&self.instances, "plugin instances").remove(id)
     }
 
-    /// Retires the instance generation identified by `token`; a newer start
-    /// is never disturbed. The worker is asked to stop but not joined, so a
-    /// stuck plugin cannot block the hot path that observed the failure.
-    fn remove_failed_worker(&self, id: &str, token: u64) {
+    /// Removes the instance generation `token` (only if it is still the
+    /// current one), closes its admission and asks it to stop. The caller
+    /// must already hold the lifecycle lock, so a concurrent start of the
+    /// same id can never be mislabelled or left running alongside the
+    /// generation being retired.
+    fn retire_generation_locked(&self, id: &str, token: u64) -> Option<Arc<RunningInstance>> {
         let removed = {
-            let _lifecycle = recover_mutex(&self.lifecycle, "plugin lifecycle");
             let mut instances = recover_rwlock_write(&self.instances, "plugin instances");
             if instances
                 .get(id)
@@ -670,18 +805,136 @@ impl PluginManager {
                 None
             }
         };
-        if let Some(instance) = removed {
+        if let Some(instance) = removed.as_ref() {
             instance.admission.close();
             let _ = instance.tx.send(WorkerMsg::Shutdown);
+        }
+        if removed.is_some() {
             self.set_running(id, false);
         }
+        removed
+    }
+
+    /// Retires the instance generation identified by `token`; a newer start
+    /// is never disturbed. The hot path that observed the failure cannot
+    /// block on a join, so the worker's handle keeps its owner here and is
+    /// reaped (bounded) later instead of being dropped unobserved.
+    fn remove_failed_worker(&self, id: &str, token: u64) {
+        let removed = {
+            let _lifecycle = recover_mutex(&self.lifecycle, "plugin lifecycle");
+            self.retire_generation_locked(id, token)
+        };
+        if let Some(instance) = removed {
+            self.retire_instance(id, token, instance);
+        }
+    }
+
+    /// Hands a retired worker's join handle to the manager for bounded
+    /// reaping. Never blocks: the caller may be serving a call. The list is
+    /// bounded, and overflow abandons the oldest threads explicitly with
+    /// the same report as a missed stop deadline.
+    fn retire_instance(&self, id: &str, token: u64, instance: Arc<RunningInstance>) {
+        let worker = recover_mutex(&instance.worker, "plugin worker").take();
+        let mut retired = recover_mutex(&self.retired, "plugin retired workers");
+        while retired.len() >= MAX_RETIRED_WORKERS {
+            let oldest = retired.remove(0);
+            self.abandoned_workers.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                id = %oldest.id,
+                token = oldest.token,
+                "retired plugin worker backlog is full; abandoning the oldest thread (outcome unknown)"
+            );
+            drop(oldest.worker);
+        }
+        retired.push(RetiredWorker {
+            id: id.to_owned(),
+            token,
+            worker,
+        });
+    }
+
+    /// Joins every retired worker that has already finished and logs its
+    /// outcome; still-running ones stay for a later pass. Bounded: it never
+    /// waits on a live thread, so it is safe on the hot path.
+    fn reap_retired(&self) {
+        let finished: Vec<RetiredWorker> = {
+            let mut retired = recover_mutex(&self.retired, "plugin retired workers");
+            let mut finished = Vec::new();
+            let mut kept = Vec::new();
+            for entry in retired.drain(..) {
+                match &entry.worker {
+                    Some(worker) if !worker.is_finished() => kept.push(entry),
+                    _ => finished.push(entry),
+                }
+            }
+            *retired = kept;
+            finished
+        };
+        for entry in finished {
+            let Some(worker) = entry.worker else { continue };
+            match worker.join() {
+                Ok(Ok(())) => tracing::info!(
+                    id = %entry.id,
+                    token = entry.token,
+                    "retired plugin worker stopped"
+                ),
+                Ok(Err(error)) => tracing::warn!(
+                    id = %entry.id,
+                    token = entry.token,
+                    %error,
+                    "retired plugin worker exited with an error"
+                ),
+                Err(_) => tracing::warn!(
+                    id = %entry.id,
+                    token = entry.token,
+                    "retired plugin worker panicked"
+                ),
+            }
+        }
+    }
+
+    /// Workers still awaiting an opportunistic reap (diagnostics).
+    pub fn retired_worker_count(&self) -> usize {
+        recover_mutex(&self.retired, "plugin retired workers")
+            .iter()
+            .filter(|entry| entry.worker.is_some())
+            .count()
+    }
+
+    /// Workers explicitly abandoned past a deadline, outcome unknown
+    /// (diagnostics). Zero in the healthy case.
+    pub fn abandoned_worker_count(&self) -> u64 {
+        self.abandoned_workers.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for PluginManager {
+    /// Last-chance reap: every retained join handle is either joined (its
+    /// outcome logged) or already accounted as abandoned. Without this a
+    /// manager dropped mid-flight would detach its retired threads
+    /// unobserved.
+    fn drop(&mut self) {
+        self.reap_retired();
     }
 }
 
 #[cfg(test)]
 impl PluginManager {
-    /// Poisons one running instance's worker lock so tests can exercise
-    /// the stop-path recovery. Test-only; production code never calls this.
+    /// Test-only: replace the stop join bound, so tests can prove the
+    /// deadline without waiting the production five seconds. Production
+    /// code never calls this.
+    pub(crate) fn set_stop_deadline_for_test(&self, deadline: Duration) {
+        recover_mutex(&self.deadlines, "plugin deadlines").stop = deadline;
+    }
+
+    /// Test-only: replace the startup handshake bound (see
+    /// [`Self::set_stop_deadline_for_test`]).
+    pub(crate) fn set_start_deadline_for_test(&self, deadline: Duration) {
+        recover_mutex(&self.deadlines, "plugin deadlines").start = deadline;
+    }
+
+    /// Test-only: poison one running instance's worker lock so tests can
+    /// exercise the stop-path recovery. Test-only; production code never calls this.
     pub(crate) fn poison_worker_for_test(&self, id: &str) {
         if let Ok(instances) = self.instances.read() {
             if let Some(instance) = instances.get(id) {
@@ -719,5 +972,15 @@ impl PluginManager {
         let instance = instances.get(id)?;
         let worker = instance.worker.lock().ok()?;
         worker.as_ref()?.thread().name().map(str::to_owned)
+    }
+
+    /// Test-only: whether the mapped worker for `id` has exited (or its
+    /// handle was taken). Lets a test wait out a dead-but-mapped generation
+    /// deterministically instead of guessing a thread schedule.
+    pub(crate) fn worker_finished_for_test(&self, id: &str) -> bool {
+        recover_rwlock_read(&self.instances, "plugin instances")
+            .get(id)
+            .map(|instance| instance.worker_finished())
+            .unwrap_or(true)
     }
 }

@@ -58,6 +58,18 @@ pub(crate) struct RunningInstance {
     pub(crate) worker: Mutex<Option<thread::JoinHandle<Result<(), PluginLoaderError>>>>,
 }
 
+impl RunningInstance {
+    /// True once the worker thread has exited, or its handle was already
+    /// taken by a stop. Used by `start` so a generation that died without
+    /// being observed is restarted instead of being reported as running
+    /// forever.
+    pub(crate) fn worker_finished(&self) -> bool {
+        tiktools_plugin_api::sync::recover_mutex(&self.worker, "plugin worker")
+            .as_ref()
+            .is_none_or(thread::JoinHandle::is_finished)
+    }
+}
+
 pub(crate) fn run_instance_worker(
     id: String,
     mut instance: Box<dyn PluginInstance>,

@@ -99,17 +99,33 @@ pub struct EmittedEvent {
 /// per-plugin channels the manager could never drain.
 pub struct WorkerContext {
     emit_tx: tokio::sync::broadcast::Sender<EmittedEvent>,
+    /// Startup-handshake bound the runtime must honour before reporting a
+    /// load failure. Owned by the manager so one stuck plugin cannot freeze
+    /// every other start/stop for longer than this.
+    start_deadline: std::time::Duration,
 }
 
 impl WorkerContext {
-    pub(crate) fn new(emit_tx: tokio::sync::broadcast::Sender<EmittedEvent>) -> Self {
-        Self { emit_tx }
+    pub(crate) fn new(
+        emit_tx: tokio::sync::broadcast::Sender<EmittedEvent>,
+        start_deadline: std::time::Duration,
+    ) -> Self {
+        Self {
+            emit_tx,
+            start_deadline,
+        }
     }
 
     /// Clone the push-bus sender for guest-emitted events. `send` is
     /// synchronous and never blocks, so owner threads use it directly.
     pub fn emit_sender(&self) -> tokio::sync::broadcast::Sender<EmittedEvent> {
         self.emit_tx.clone()
+    }
+
+    /// How long a runtime may take to report a finished load (`onLoad`,
+    /// native addon init) before the manager treats it as a failed start.
+    pub fn start_deadline(&self) -> std::time::Duration {
+        self.start_deadline
     }
 }
 

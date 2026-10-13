@@ -897,3 +897,308 @@ async fn repeated_restart_rejects_stale_generations_without_retiring_the_new_wor
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3: plugin worker lifecycle & isolation.
+// ---------------------------------------------------------------------------
+
+/// Gate a wedged worker's `shutdown()` waits on, so a test can prove the
+/// stop deadline abandons it and release it afterwards (so the abandoned
+/// thread exits instead of leaking into later tests).
+struct ShutdownGate(std::sync::Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>);
+
+impl ShutdownGate {
+    fn new() -> Self {
+        Self(std::sync::Arc::new((
+            std::sync::Mutex::new(false),
+            std::sync::Condvar::new(),
+        )))
+    }
+
+    fn release(&self) {
+        let (lock, condvar) = &*self.0;
+        *lock.lock().unwrap() = true;
+        condvar.notify_all();
+    }
+}
+
+struct WedgedShutdownRuntime {
+    gate: ShutdownGate,
+}
+
+struct WedgedShutdownInstance {
+    id: String,
+    gate: ShutdownGate,
+}
+
+impl PluginRuntime for WedgedShutdownRuntime {
+    fn kind(&self) -> PluginRuntimeKind {
+        PluginRuntimeKind::Native
+    }
+
+    fn load(
+        &self,
+        manifest: &PluginManifest,
+        _directory: &Path,
+    ) -> Result<Box<dyn PluginInstance>, PluginLoaderError> {
+        Ok(Box::new(WedgedShutdownInstance {
+            id: manifest.id.clone(),
+            gate: ShutdownGate(std::sync::Arc::clone(&self.gate.0)),
+        }))
+    }
+}
+
+impl PluginInstance for WedgedShutdownInstance {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn handle_message(&mut self, _request: &[u8]) -> Result<Vec<u8>, PluginLoaderError> {
+        Ok(b"null".to_vec())
+    }
+
+    fn shutdown(&mut self) -> Result<(), PluginLoaderError> {
+        let (lock, condvar) = &*self.gate.0;
+        let mut released = lock.lock().unwrap();
+        while !*released {
+            released = condvar.wait(released).unwrap();
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn stop_abandons_a_wedged_worker_after_the_deadline_instead_of_hanging() {
+    let gate = ShutdownGate::new();
+    let root = temp_root();
+    write_plugin_with_runtime(&root, "wedged", "native");
+    let mut runtimes = RuntimeRegistry::default();
+    runtimes.register(Arc::new(WedgedShutdownRuntime {
+        gate: ShutdownGate(std::sync::Arc::clone(&gate.0)),
+    }) as Arc<dyn PluginRuntime>);
+    let manager = PluginManager::with_runtimes(
+        vec![PluginRoot {
+            path: root.clone(),
+            source: PluginSource::Development,
+        }],
+        runtimes,
+    );
+    manager.scan().unwrap();
+    manager.start("wedged").unwrap();
+    manager.set_stop_deadline_for_test(Duration::from_millis(100));
+
+    let started = Instant::now();
+    let stopped = manager.stop("wedged");
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(stopped, Err(PluginLoaderError::Runtime(_))),
+        "a wedged worker must fail the stop with a typed error, got {stopped:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the stop must give up at the deadline, not join forever (took {elapsed:?})"
+    );
+    assert_eq!(
+        manager.abandoned_worker_count(),
+        1,
+        "the abandoned thread must be counted, not silently detached"
+    );
+    assert!(
+        !manager.is_running("wedged"),
+        "the instance must already be out of the map when the stop gives up"
+    );
+    // Release the wedged worker so the abandoned thread exits instead of
+    // outliving the test.
+    gate.release();
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Runtime whose first owned worker thread exits immediately (a worker that
+/// died before any caller observed it) and whose later starts fall back to
+/// the generic worker, so the restarted generation can answer a call.
+struct DeadWorkerThenGenericRuntime {
+    spawns: std::sync::atomic::AtomicUsize,
+}
+
+impl PluginRuntime for DeadWorkerThenGenericRuntime {
+    fn kind(&self) -> PluginRuntimeKind {
+        PluginRuntimeKind::Native
+    }
+
+    fn load(
+        &self,
+        manifest: &PluginManifest,
+        _directory: &Path,
+    ) -> Result<Box<dyn PluginInstance>, PluginLoaderError> {
+        Ok(Box::new(TestInstance {
+            id: manifest.id.clone(),
+        }))
+    }
+
+    fn spawn_worker(
+        &self,
+        _manifest: &PluginManifest,
+        _directory: &Path,
+        _ctx: &WorkerContext,
+    ) -> Option<Result<ManagedWorker, PluginLoaderError>> {
+        if self
+            .spawns
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            == 0
+        {
+            // The manager maps this instance as running, but the worker
+            // thread is already finished — exactly the dead-but-mapped
+            // generation `start` must detect and retire.
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let worker = std::thread::spawn(|| Ok::<(), PluginLoaderError>(()));
+            Some(Ok(ManagedWorker::new(tx, worker)))
+        } else {
+            None
+        }
+    }
+}
+
+#[tokio::test]
+async fn start_retires_a_dead_but_mapped_worker_and_spawns_a_fresh_generation() {
+    let root = temp_root();
+    write_plugin_with_runtime(&root, "demo", "native");
+    let mut runtimes = RuntimeRegistry::default();
+    runtimes.register(Arc::new(DeadWorkerThenGenericRuntime {
+        spawns: std::sync::atomic::AtomicUsize::new(0),
+    }) as Arc<dyn PluginRuntime>);
+    let manager = PluginManager::with_runtimes(
+        vec![PluginRoot {
+            path: root.clone(),
+            source: PluginSource::Development,
+        }],
+        runtimes,
+    );
+    manager.scan().unwrap();
+
+    manager.start("demo").unwrap();
+    let dead_token = manager.running_generation("demo").unwrap();
+    assert!(manager.is_running("demo"));
+    // Wait out the dead worker thread deterministically.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !manager.worker_finished_for_test("demo") && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        manager.worker_finished_for_test("demo"),
+        "the first generation's worker must have exited by now"
+    );
+
+    // Without the dead-generation check this returned Ok and left the map
+    // pointing at a worker that can never answer again.
+    manager.start("demo").unwrap();
+    let fresh_token = manager.running_generation("demo").unwrap();
+    assert_ne!(
+        dead_token, fresh_token,
+        "a dead generation must be replaced, not reported as already running"
+    );
+    let answer = manager
+        .call("demo", &serde_json::json!({"type": "poll"}))
+        .await;
+    assert!(
+        answer.is_ok(),
+        "the fresh generation must answer, got {answer:?}"
+    );
+    assert!(
+        manager.retired_worker_count() >= 1,
+        "the dead generation's join handle must be retained for reaping, not dropped"
+    );
+    manager.stop_all();
+    assert_eq!(
+        manager.retired_worker_count(),
+        0,
+        "shutdown must reap every retained worker"
+    );
+    assert_eq!(
+        manager.abandoned_worker_count(),
+        0,
+        "an already-finished worker must be joined, never abandoned"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn panic_retirement_keeps_join_ownership_until_the_next_reap() {
+    let (manager, root) = scripted_manager(
+        &["doomed"],
+        Arc::new(|request| {
+            if request.windows(6).any(|window| window == b"doomed") {
+                panic!("native plugin bug");
+            }
+            Ok(b"null".to_vec())
+        }),
+    );
+    manager.start("doomed").unwrap();
+    let failed = manager
+        .call_with_deadline(
+            "doomed",
+            &serde_json::json!({"type": "doomed"}),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+    assert!(failed.is_err());
+    assert!(!manager.is_running("doomed"));
+    assert_eq!(
+        manager.retired_worker_count(),
+        1,
+        "the hot path must retain the failed worker's join handle instead of dropping it"
+    );
+    // Any later lifecycle pass reaps retained handles once their thread has
+    // finished; the reap never waits on a live thread, so give the panicked
+    // worker its unwind window and re-ap pass until it is joined (its panic
+    // logged), never abandoned.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while manager.retired_worker_count() > 0 && Instant::now() < deadline {
+        manager.stop_all();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(
+        manager.retired_worker_count(),
+        0,
+        "the retained worker must be joined by an opportunistic reap"
+    );
+    assert_eq!(manager.abandoned_worker_count(), 0);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn napi_vm_startup_handshake_is_bounded_by_the_manager_deadline() {
+    let root = temp_root();
+    let staged = root.join("napi-vm-hang");
+    std::fs::create_dir_all(&staged).unwrap();
+    copy_fixture_dir(
+        &PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/napi-vm-hang"),
+        &staged,
+    );
+    let manager = PluginManager::new(vec![PluginRoot {
+        path: root.clone(),
+        source: PluginSource::Development,
+    }]);
+    manager.scan().unwrap();
+    manager.set_start_deadline_for_test(Duration::from_millis(200));
+
+    let started = Instant::now();
+    let result = manager.start("tiktools.napi-vm-hang");
+    let elapsed = started.elapsed();
+    match result {
+        Err(PluginLoaderError::Runtime(message)) => assert!(
+            message.contains("did not finish loading within"),
+            "the failure must name the missed startup deadline, got {message}"
+        ),
+        other => {
+            panic!("a guest wedged in onLoad must fail the start at the deadline, got {other:?}")
+        }
+    }
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "the start must give up at its deadline (took {elapsed:?})"
+    );
+    assert!(!manager.is_running("tiktools.napi-vm-hang"));
+    // The detached VM thread finishes its bounded load window on its own and
+    // exits when the ready send fails; nothing else to join here.
+    let _ = fs::remove_dir_all(root);
+}

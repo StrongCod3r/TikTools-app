@@ -16,7 +16,7 @@ Existing bounded queues, replay guards and compatibility interfaces must remain.
 | 1 | Transport task ownership, original stamping and stale fencing implemented. Upstream reconnect visibility and signer OS-thread teardown remain. | Partial |
 | 2 | Queue accounting and bounded owned points execution implemented. Payload-byte limits, expensive logging and complete pipeline stress validation remain. | Partial |
 | 3 | Durable FIFO ordering implemented: single ordered queue, no synchronous fallback, separate durable/resolved watermarks, atomic per-op recovery, full-reset reload gating. Real-stress throughput numbers still pending. | Complete |
-| 4 | Failed workers lose join ownership. Stop can join indefinitely. Startup handshake has no deadline. Process per-call I/O threads are detached. Replacement can race old stop's running flag. | Pending |
+| 4 | Failed workers lose join ownership. Stop can join indefinitely. Startup handshake has no deadline. Process per-call I/O threads are detached. Replacement can race old stop's running flag. | Complete (see Phase 3 below) |
 | 5 | Subscriber uniqueness, separate poll/push owners and gauge cleanup implemented. Poll generation/metrics and pushed processing isolation remain. | Partial |
 | 6 | Main RPC bounds, feed ownership, scoped/aged dedup, debounce cancellation and stale response fences implemented. Full composable/WebView/performance audit remains. | Partial |
 | 7 | Profiler thread/CPU/state labels and measured primitive comparisons added. Full host/child/scenario matrix remains unavailable. | Partial |
@@ -290,7 +290,85 @@ Validation: `cargo fmt --all -- --check`, workspace Clippy with
 `-D warnings`, workspace tests (all pass; 307 core library tests), and
 `bun run check:web` all pass. No real-LIVE measurement was collected.
 
-Phase 2 commit: `pending` (this batch).
+Phase 2 commit: `961eb26`.
+
+## Phase 3 — plugin worker lifecycle and isolation
+
+Root causes fixed:
+
+- `remove_failed_worker` dropped the worker's `JoinHandle` on the hot path:
+  the thread's outcome was never observed (join ownership lost).
+- `finish_stop`, `stop_all` and `terminate_child` joined without deadlines,
+  so a guest stuck in `onUnload` or native teardown blocked stop/shutdown
+  forever.
+- The napi-vm startup handshake (`ready_rx.recv()`) had no deadline: a guest
+  wedged in `onLoad` froze every other plugin's start/stop behind the
+  lifecycle lock.
+- `set_running(id, false)` ran *after* the lifecycle lock was released, so a
+  concurrent start of the same id could be mislabelled stopped, and two
+  generations could coexist between the old instance's removal and its
+  `Shutdown` send.
+- `start()` only checked `contains_key(id)`: a worker that died without being
+  observed was reported running forever and could never be restarted.
+- The process runtime spawned a detached I/O thread per call and joined its
+  stderr drainer without a bound; the points-work worker join in
+  `AppCore::shutdown` was also unbounded.
+
+What changed (`crates/tiktools-plugin-loader`, `tiktools-core`):
+
+- Bounded joins everywhere: `join_worker` polls `is_finished` against a
+  per-manager stop deadline (default 5 s), then abandons the thread with an
+  explicit error and an `abandoned_workers` counter — the same "outcome
+  unknown" ladder as the LIVE ingress. `PluginManager::Drop` and `stop_all`
+  reap retained handles as a last chance.
+- Join ownership is retained: a hot-path failure retires the generation into
+  a bounded `retired` list (cap 32, oldest abandoned loudly on overflow);
+  `reap_retired` joins only already-finished threads, so it never blocks.
+- `RunningInstance::worker_finished()` plus a `start()` check let a
+  dead-but-mapped generation be retired (ownership kept) and replaced by a
+  fresh one instead of being reported running forever.
+- Stop and shutdown now close admission, send `Shutdown` and flip the
+  running flag *inside* the lifecycle lock hold (`retire_generation_locked`
+  shared by `start`, `stop`, `stop_for_shutdown`, `remove_failed_worker`),
+  so two generations can never coexist for one id and an old stop cannot
+  clear a newer start's flag.
+- Per-manager `PluginDeadlines { stop, start }` (not process-wide env/OnceLock
+  globals, so tests stay isolated). The napi-vm startup handshake uses
+  `ctx.start_deadline()`; a timeout sends `Shutdown`, detaches the thread
+  with an explicit report, and fails the start typed.
+- Process runtime: the per-call I/O thread is stored (`io_thread`), reaped at
+  the start of the next call and after success/timeout/disconnect with a
+  bounded join (3 s, explicit abandonment); the stderr drainer join is
+  bounded the same way; a `Builder::spawn` failure kills the child and
+  surfaces a typed error.
+- Points-work worker join bounded (30 s, matching the durable writer's
+  bound); an abandoned join is counted, reported, and degrades
+  `system.health`.
+
+Tests (new):
+
+- `stop_abandons_a_wedged_worker_after_the_deadline_instead_of_hanging`
+  (wedged-shutdown runtime, injected 100 ms stop deadline).
+- `start_retires_a_dead_but_mapped_worker_and_spawns_a_fresh_generation`
+  (owned worker that exits immediately; start must replace it).
+- `panic_retirement_keeps_join_ownership_until_the_next_reap`.
+- `napi_vm_startup_handshake_is_bounded_by_the_manager_deadline` (new
+  `napi-vm-hang` fixture whose `onLoad` blocks; injected 200 ms start
+  deadline).
+- Process: bounded helper-join success/abandonment, and a timed-out call
+  that kills the child and reaps its I/O thread.
+- Points work: a wedged worker is abandoned at the join deadline and
+  counted.
+
+Validation: `cargo fmt --all -- --check`, workspace Clippy with
+`-D warnings`, `cargo test --workspace --locked` (all pass; 308 core
+library tests, 62 plugin-loader library tests), `cargo test -p
+tiktools-core --features persistence,native-tiktok --locked`,
+`cargo test -p tiktools-tiktok --locked`, `bun run check:web`,
+`bun run contracts:check`, `bun run deps:check` all pass. No real-LIVE
+measurement was collected.
+
+Phase 3 commit: `pending` (this batch).
 
 ### Reviewable commit sequence
 
@@ -303,4 +381,5 @@ Phase 2 commit: `pending` (this batch).
 - `77b6967`: replay age and concurrent refresh regressions plus verification tracking.
 - `da366ba`: sanitized benchmark record and Python profiler changes.
 - `ed3e042`: loss-aware graceful LIVE ingress shutdown (phase 1 of this refactor).
-- This batch: durable points FIFO ordering and SQLite correctness (phase 2).
+- `961eb26`: durable points FIFO ordering and SQLite correctness (phase 2).
+- This batch: plugin worker lifecycle and isolation (phase 3).

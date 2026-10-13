@@ -196,6 +196,19 @@ impl AppCore {
         let live_points_work = self.live_points_work.diagnostics();
         #[cfg(not(feature = "native-tiktok"))]
         let live_points_work = Value::Null;
+        // An abandoned points worker means awards behind a wedge may never
+        // reach SQLite: report it as degraded health, not a buried counter.
+        #[cfg(feature = "native-tiktok")]
+        if live_points_work
+            .get("abandonedJoins")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+        {
+            degraded.push(
+                "LIVE points worker abandoned past its join deadline; queued awards may remain unresolved".to_owned(),
+            );
+        }
         json!({
             "status": if degraded.is_empty() { "ok" } else { "degraded" },
             "reasons": degraded,
