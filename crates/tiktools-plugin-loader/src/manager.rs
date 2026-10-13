@@ -326,6 +326,9 @@ impl PluginManager {
                 kind: plugin.manifest.runtime,
                 cold: AtomicBool::new(true),
                 tx,
+                admission: Arc::new(tokio::sync::Semaphore::new(
+                    crate::worker::PLUGIN_CALL_CAPACITY,
+                )),
                 worker: Mutex::new(Some(worker)),
             }),
         );
@@ -384,6 +387,7 @@ impl PluginManager {
         // with no matching `stopped`.
         let stop_started = std::time::Instant::now();
         tracing::info!(id = %id, "plugin stopping");
+        instance.admission.close();
         let _ = instance.tx.send(WorkerMsg::Shutdown);
         // The instance is already removed from the map here, so a
         // poisoned worker lock recovers instead of failing the stop.
@@ -485,8 +489,6 @@ impl PluginManager {
         request: &Value,
         deadline: Instant,
     ) -> Result<Value, PluginLoaderError> {
-        let bytes = serde_json::to_vec(request)
-            .map_err(|error| PluginLoaderError::Runtime(error.to_string()))?;
         let instance = self
             .instances
             .read()
@@ -494,6 +496,11 @@ impl PluginManager {
             .get(id)
             .cloned()
             .ok_or_else(|| PluginLoaderError::NotFound(id.to_owned()))?;
+        let admission = Arc::clone(&instance.admission)
+            .try_acquire_owned()
+            .map_err(|_| PluginLoaderError::Overloaded(id.to_owned()))?;
+        let bytes = serde_json::to_vec(request)
+            .map_err(|error| PluginLoaderError::Runtime(error.to_string()))?;
         let now = Instant::now();
         if now >= deadline {
             return Err(PluginLoaderError::Timeout(format!(
@@ -511,6 +518,7 @@ impl PluginManager {
         instance
             .tx
             .send(WorkerMsg::Call(QueuedCall {
+                admission: Some(admission),
                 request: bytes,
                 timeout: remaining,
                 deadline,
@@ -599,6 +607,7 @@ impl PluginManager {
             }
         };
         if let Some(instance) = removed {
+            instance.admission.close();
             let _ = instance.tx.send(WorkerMsg::Shutdown);
             self.set_running(id, false);
         }
