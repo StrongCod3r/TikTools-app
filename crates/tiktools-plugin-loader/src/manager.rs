@@ -326,6 +326,9 @@ impl PluginManager {
                 kind: plugin.manifest.runtime,
                 cold: AtomicBool::new(true),
                 tx,
+                admission: Arc::new(tokio::sync::Semaphore::new(
+                    crate::worker::PLUGIN_CALL_CAPACITY,
+                )),
                 worker: Mutex::new(Some(worker)),
             }),
         );
@@ -384,6 +387,7 @@ impl PluginManager {
         // with no matching `stopped`.
         let stop_started = std::time::Instant::now();
         tracing::info!(id = %id, "plugin stopping");
+        instance.admission.close();
         let _ = instance.tx.send(WorkerMsg::Shutdown);
         // The instance is already removed from the map here, so a
         // poisoned worker lock recovers instead of failing the stop.
@@ -485,8 +489,34 @@ impl PluginManager {
         request: &Value,
         deadline: Instant,
     ) -> Result<Value, PluginLoaderError> {
-        let bytes = serde_json::to_vec(request)
-            .map_err(|error| PluginLoaderError::Runtime(error.to_string()))?;
+        self.call_generation_deadline(id, request, deadline, None)
+            .await
+    }
+
+    pub fn running_generation(&self, id: &str) -> Option<u64> {
+        recover_rwlock_read(&self.instances, "plugin instances")
+            .get(id)
+            .map(|instance| instance.token)
+    }
+
+    pub async fn call_with_generation(
+        &self,
+        id: &str,
+        request: &Value,
+        timeout: Duration,
+        generation: u64,
+    ) -> Result<Value, PluginLoaderError> {
+        self.call_generation_deadline(id, request, Instant::now() + timeout, Some(generation))
+            .await
+    }
+
+    async fn call_generation_deadline(
+        &self,
+        id: &str,
+        request: &Value,
+        deadline: Instant,
+        generation: Option<u64>,
+    ) -> Result<Value, PluginLoaderError> {
         let instance = self
             .instances
             .read()
@@ -494,6 +524,16 @@ impl PluginManager {
             .get(id)
             .cloned()
             .ok_or_else(|| PluginLoaderError::NotFound(id.to_owned()))?;
+        if generation.is_some_and(|generation| generation != instance.token) {
+            return Err(PluginLoaderError::RuntimeUnavailable(
+                "plugin generation changed".into(),
+            ));
+        }
+        let admission = Arc::clone(&instance.admission)
+            .try_acquire_owned()
+            .map_err(|_| PluginLoaderError::Overloaded(id.to_owned()))?;
+        let bytes = serde_json::to_vec(request)
+            .map_err(|error| PluginLoaderError::Runtime(error.to_string()))?;
         let now = Instant::now();
         if now >= deadline {
             return Err(PluginLoaderError::Timeout(format!(
@@ -511,6 +551,7 @@ impl PluginManager {
         instance
             .tx
             .send(WorkerMsg::Call(QueuedCall {
+                admission: Some(admission),
                 request: bytes,
                 timeout: remaining,
                 deadline,
@@ -558,6 +599,17 @@ impl PluginManager {
         }
     }
 
+    /// Aggregate admission occupancy, without request payloads or plugin IDs.
+    pub fn outstanding_call_count(&self) -> usize {
+        recover_rwlock_read(&self.instances, "plugin instances")
+            .values()
+            .map(|instance| {
+                crate::worker::PLUGIN_CALL_CAPACITY
+                    .saturating_sub(instance.admission.available_permits())
+            })
+            .sum()
+    }
+
     pub fn start_all(&self) -> Vec<(String, Result<(), PluginLoaderError>)> {
         self.list()
             .into_iter()
@@ -599,6 +651,7 @@ impl PluginManager {
             }
         };
         if let Some(instance) = removed {
+            instance.admission.close();
             let _ = instance.tx.send(WorkerMsg::Shutdown);
             self.set_running(id, false);
         }

@@ -14,6 +14,7 @@ pub(crate) async fn deliver_event(
     core: &Arc<AppCore>,
     invoker: &crate::plugin_invoker::PluginInvoker,
     plugin_id: &str,
+    generation: u64,
     envelope: DomainEventEnvelope,
     lossy: bool,
 ) -> bool {
@@ -26,7 +27,12 @@ pub(crate) async fn deliver_event(
         }
     };
     match invoker
-        .call_running(plugin_id, &request, PLUGIN_EVENT_DELIVERY_TIMEOUT)
+        .call_running(
+            plugin_id,
+            &request,
+            PLUGIN_EVENT_DELIVERY_TIMEOUT,
+            generation,
+        )
         .await
     {
         Ok(_) => true,

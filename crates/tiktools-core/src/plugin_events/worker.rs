@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 pub(crate) async fn run_plugin_queue(
     core: Arc<AppCore>,
     plugin_id: String,
+    generation: u64,
     mut receiver: mpsc::Receiver<QueuedPluginEvent>,
     shutdown: tokio_util::sync::CancellationToken,
     pending_reliable_gaps: Arc<AtomicU64>,
@@ -40,18 +41,30 @@ pub(crate) async fn run_plugin_queue(
                 "event.gap",
                 json!({"lost": lost, "resync": true, "at": now_millis()}),
             );
-            if !deliver_event(&core, &invoker, &plugin_id, gap, false).await {
+            // Let the loader deadline retire failed process generations.
+            // Dropping this future on cancellation skips that cleanup path.
+            let delivered =
+                deliver_event(&core, &invoker, &plugin_id, generation, gap, false).await;
+            if !delivered {
                 // Keep the summary if a transient delivery failure happened
                 // while the plugin remained active; a stopped/crashed plugin
                 // will simply drain it when it is explicitly restarted.
                 pending_reliable_gaps.fetch_add(lost, Ordering::Relaxed);
             }
         }
-        // A cancelled shutdown token does not preempt an in-flight delivery,
-        // but no new delivery starts after cancellation is observed.
         if shutdown.is_cancelled() {
             break;
         }
-        let _ = deliver_event(&core, &invoker, &plugin_id, queued.envelope, queued.lossy).await;
+        // In-flight delivery remains bounded by the loader deadline. Awaiting
+        // it preserves process timeout cleanup before supervisor teardown.
+        let _ = deliver_event(
+            &core,
+            &invoker,
+            &plugin_id,
+            generation,
+            queued.envelope,
+            queued.lossy,
+        )
+        .await;
     }
 }

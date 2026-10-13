@@ -24,11 +24,13 @@ pub enum DesktopCommand {
         page_id: String,
     },
     PluginUiRespond {
+        window_id: winit::window::WindowId,
         plugin_id: String,
         page_id: String,
         response: String,
     },
     PluginUiSubscribe {
+        window_id: winit::window::WindowId,
         plugin_id: String,
         page_id: String,
         effect: PluginUiSubscription,

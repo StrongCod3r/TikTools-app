@@ -129,7 +129,8 @@ impl From<tiktools_plugin_loader::PluginLoaderError> for OperationError {
             tiktools_plugin_loader::PluginLoaderError::NotFound(_) => {
                 Self::not_found(error.to_string())
             }
-            tiktools_plugin_loader::PluginLoaderError::RuntimeUnavailable(_) => {
+            tiktools_plugin_loader::PluginLoaderError::RuntimeUnavailable(_)
+            | tiktools_plugin_loader::PluginLoaderError::Overloaded(_) => {
                 Self::unavailable(error.to_string())
             }
             tiktools_plugin_loader::PluginLoaderError::Timeout(_) => {

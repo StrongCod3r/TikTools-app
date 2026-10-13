@@ -57,6 +57,15 @@ impl AppCore {
     }
 
     pub fn system_health(&self) -> Value {
+        #[cfg(feature = "persistence")]
+        let analytics = self.analytics_writer.diagnostics();
+        #[cfg(not(feature = "persistence"))]
+        let analytics = Value::Null;
+        #[cfg(feature = "native-tiktok")]
+        let automation_active =
+            32usize.saturating_sub(self.automation_state.slots.available_permits());
+        #[cfg(not(feature = "native-tiktok"))]
+        let automation_active = 0usize;
         let plugins = self.plugins.list();
         let running = plugins.iter().filter(|plugin| plugin.running).count();
         let unavailable = plugins.iter().filter(|plugin| !plugin.available).count();
@@ -95,11 +104,16 @@ impl AppCore {
                 "lastGapAt": last_gap_at,
             },
             "liveConnected": self.live.is_connected(),
+            "liveGeneration": recover_rwlock_read(&self.connection_context, "connection context").as_ref().map(|context| context.connection_id.clone()),
+            "analytics": analytics,
+            "automationActiveTasks": automation_active,
             "plugins": {
                 "total": plugins.len(),
                 "running": running,
                 "unavailable": unavailable,
                 "droppedEvents": dropped_plugin_events,
+                "eventWorkers": self.plugin_state.observer_worker_count.load(Ordering::Acquire),
+                "outstandingCalls": self.plugins.outstanding_call_count(),
             },
             "processors": self.processor_list().len(),
             "shutdown": self.is_shutdown(),

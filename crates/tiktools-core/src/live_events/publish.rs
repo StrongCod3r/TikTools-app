@@ -64,7 +64,8 @@ impl AppCore {
         let context = recover_rwlock_write(&self.connection_context, "connection context").take();
         let Some(context) = context else { return };
         #[cfg(feature = "persistence")]
-        self.write_live_session(&context.unique_id, None, false);
+        self.write_live_session(&context.unique_id, None, false)
+            .await;
         self.publish_automation_event(
             self.make_automation_event_with_context(
                 "tiktok.disconnected",

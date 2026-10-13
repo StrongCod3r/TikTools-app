@@ -20,11 +20,26 @@ pub(crate) async fn run_observer(
 ) {
     let mut workers: BTreeMap<String, WorkerHandle> = BTreeMap::new();
     let mut tasks = tokio::task::JoinSet::new();
+    let mut maintenance = tokio::time::interval(std::time::Duration::from_millis(250));
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
+        core.plugin_state
+            .observer_worker_count
+            .store(tasks.len() as u64, Ordering::Release);
         tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
+            result = tasks.join_next(), if !tasks.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::warn!(%error, "plugin event worker failed");
+                }
+                workers.retain(|_, handle| !handle.sender.is_closed());
+            },
+            _ = maintenance.tick() => {
+                reconcile_workers(&core, &core.plugins.list(), &mut workers);
+                workers.retain(|_, handle| !handle.sender.is_closed());
+            },
             received = subscription.recv() => match received {
                 Ok(event) => dispatch_event(&core, event, &mut workers, &mut tasks, &shutdown),
                 Err(DomainRecvError::ReliableLagged(lost)) => {
@@ -66,6 +81,9 @@ pub(crate) async fn run_observer(
         }
     }
     tracing::info!("plugin event observer stopped");
+    core.plugin_state
+        .observer_worker_count
+        .store(0, Ordering::Release);
 }
 
 fn dispatch_event(
@@ -107,6 +125,17 @@ fn dispatch_envelope(
             continue;
         }
         let plugin_id = plugin.manifest.id.clone();
+        let Some(generation) = core.plugins.running_generation(&plugin_id) else {
+            continue;
+        };
+        if workers
+            .get(&plugin_id)
+            .is_some_and(|handle| handle.generation != generation)
+        {
+            if let Some(stale) = workers.remove(&plugin_id) {
+                stale.token.cancel();
+            }
+        }
         let handle = workers.entry(plugin_id.clone()).or_insert_with(|| {
             let (sender, receiver) = mpsc::channel(PLUGIN_EVENT_QUEUE_CAPACITY);
             let pending_reliable_gaps = Arc::new(AtomicU64::new(0));
@@ -115,11 +144,13 @@ fn dispatch_envelope(
             tasks.spawn(run_plugin_queue(
                 core,
                 plugin_id.clone(),
+                generation,
                 receiver,
                 token.clone(),
                 Arc::clone(&pending_reliable_gaps),
             ));
             WorkerHandle {
+                generation,
                 sender,
                 token,
                 pending_reliable_gaps,
@@ -168,10 +199,11 @@ pub(crate) fn reconcile_workers(
     workers: &mut BTreeMap<String, WorkerHandle>,
 ) {
     workers.retain(|plugin_id, handle| {
-        let alive = plugins
-            .iter()
-            .find(|plugin| plugin.manifest.id == *plugin_id)
-            .is_some_and(|plugin| eligible_for_delivery(core, plugin));
+        let alive = core.plugins.running_generation(plugin_id) == Some(handle.generation)
+            && plugins
+                .iter()
+                .find(|plugin| plugin.manifest.id == *plugin_id)
+                .is_some_and(|plugin| eligible_for_delivery(core, plugin));
         if !alive {
             handle.token.cancel();
             tracing::debug!(plugin = %plugin_id, "plugin event worker pruned");

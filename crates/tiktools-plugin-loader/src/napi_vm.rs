@@ -42,7 +42,10 @@
 use std::{
     collections::{BTreeMap, HashSet},
     path::{Path, PathBuf},
-    sync::{mpsc as std_mpsc, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc as std_mpsc, Arc,
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
@@ -183,6 +186,7 @@ impl PluginInstance for NapiVmPluginInstance {
         })?;
         let (respond, answer) = oneshot::channel();
         tx.send(WorkerMsg::Call(QueuedCall {
+            admission: None,
             request: request.to_vec(),
             timeout: DIRECT_CALL_TIMEOUT,
             deadline: Instant::now() + DIRECT_CALL_TIMEOUT,
@@ -575,11 +579,9 @@ fn run_vm_owner(args: VmOwnerArgs) -> Result<(), PluginLoaderError> {
     // Host-event wake: native callbacks, async completions, and finalizers
     // posted from other threads wake this loop through the command queue.
     // Bridges without threaded ingress ignore the registration.
+    let wake_pending = Arc::new(AtomicBool::new(false));
     if let Some(plugin) = host.get_mut(&name) {
-        let wake = wake_tx.clone();
-        let notifier: WakeNotifier = Arc::new(move || {
-            let _ = wake.send(WorkerMsg::HostEvent);
-        });
+        let notifier = coalesced_wake(wake_tx.clone(), Arc::clone(&wake_pending));
         plugin.interpreter_mut().set_host_wake_notifier(notifier);
     }
     // Initial pump: run anything load queued (native handshake callbacks)
@@ -592,6 +594,14 @@ fn run_vm_owner(args: VmOwnerArgs) -> Result<(), PluginLoaderError> {
         // an idle plugin sleeps with zero recurring wakeups.
         match rx.blocking_recv() {
             Some(WorkerMsg::Call(call)) => {
+                if call.respond.is_closed()
+                    || call
+                        .admission
+                        .as_ref()
+                        .is_some_and(|permit| permit.semaphore().is_closed())
+                {
+                    continue;
+                }
                 // Same queue-deadline rule as the generic worker: expire
                 // here so a timed-out caller never causes stale guest work.
                 if Instant::now() >= call.deadline {
@@ -625,7 +635,11 @@ fn run_vm_owner(args: VmOwnerArgs) -> Result<(), PluginLoaderError> {
             }
             // A native callback, async completion, or finalizer arrived:
             // fall through to the pump below.
-            Some(WorkerMsg::HostEvent) => {}
+            Some(WorkerMsg::HostEvent) => {
+                // Clear before pumping: callbacks arriving during the pump
+                // enqueue one further wake, so the reset cannot strand work.
+                wake_pending.store(false, Ordering::Release);
+            }
             Some(WorkerMsg::Shutdown) | None => break,
         }
         // Pump after every call and every wake so queued native callbacks
@@ -668,6 +682,17 @@ fn run_vm_owner(args: VmOwnerArgs) -> Result<(), PluginLoaderError> {
             Err(error)
         }
     }
+}
+
+fn coalesced_wake(
+    wake: mpsc::UnboundedSender<WorkerMsg>,
+    pending: Arc<AtomicBool>,
+) -> WakeNotifier {
+    Arc::new(move || {
+        if !pending.swap(true, Ordering::AcqRel) && wake.send(WorkerMsg::HostEvent).is_err() {
+            pending.store(false, Ordering::Release);
+        }
+    })
 }
 
 /// Guest calls slower than this warn instead of debug-logging. The poll
@@ -842,6 +867,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn callback_flood_has_one_wake_and_reset_allows_next_callback() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let pending = Arc::new(AtomicBool::new(false));
+        let wake = coalesced_wake(tx, Arc::clone(&pending));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let wake = Arc::clone(&wake);
+                std::thread::spawn(move || {
+                    for _ in 0..10_000 {
+                        wake();
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(rx.len(), 1);
+        assert!(matches!(rx.try_recv(), Ok(WorkerMsg::HostEvent)));
+        pending.store(false, Ordering::Release);
+        wake();
+        assert_eq!(rx.len(), 1);
+        drop(rx);
+        pending.store(false, Ordering::Release);
+        wake();
+        assert!(!pending.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn guest_context_carries_plugin_identity() {
         let manifest = PluginManifest::from_json_str(
             r#"{"schemaVersion":3,"id":"example.plugin","name":"Example","version":"1.0.0","runtime":"napi-vm","entry":"dist/index.js"}"#,
@@ -879,6 +933,7 @@ mod tests {
         let (tx, worker) = owned.into_parts();
         let (respond, answer) = oneshot::channel();
         tx.send(WorkerMsg::Call(QueuedCall {
+            admission: None,
             request: br#"{"type":"poll"}"#.to_vec(),
             timeout: Duration::from_secs(30),
             deadline: Instant::now() + Duration::from_secs(30),

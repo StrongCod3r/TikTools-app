@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_DB_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-fn test_manager() -> DatabaseManager {
+pub(super) fn test_manager() -> DatabaseManager {
     let sequence = TEST_DB_SEQUENCE.fetch_add(1, Ordering::SeqCst);
     let root = std::env::temp_dir().join(format!(
         "tiktools-analytics-test-{}-{}",

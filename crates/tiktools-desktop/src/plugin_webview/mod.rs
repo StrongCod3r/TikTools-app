@@ -115,6 +115,8 @@ struct PluginUiWindow {
     window: Option<Window>,
     topics: HashSet<String>,
     state: PluginWindowState,
+    ipc_shutdown: tokio::sync::watch::Sender<bool>,
+    ipc_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl Drop for PluginUiWindow {
@@ -144,6 +146,8 @@ impl PluginUiWindow {
     /// Explicit ordered teardown: child WebView, then display sync, then
     /// parent window. Safe to run twice (second run finds `None`s).
     fn teardown(&mut self) {
+        let _ = self.ipc_shutdown.send(true);
+        self.ipc_slots.close();
         for step in teardown_plan(false) {
             self.execute(step);
         }
@@ -242,9 +246,13 @@ impl PluginUiWindows {
         let navigation_plugin = target.id.clone();
         let ipc_plugin = target.id.clone();
         let ipc_page = target.page_id.clone();
+        let ipc_window_id = window.id();
         let ipc_proxy = proxy.clone();
         let ipc_runtime = runtime.clone();
         let ipc_control = control.clone();
+        let ipc_slots = Arc::new(tokio::sync::Semaphore::new(128));
+        let handler_slots = Arc::clone(&ipc_slots);
+        let (ipc_shutdown, shutdown_receiver) = tokio::sync::watch::channel(false);
         let mut builder = WebViewBuilder::new()
             .with_devtools(cfg!(debug_assertions) || cfg!(feature = "devtools"))
             .with_autoplay(true)
@@ -264,13 +272,33 @@ impl PluginUiWindows {
                 // Size-gated before queueing (same bound the broker
                 // enforces): the payload moves to Tokio for handling and
                 // the response returns through `PluginUiRespond`.
+                if request.body().len() > tiktools_control_api::MAX_REQUEST_BYTES {
+                    tracing::warn!(plugin = %ipc_plugin, "plugin broker request exceeds size limit");
+                    return;
+                }
+                let Ok(permit) = Arc::clone(&handler_slots).try_acquire_owned() else {
+                    tracing::warn!(plugin = %ipc_plugin, "plugin broker admission full or closed");
+                    return;
+                };
+                let mut cancelled = shutdown_receiver.clone();
                 let raw = request.body().clone();
                 let broker = PluginUiBroker::new(ipc_plugin.clone(), ipc_control.clone());
                 let proxy = ipc_proxy.clone();
                 let plugin_id = ipc_plugin.clone();
                 let page_id = ipc_page.clone();
                 ipc_runtime.spawn(async move {
-                    let (response, effect) = broker.handle(&raw).await;
+                    let _permit = permit;
+                    if *cancelled.borrow_and_update() { return; }
+                    let (response, effect) = tokio::select! {
+                        biased;
+                        _ = cancelled.changed() => return,
+                        result = tokio::time::timeout(std::time::Duration::from_secs(30), broker.handle(&raw)) => {
+                            match result {
+                                Ok(result) => result,
+                                Err(_) => { tracing::warn!(plugin = %plugin_id, "plugin broker host request timed out"); return; },
+                            }
+                        },
+                    };
                     // Rejections are host-side diagnostics (a page that
                     // only sees `broker error` cannot tell a bad method
                     // from a dead window): log them with owner context.
@@ -290,6 +318,7 @@ impl PluginUiWindows {
                     }
                     let _ = proxy.send_event(DesktopEvent::Command(
                         DesktopCommand::PluginUiRespond {
+                            window_id: ipc_window_id,
                             plugin_id: plugin_id.clone(),
                             page_id: page_id.clone(),
                             response,
@@ -298,6 +327,7 @@ impl PluginUiWindows {
                     if let Some(effect) = effect {
                         let _ = proxy.send_event(DesktopEvent::Command(
                             DesktopCommand::PluginUiSubscribe {
+                                window_id: ipc_window_id,
                                 plugin_id,
                                 page_id,
                                 effect: effect.into(),
@@ -331,6 +361,8 @@ impl PluginUiWindows {
                 window: Some(window),
                 topics: HashSet::new(),
                 state: PluginWindowState::Open,
+                ipc_shutdown,
+                ipc_slots,
             },
         );
         tracing::debug!(
@@ -386,6 +418,7 @@ impl PluginUiWindows {
         plugin_id: &str,
         page_id: &str,
         effect: crate::event::PluginUiSubscription,
+        window_id: WindowId,
     ) {
         let Some(window) = self
             .windows
@@ -393,6 +426,9 @@ impl PluginUiWindows {
         else {
             return;
         };
+        if window.handle().id() != window_id || window.state != PluginWindowState::Open {
+            return;
+        }
         match effect {
             crate::event::PluginUiSubscription::Subscribe(topics) => {
                 window.topics.extend(topics);
@@ -409,11 +445,13 @@ impl PluginUiWindows {
     /// responses for closed (or closing) windows are ignored safely: the
     /// entry is gone or skipped, so nothing ever evaluates script on a
     /// dead WebView.
-    pub fn respond(&self, plugin_id: &str, page_id: &str, response: &str) {
+    pub fn respond(&self, plugin_id: &str, page_id: &str, response: &str, window_id: WindowId) {
         let Some(window) = self
             .windows
             .get(&(plugin_id.to_owned(), page_id.to_owned()))
-            .filter(|entry| entry.state == PluginWindowState::Open)
+            .filter(|entry| {
+                entry.state == PluginWindowState::Open && entry.handle().id() == window_id
+            })
         else {
             return;
         };
@@ -617,9 +655,27 @@ const INIT_SCRIPT: &str = r#"(function () {
     return;
   }
   window.__tiktools_transport__ = 'native';
+  if (window.__tiktools_broker_dispose__) window.__tiktools_broker_dispose__();
   var sequence = 0;
+  var instanceId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
   var pending = new Map();
   var listeners = new Map();
+  var disposed = false;
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    pending.forEach(function (entry) {
+      clearTimeout(entry.timer);
+      entry.reject(new Error('plugin host was closed'));
+    });
+    pending.clear();
+    listeners.clear();
+    window.removeEventListener('pagehide', dispose);
+    window.removeEventListener('beforeunload', dispose);
+  }
+  window.__tiktools_broker_dispose__ = dispose;
+  window.addEventListener('pagehide', dispose);
+  window.addEventListener('beforeunload', dispose);
   function fire(topic, data) {
     var watchers = listeners.get(topic);
     if (!watchers) return;
@@ -628,7 +684,7 @@ const INIT_SCRIPT: &str = r#"(function () {
     });
   }
   window.__tiktools_broker_push__ = function (envelope) {
-    if (!envelope || envelope.apiVersion !== 1) return;
+    if (disposed || !envelope || envelope.apiVersion !== 1) return;
     if (typeof envelope.event === 'string') {
       fire(envelope.event, envelope.data);
       return;
@@ -637,15 +693,28 @@ const INIT_SCRIPT: &str = r#"(function () {
     var entry = pending.get(envelope.id);
     if (!entry) return;
     pending.delete(envelope.id);
+    clearTimeout(entry.timer);
     if (envelope.ok === true) entry.resolve(envelope.result);
     else entry.reject(new Error(typeof envelope.error === 'string' ? envelope.error : 'broker error'));
   };
   function call(method, params) {
+    if (disposed) return Promise.reject(new Error('plugin host was closed'));
+    if (pending.size >= 128) return Promise.reject(new Error('plugin broker request limit reached'));
     sequence += 1;
-    var id = 'plg-' + sequence;
+    var id = 'plg-' + instanceId + '-' + sequence;
     return new Promise(function (resolve, reject) {
-      pending.set(id, { resolve: resolve, reject: reject });
-      ipc.postMessage(JSON.stringify({ apiVersion: 1, id: id, method: method, params: params || {} }));
+      var timer = setTimeout(function () {
+        pending.delete(id);
+        reject(new Error('plugin broker request timed out'));
+      }, 30000);
+      pending.set(id, { resolve: resolve, reject: reject, timer: timer });
+      try {
+        ipc.postMessage(JSON.stringify({ apiVersion: 1, id: id, method: method, params: params || {} }));
+      } catch (error) {
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
   }
   window.tiktools = {
@@ -820,11 +889,12 @@ mod tests {
         windows.close("ghost.plugin", "main");
         windows.close_plugin("ghost.plugin");
         windows.close_plugin("ghost.plugin");
-        windows.respond("ghost.plugin", "main", r#"{"ok":true}"#);
+        windows.respond("ghost.plugin", "main", r#"{"ok":true}"#, WindowId::from(0));
         windows.apply_subscription(
             "ghost.plugin",
             "main",
             crate::event::PluginUiSubscription::Subscribe(vec!["plugin.event".to_owned()]),
+            WindowId::from(0),
         );
         windows.deliver_event("ghost.plugin", "plugin.event", &Value::Null);
         windows.forward_host_message(

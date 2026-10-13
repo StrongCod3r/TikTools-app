@@ -289,12 +289,13 @@ impl ApplicationHandler<DesktopEvent> for Driver {
                 self.on_respond(event_loop, &response);
             }
             DesktopCommand::PluginUiSubscribe {
+                window_id,
                 plugin_id,
                 page_id,
                 effect,
             } => {
                 self.windows
-                    .apply_subscription(&plugin_id, &page_id, effect);
+                    .apply_subscription(&plugin_id, &page_id, effect, window_id);
             }
             _ => {}
         }

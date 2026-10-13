@@ -288,3 +288,77 @@ impl WebviewOutbox {
         batch
     }
 }
+
+/// Bounds high-rate domain payloads before they enter Winit's proxy queue.
+/// A single payload-free wake represents the whole mailbox.
+#[derive(Default)]
+pub(crate) struct ForwardMailbox {
+    outbox: WebviewOutbox,
+    wake_pending: bool,
+}
+
+impl ForwardMailbox {
+    pub(crate) fn push(&mut self, message: String) -> bool {
+        self.outbox.push(message);
+        if self.wake_pending {
+            return false;
+        }
+        self.wake_pending = true;
+        true
+    }
+
+    pub(crate) fn drain(&mut self) -> (Vec<String>, bool, bool) {
+        self.wake_pending = false;
+        let failed = self.outbox.take_transport_failure();
+        if failed {
+            self.outbox.clear_for_reload();
+        }
+        let batch = self.outbox.take_batch();
+        let wake = !self.outbox.is_empty();
+        self.wake_pending = wake;
+        (batch, failed, wake)
+    }
+
+    pub(crate) fn recover(&mut self) {
+        self.outbox.recover_transport();
+    }
+}
+
+#[cfg(test)]
+mod mailbox_tests {
+    use super::*;
+
+    #[test]
+    fn high_rate_snapshots_have_one_wake_and_one_latest_snapshot() {
+        let mut mailbox = ForwardMailbox::default();
+        for n in 0..10_000 {
+            let wake =
+                mailbox.push(serde_json::json!({"type":"room-stats", "viewers":n}).to_string());
+            assert_eq!(wake, n == 0);
+        }
+        let (batch, failed, wake) = mailbox.drain();
+        assert!(!failed);
+        assert!(!wake);
+        assert_eq!(batch.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&batch[0]).unwrap()["viewers"],
+            9999
+        );
+    }
+
+    #[test]
+    fn reliable_proxy_backlog_fails_loudly_and_recovers() {
+        let mut mailbox = ForwardMailbox::default();
+        for _ in 0..MAX_RELIABLE_MESSAGES + 1 {
+            mailbox.push("{}".into());
+        }
+        let (batch, failed, wake) = mailbox.drain();
+        assert!(failed);
+        assert!(batch.is_empty());
+        assert!(!wake);
+        assert!(mailbox.outbox.transport_failed());
+        mailbox.recover();
+        assert!(mailbox.push("{}".into()));
+        assert_eq!(mailbox.drain().0.len(), 1);
+    }
+}

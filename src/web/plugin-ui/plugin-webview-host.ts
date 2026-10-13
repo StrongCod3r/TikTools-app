@@ -239,6 +239,7 @@ export class PluginWebviewHost {
   private readonly options: PluginWebviewHostOptions;
   private readonly frameWindow: WindowProxy | null;
   private readonly topics = new Map<string, () => void>();
+  private disposed = false;
 
   constructor(frameWindow: WindowProxy | null, options: PluginWebviewHostOptions) {
     this.frameWindow = frameWindow;
@@ -246,6 +247,8 @@ export class PluginWebviewHost {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
     for (const unsubscribe of this.topics.values()) unsubscribe();
     this.topics.clear();
   }
@@ -262,6 +265,7 @@ export class PluginWebviewHost {
    * nothing unrecognized ever reaches the backend.
    */
   async handleFrameMessage(data: unknown, source: MessageEventSource | null): Promise<void> {
+    if (this.disposed) return;
     if (source !== this.frameWindow) return;
     if (!data || typeof data !== 'object' || Array.isArray(data)) return;
     const envelope = data as Record<string, unknown>;
@@ -293,11 +297,13 @@ export class PluginWebviewHost {
     }
     try {
       const result = await this.route(method as BrokerMethod, (params ?? {}) as Record<string, unknown>);
+      if (this.disposed) return;
       if (result.effect === 'subscribed' || result.effect === 'unsubscribed') {
         this.applySubscription(result.topics, result.effect === 'subscribed');
       }
       this.respond({ apiVersion: BROKER_API_VERSION, id, ok: true, result: result.value });
     } catch (error) {
+      if (this.disposed) return;
       const message = error instanceof Error ? error.message : String(error);
       this.options.onError?.(message);
       this.respond({ apiVersion: BROKER_API_VERSION, id, ok: false, error: message });

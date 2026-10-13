@@ -11,6 +11,7 @@ mod schema;
 #[cfg(all(test, feature = "persistence"))]
 mod tests;
 mod write;
+pub(crate) mod writer;
 
 pub use aggregate::{utc_day, utc_hour};
 
@@ -101,7 +102,7 @@ CREATE INDEX IF NOT EXISTS idx_analytics_hourly_creator ON analytics_hourly (cre
 "#;
 
 /// One normalized analytics increment. All quantities, no raw text.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AnalyticsEventRecord {
     pub unique_id: String,
     pub chats: i64,

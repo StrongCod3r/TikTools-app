@@ -5,7 +5,10 @@ use std::{
 };
 
 use tiktools_plugin_api::PluginRuntimeKind;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
+
+/// Includes the executing call. Immediate rejection avoids unlimited waiters.
+pub(crate) const PLUGIN_CALL_CAPACITY: usize = 128;
 
 use crate::{PluginInstance, PluginLoaderError};
 
@@ -14,6 +17,7 @@ use crate::{PluginInstance, PluginLoaderError};
 /// requests before executing them so a timed-out caller never causes stale
 /// plugin work to accumulate.
 pub(crate) struct QueuedCall {
+    pub(crate) admission: Option<OwnedSemaphorePermit>,
     pub(crate) request: Vec<u8>,
     pub(crate) timeout: Duration,
     pub(crate) deadline: Instant,
@@ -38,7 +42,10 @@ pub(crate) enum WorkerMsg {
 /// their child on the same deadline, native workers keep running), and
 /// `cold` grants the first call of a process generation cold-start grace.
 ///
-/// The queue is a Tokio unbounded channel: async callers send without
+/// Calls carry one of 128 admission permits, host wakes are coalesced, and
+/// shutdown has no admission requirement. The underlying channel is unbounded
+/// only to reserve independent shutdown admission; payload counts are bounded.
+/// Async callers send without
 /// blocking and await a `oneshot` response, so no `spawn_blocking` thread
 /// is spent per call. Worker threads are plain OS threads that receive
 /// through `blocking_recv`, which needs no runtime context.
@@ -47,6 +54,7 @@ pub(crate) struct RunningInstance {
     pub(crate) kind: PluginRuntimeKind,
     pub(crate) cold: AtomicBool,
     pub(crate) tx: mpsc::UnboundedSender<WorkerMsg>,
+    pub(crate) admission: std::sync::Arc<Semaphore>,
     pub(crate) worker: Mutex<Option<thread::JoinHandle<Result<(), PluginLoaderError>>>>,
 }
 
@@ -61,13 +69,23 @@ pub(crate) fn run_instance_worker(
             WorkerMsg::Shutdown => break,
             WorkerMsg::HostEvent => continue,
         };
+        if call.respond.is_closed()
+            || call
+                .admission
+                .as_ref()
+                .is_some_and(|permit| permit.semaphore().is_closed())
+        {
+            continue;
+        }
         if Instant::now() >= call.deadline {
             let _ = call.respond.send(Err(PluginLoaderError::Timeout(format!(
                 "plugin `{id}` call expired while queued"
             ))));
             continue;
         }
-        let result = instance.handle_message_with_timeout(&call.request, call.timeout);
+        let remaining = call.deadline.saturating_duration_since(Instant::now());
+        let result =
+            instance.handle_message_with_timeout(&call.request, remaining.min(call.timeout));
         let _ = call.respond.send(result);
     }
     // Fail waiters queued behind the shutdown instead of leaving them on
@@ -80,4 +98,95 @@ pub(crate) fn run_instance_worker(
         }
     }
     instance.shutdown()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    struct CountingPlugin(Arc<AtomicUsize>);
+    impl PluginInstance for CountingPlugin {
+        fn id(&self) -> &str {
+            "test"
+        }
+        fn handle_message(&mut self, _: &[u8]) -> Result<Vec<u8>, PluginLoaderError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Vec::new())
+        }
+        fn shutdown(&mut self) -> Result<(), PluginLoaderError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn saturated_admission_and_shutdown_release_all_calls_without_execution() {
+        let admission = Arc::new(Semaphore::new(PLUGIN_CALL_CAPACITY));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut answers = Vec::new();
+        for _ in 0..PLUGIN_CALL_CAPACITY {
+            let permit = Arc::clone(&admission).try_acquire_owned().unwrap();
+            let (respond, answer) = oneshot::channel();
+            tx.send(WorkerMsg::Call(QueuedCall {
+                admission: Some(permit),
+                request: vec![0; 1024],
+                timeout: Duration::from_secs(30),
+                deadline: Instant::now() + Duration::from_secs(30),
+                respond,
+            }))
+            .unwrap();
+            answers.push(answer);
+        }
+        assert!(Arc::clone(&admission).try_acquire_owned().is_err());
+        admission.close();
+        tx.send(WorkerMsg::Shutdown).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        run_instance_worker(
+            "test".into(),
+            Box::new(CountingPlugin(Arc::clone(&calls))),
+            rx,
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(admission.available_permits(), PLUGIN_CALL_CAPACITY);
+        assert!(answers.iter_mut().all(|answer| answer.try_recv().is_err()));
+    }
+
+    #[test]
+    fn cancelled_and_expired_calls_never_execute() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut retained_answers = Vec::new();
+        for cancelled in [true, false] {
+            let (respond, answer) = oneshot::channel();
+            tx.send(WorkerMsg::Call(QueuedCall {
+                admission: None,
+                request: Vec::new(),
+                timeout: Duration::from_secs(1),
+                deadline: if cancelled {
+                    Instant::now() + Duration::from_secs(1)
+                } else {
+                    Instant::now()
+                },
+                respond,
+            }))
+            .unwrap();
+            if cancelled {
+                drop(answer);
+            } else {
+                retained_answers.push(answer);
+            }
+        }
+        tx.send(WorkerMsg::Shutdown).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        run_instance_worker(
+            "test".into(),
+            Box::new(CountingPlugin(Arc::clone(&calls))),
+            rx,
+        )
+        .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
 }
