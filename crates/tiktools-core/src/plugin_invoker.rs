@@ -98,6 +98,9 @@ impl PluginInvoker {
             .await
             .map_err(|error| match error {
                 PluginLoaderError::Timeout(_) => InvokeError::Timeout,
+                PluginLoaderError::Overloaded(reason) => {
+                    InvokeError::Unavailable(format!("call queue full: {reason}"))
+                }
                 error => InvokeError::Plugin(error.to_string()),
             })
     }
