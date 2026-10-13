@@ -2296,3 +2296,29 @@ async fn subtract_action_deducts_and_clamps_at_zero() {
     assert!(summary.ends_with(" 5"), "unexpected summary: {summary}");
     assert_eq!(points_of(&core), Some(0.0));
 }
+
+#[tokio::test]
+async fn repeated_plugin_observer_lifecycles_reap_completed_tasks() {
+    let state = Arc::new(FakePluginState::default());
+    let (core, _, root) = core_with_fake_hotkeys(Arc::clone(&state));
+    let baseline = Arc::strong_count(&core);
+    core.spawn_plugin_event_observer(&tokio::runtime::Handle::current());
+    for cycle in 0..128 {
+        core.plugins.start("hotkeys").unwrap();
+        core.events.publish_domain(points_changed("synthetic"));
+        wait_for_event_calls(&state, cycle + 1).await;
+        core.plugins.stop("hotkeys").unwrap();
+        core.events.publish_domain(points_changed("stopped"));
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while core.system_health()["plugins"]["eventWorkers"] != 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("completed JoinSet entries must be reaped between cycles");
+        assert_eq!(core.plugins.outstanding_call_count(), 0);
+    }
+    core.shutdown().await;
+    assert_eq!(Arc::strong_count(&core), baseline);
+    let _ = std::fs::remove_dir_all(root);
+}
