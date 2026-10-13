@@ -12,4 +12,5 @@ path = "src/main.rs"
 [dependencies]
 serde_json.workspace = true
 tiktools-plugin-sdk = { path = "../../../crates/tiktools-plugin-sdk" }
-reqwest = { workspace = true, features = ["blocking"] }
+reqwest.workspace = true
+tokio.workspace = true

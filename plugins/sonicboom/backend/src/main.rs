@@ -44,9 +44,8 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-struct SonicBoom {
-    http: reqwest::blocking::Client,
-    settings: config::ConfigCache,
+struct SpeechEngine {
+    http: reqwest::Client,
     deduper: Deduper,
     voices: Vec<String>,
     voices_fetched_at_ms: u64,
@@ -55,14 +54,13 @@ struct SonicBoom {
     rng: u64,
 }
 
-impl Default for SonicBoom {
+impl Default for SpeechEngine {
     fn default() -> Self {
         Self {
-            http: reqwest::blocking::Client::builder()
+            http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(SPEAK_TIMEOUT_SECS))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new()),
-            settings: config::ConfigCache::new(),
+                .unwrap_or_else(|_| reqwest::Client::new()),
             deduper: Deduper::new(DEDUP_WINDOW_MS, DEDUP_MAX_ENTRIES),
             voices: Vec::new(),
             voices_fetched_at_ms: 0,
@@ -71,7 +69,7 @@ impl Default for SonicBoom {
     }
 }
 
-impl SonicBoom {
+impl SpeechEngine {
     fn next_index(&mut self, len: usize) -> usize {
         // xorshift64*: good enough for voice shuffling.
         let mut x = self.rng.max(1);
@@ -86,7 +84,7 @@ impl SonicBoom {
     /// picks or an empty default) and the cache is stale. Failures keep
     /// the previous list: speech still proceeds with the configured
     /// default, and the server error names a truly unknown voice.
-    fn ensure_voices(&mut self, server_url: &str, token: &str, needed: bool) {
+    async fn ensure_voices(&mut self, server_url: &str, token: &str, needed: bool) {
         if !needed {
             return;
         }
@@ -97,23 +95,30 @@ impl SonicBoom {
             return;
         }
         let url = format!("{server_url}/v1/voices");
-        let mut request = self.http.get(&url);
+        let mut request = self
+            .http
+            .get(&url)
+            .timeout(Duration::from_secs(SPEAK_TIMEOUT_SECS));
         if !token.is_empty() {
             request = request.bearer_auth(token);
         }
-        let fetched: Option<Vec<String>> = request
+        let response = request
             .send()
+            .await
             .ok()
             .filter(|response| response.status().is_success())
-            .and_then(|response| response.json::<serde_json::Value>().ok())
-            .map(voice_values);
+            .map(|response| response.json::<serde_json::Value>());
+        let fetched = match response {
+            Some(body) => body.await.ok().map(voice_values),
+            None => None,
+        };
         if let Some(voices) = fetched {
             self.voices = voices;
             self.voices_fetched_at_ms = now;
         }
     }
 
-    fn speak(
+    async fn speak(
         &self,
         server_url: &str,
         token: &str,
@@ -132,12 +137,13 @@ impl SonicBoom {
         let mut request = self
             .http
             .post(&url)
+            .timeout(Duration::from_secs(SPEAK_TIMEOUT_SECS))
             .header("Content-Type", "text/plain")
             .body(text.to_owned());
         if !token.is_empty() {
             request = request.bearer_auth(token);
         }
-        let response = request.send().map_err(|error| {
+        let response = request.send().await.map_err(|error| {
             // Never log the token: only the outcome and status travel.
             format!("speech request failed: {error}")
         })?;
@@ -190,7 +196,126 @@ fn voice_values(body: serde_json::Value) -> Vec<String> {
     voices
 }
 
+impl SpeechEngine {
+    async fn process(&mut self, job: Box<SpeechJob>) {
+        let SpeechJob {
+            text,
+            author,
+            config,
+            admitted_at,
+        } = *job;
+        let voices_needed =
+            config.policy.random_voice || config.policy.default_voice.trim().is_empty();
+        self.ensure_voices(&config.server_url, &config.api_token, voices_needed)
+            .await;
+        let voices = self.voices.clone();
+        let decision = policy::decide(&text, &author, &config.policy, &voices, |len| {
+            self.next_index(len)
+        });
+        if !decision.speak {
+            return;
+        }
+        if !self.deduper.claim(
+            &policy::fingerprint(&author.handle, &decision.spoken_text),
+            admitted_at,
+        ) {
+            return;
+        }
+        match self
+            .speak(
+                &config.server_url,
+                &config.api_token,
+                &decision.spoken_text,
+                &decision.voice,
+                &decision.language,
+            )
+            .await
+        {
+            Ok(summary) => eprintln!("sonicboom: {summary}"),
+            Err(error) => eprintln!("sonicboom: {error}"),
+        }
+    }
+}
+
+const SPEECH_QUEUE_CAPACITY: usize = 64;
+
+struct SpeechJob {
+    text: String,
+    author: Author,
+    config: config::BackendConfig,
+    admitted_at: u64,
+}
+
+struct SonicBoom {
+    settings: config::ConfigCache,
+    jobs: Option<tokio::sync::mpsc::Sender<Box<SpeechJob>>>,
+    cancel: tokio::sync::watch::Sender<bool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Default for SonicBoom {
+    fn default() -> Self {
+        let (jobs, mut receiver) = tokio::sync::mpsc::channel(SPEECH_QUEUE_CAPACITY);
+        let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+        let worker =
+            std::thread::Builder::new()
+                .name("sonicboom-speech".into())
+                .spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("speech runtime");
+                    runtime.block_on(async move {
+                let mut engine = SpeechEngine::default();
+                loop {
+                    let job = tokio::select! {
+                        biased;
+                        _ = cancelled.changed() => break,
+                        job = receiver.recv() => match job { Some(job) => job, None => break },
+                    };
+                    tokio::select! {
+                        biased;
+                        _ = cancelled.changed() => break,
+                        _ = engine.process(job) => {},
+                    }
+                }
+                receiver.close();
+                let pending = receiver.len();
+                if pending > 0 { eprintln!("sonicboom: cancelled {pending} queued speech jobs"); }
+            });
+                })
+                .expect("speech worker");
+        Self {
+            settings: config::ConfigCache::new(),
+            jobs: Some(jobs),
+            cancel,
+            worker: Some(worker),
+        }
+    }
+}
+
+impl SonicBoom {
+    fn stop(&mut self) {
+        let _ = self.cancel.send(true);
+        self.jobs.take();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for SonicBoom {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 impl Plugin for SonicBoom {
+    fn shutdown(&mut self, _context: &PluginContext) -> PluginResult<()> {
+        self.stop();
+        Ok(())
+    }
+
     fn event(&mut self, _context: &PluginContext, event: DomainEventEnvelope) -> PluginResult<()> {
         if event.topic != "live.ui-event" {
             return Ok(());
@@ -223,31 +348,23 @@ impl Plugin for SonicBoom {
         if !config.policy.enabled {
             return Ok(());
         }
-        let voices_needed =
-            config.policy.random_voice || config.policy.default_voice.trim().is_empty();
-        self.ensure_voices(&config.server_url, &config.api_token, voices_needed);
-        let voices = self.voices.clone();
-        let decision = policy::decide(text, &author, &config.policy, &voices, |len| {
-            self.next_index(len)
+        // Eligibility needs no HTTP. Voice choice and replay dedup run in
+        // the ordered worker with the admission timestamp.
+        if !policy::decide(text, &author, &config.policy, &[], |_| 0).speak {
+            return Ok(());
+        }
+        let job = Box::new(SpeechJob {
+            text: text.to_owned(),
+            author,
+            config,
+            admitted_at: now_millis(),
         });
-        if !decision.speak {
-            return Ok(());
-        }
-        if !self.deduper.claim(
-            &policy::fingerprint(&author.handle, &decision.spoken_text),
-            now_millis(),
-        ) {
-            return Ok(());
-        }
-        match self.speak(
-            &config.server_url,
-            &config.api_token,
-            &decision.spoken_text,
-            &decision.voice,
-            &decision.language,
-        ) {
-            Ok(summary) => eprintln!("sonicboom: {summary}"),
-            Err(error) => eprintln!("sonicboom: {error}"),
+        match self.jobs.as_ref().map(|jobs| jobs.try_send(job)) {
+            Some(Ok(())) => {}
+            Some(Err(tokio::sync::mpsc::error::TrySendError::Full(_))) => {
+                eprintln!("sonicboom: speech queue full; rejected job");
+            }
+            _ => return Err(PluginError::other("speech worker stopped")),
         }
         Ok(())
     }
@@ -258,6 +375,85 @@ tiktools_process_plugin!(SonicBoom);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn speech_job(server_url: String) -> Box<SpeechJob> {
+        let config = config::BackendConfig {
+            server_url,
+            policy: policy::TtsSettings {
+                enabled: true,
+                default_voice: "M1".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        Box::new(SpeechJob {
+            text: "test".into(),
+            author: Author {
+                handle: "viewer".into(),
+                points: None,
+                roles: Default::default(),
+            },
+            config,
+            admitted_at: now_millis(),
+        })
+    }
+
+    #[test]
+    fn slow_http_does_not_block_admission_and_shutdown_cancels_full_queue() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buffer = [0; 4096];
+            assert!(stream.read(&mut buffer).unwrap() > 0);
+            started.send(()).unwrap();
+            // Keep the HTTP response unavailable until the test has stopped
+            // the plugin; this exercises cancellation rather than a timeout.
+            let _ = released.recv_timeout(Duration::from_secs(5));
+        });
+        let mut plugin = SonicBoom::default();
+        assert!(plugin
+            .jobs
+            .as_ref()
+            .unwrap()
+            .try_send(speech_job(url.clone()))
+            .is_ok());
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        for _ in 0..SPEECH_QUEUE_CAPACITY {
+            assert!(plugin
+                .jobs
+                .as_ref()
+                .unwrap()
+                .try_send(speech_job(url.clone()))
+                .is_ok());
+        }
+        assert!(matches!(
+            plugin.jobs.as_ref().unwrap().try_send(speech_job(url)),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+        let start = std::time::Instant::now();
+        plugin.stop();
+        assert!(start.elapsed() < Duration::from_secs(1));
+        plugin.stop();
+        let _ = release.send(());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn repeated_speech_worker_creation_and_teardown() {
+        for _ in 0..128 {
+            let mut plugin = SonicBoom::default();
+            plugin.stop();
+            assert!(plugin.worker.is_none());
+            assert!(plugin.jobs.is_none());
+        }
+    }
 
     #[test]
     fn param_encoding_escapes_reserved_characters() {
