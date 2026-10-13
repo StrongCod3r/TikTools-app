@@ -53,3 +53,18 @@ Git working tree was clean before branch creation. No repository AGENTS.md was f
 - This is synthetic/static validation; no real-LIVE memory evidence was collected.
 
 Later batches are in progress and not covered by this commit's completion record.
+
+
+### Batch 2: fan-out and polling isolation
+
+- Fixed exact/repeated/wildcard/match-all overlap by returning a subscriber set.
+- Polling and pushed events have independently owned tasks, with bounded existing
+  broadcast admission and explicit lag-gap reporting. Shutdown joins both tasks.
+- Regression: a real fixture worker holds a poll open while a pushed event must
+  reach the domain bus within 500 ms, then both owners are joined.
+- Validation: 11 plugin-event tests passed; the slow-poll isolation regression passed.
+- Not complete: startup can still block a Tokio caller; pushed-event processing
+  itself can wait on automation; generation/queue metrics need further work.
+
+Batch 1 commit: `4c3cb3e`. Later lifecycle crash handling is separately tested
+(5 transport tests passed); no real-LIVE measurements have been collected.

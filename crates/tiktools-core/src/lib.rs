@@ -496,6 +496,10 @@ impl AppCore {
         if let Some(task) = task {
             let _ = task.await;
         }
+        let push_task = recover_mutex(&self.plugin_state.push_task, "plugin push task").take();
+        if let Some(task) = push_task {
+            let _ = task.await;
+        }
         let observer_task = recover_mutex(
             &self.plugin_state.observer_task,
             "plugin event observer task",
