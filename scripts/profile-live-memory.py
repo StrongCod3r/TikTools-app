@@ -74,15 +74,35 @@ def main():
     output.writerow(['sample', 'host_rss_kib', 'plugin_rss_kib', 'webview_rss_kib',
                      'other_child_rss_kib', 'children_truncated', 'health', 'analytics_pending',
                      'analytics_failures', 'analytics_overload', 'plugin_workers',
-                     'plugin_outstanding_calls', 'plugin_dropped_events', 'automation_tasks'])
+                     'plugin_outstanding_calls', 'plugin_dropped_events', 'automation_tasks',
+                     'points_hot', 'points_hot_capacity', 'points_writer_queued',
+                     'points_write_errors', 'points_writer_overload', 'ingress_queued',
+                     'ingress_accepted', 'ingress_dropped_data', 'ingress_dropped_critical',
+                     'ingress_lagged', 'dedup_duplicates', 'automation_admitted',
+                     'automation_rejected', 'automation_actions_failed', 'processor_overloaded',
+                     'memory_host_rss_bytes'])
     for index in range(args.samples):
         counts, state = health(args.cli)
         analytics = counts.get('analytics') or {}
         plugins = counts.get('plugins') or {}
+        points = counts.get('points') or {}
+        ingress = counts.get('liveIngress') or {}
+        dedup = counts.get('liveDedup') or {}
+        automation = counts.get('automation') or {}
+        processors = counts.get('processorStats') or {}
+        memory = counts.get('memory') or {}
         output.writerow([index, *descendants(args.pid), state,
                          analytics.get('pending'), analytics.get('failures'), analytics.get('overload'),
                          plugins.get('eventWorkers'), plugins.get('outstandingCalls'),
-                         plugins.get('droppedEvents'), counts.get('automationActiveTasks')])
+                         plugins.get('droppedEvents'), counts.get('automationActiveTasks'),
+                         points.get('hotSize'), points.get('hotCapacity'),
+                         points.get('writerQueued'), points.get('writeErrors'),
+                         points.get('writerOverload'), ingress.get('queued'),
+                         ingress.get('accepted'), ingress.get('droppedData'),
+                         ingress.get('droppedCritical'), ingress.get('broadcastLagged'),
+                         dedup.get('duplicates'), automation.get('admitted'),
+                         automation.get('rejected'), automation.get('actionsFailed'),
+                         processors.get('overloaded'), memory.get('hostRssBytes')])
         sys.stdout.flush()
         if index + 1 < args.samples:
             time.sleep(args.interval)

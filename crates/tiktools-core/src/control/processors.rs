@@ -62,4 +62,22 @@ impl AppCore {
                 .unwrap_or_default(),
         }
     }
+
+    /// Low-overhead aggregate over the per-processor metrics map: one lock,
+    /// numeric sums only, no per-processor serialization. Feeds the
+    /// `processorStats` health object (calls, successes, failures,
+    /// timeouts, overloaded sheds, summed success latency).
+    pub(crate) fn processor_totals(&self) -> (u64, u64, u64, u64, u64, u64) {
+        let metrics = recover_mutex(&self.processor_state.metrics, "processor metrics");
+        let mut totals = (0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+        for metric in metrics.values() {
+            totals.0 = totals.0.saturating_add(metric.calls);
+            totals.1 = totals.1.saturating_add(metric.successes);
+            totals.2 = totals.2.saturating_add(metric.failures);
+            totals.3 = totals.3.saturating_add(metric.timeouts);
+            totals.4 = totals.4.saturating_add(metric.skipped_overloaded);
+            totals.5 = totals.5.saturating_add(metric.total_latency_ms);
+        }
+        totals
+    }
 }

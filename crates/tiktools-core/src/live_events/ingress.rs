@@ -80,6 +80,10 @@ pub(crate) struct LiveIngressStats {
     pub(crate) stale: AtomicU64,
     /// Approximate queued items (incremented on admit, decremented on take).
     pub(crate) queued: AtomicU64,
+    /// Summed worker processing latency (ms) for mean computation.
+    pub(crate) processing_latency_sum_ms: AtomicU64,
+    /// Finished items behind the latency sum.
+    pub(crate) processing_samples: AtomicU64,
     /// Last overload warn timestamp (millis), for rate limiting.
     last_overload_warn_at: AtomicU64,
 }
@@ -94,6 +98,8 @@ impl Default for LiveIngressStats {
             lagged: AtomicU64::new(0),
             stale: AtomicU64::new(0),
             queued: AtomicU64::new(0),
+            processing_latency_sum_ms: AtomicU64::new(0),
+            processing_samples: AtomicU64::new(0),
             last_overload_warn_at: AtomicU64::new(0),
         }
     }
@@ -101,6 +107,7 @@ impl Default for LiveIngressStats {
 
 impl LiveIngressStats {
     pub(crate) fn diagnostics(&self) -> Value {
+        let samples = self.processing_samples.load(Ordering::Relaxed);
         json!({
             "capacity": INGRESS_QUEUE_CAPACITY,
             "queued": self.queued.load(Ordering::Relaxed),
@@ -110,6 +117,12 @@ impl LiveIngressStats {
             "droppedCritical": self.dropped_critical.load(Ordering::Relaxed),
             "broadcastLagged": self.lagged.load(Ordering::Relaxed),
             "staleFenced": self.stale.load(Ordering::Relaxed),
+            "processingSamples": samples,
+            "meanProcessingLatencyMs": if samples == 0 {
+                Value::Null
+            } else {
+                json!(self.processing_latency_sum_ms.load(Ordering::Relaxed) as f64 / samples as f64)
+            },
         })
     }
 
@@ -300,8 +313,15 @@ pub(crate) async fn run_ingress_worker(
                 continue;
             }
         }
+        let started = now_millis();
         core.handle_native_event(item.event).await;
         core.live_ingress.processed.fetch_add(1, Ordering::Relaxed);
+        core.live_ingress
+            .processing_samples
+            .fetch_add(1, Ordering::Relaxed);
+        core.live_ingress
+            .processing_latency_sum_ms
+            .fetch_add(now_millis().saturating_sub(started), Ordering::Relaxed);
     }
     // Cancellation releases every retained payload still in the queue.
     receiver.close();

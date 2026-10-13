@@ -7,7 +7,7 @@ use std::{
     time::SystemTime,
 };
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::db::DatabaseManager;
 use crate::ipc::messages::{PartialPointsConfig, PointsConfig};
@@ -251,6 +251,23 @@ pub struct PointsDiagnostics {
     pub writer_overload: u64,
     pub pending_writes: usize,
     pub committed_seq: u64,
+}
+
+impl PointsDiagnostics {
+    /// Machine-readable snapshot for `system.health`.
+    pub fn to_value(&self) -> Value {
+        json!({
+            "hotSize": self.hot_size,
+            "hotCapacity": self.hot_capacity,
+            "cacheHits": self.cache_hits,
+            "cacheMisses": self.cache_misses,
+            "writerQueued": self.writer_queued,
+            "writeBatches": self.write_batches,
+            "writeErrors": self.write_errors,
+            "writerOverload": self.writer_overload,
+            "pendingWrites": self.pending_writes,
+        })
+    }
 }
 
 /// One durable intent sent to the owned points writer. The single writer
