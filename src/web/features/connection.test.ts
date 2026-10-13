@@ -261,3 +261,20 @@ test('dispose fences pending status refresh and releases topic subscriptions', a
   expect(connection.status.value).toBe('idle');
   expect(removed).toBe(4);
 });
+
+
+test('older status refresh cannot overwrite a newer refresh', async () => {
+  const answers: Array<(result: unknown) => void> = [];
+  const control = stubControl({
+    call: <T,>(): Promise<T> => new Promise<T>((resolve) => { answers.push((result) => resolve(result as T)); }),
+  });
+  const connection = useConnection(control, callbacks);
+  const old = connection.refreshStatus();
+  const latest = connection.refreshStatus();
+  answers[1]?.({ connected: false });
+  await latest;
+  answers[0]?.({ connected: true, uniqueId: 'old' });
+  await old;
+  expect(connection.status.value).toBe('disconnected');
+  connection.dispose();
+});

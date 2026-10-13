@@ -13,14 +13,14 @@ Existing bounded queues, replay guards and compatibility interfaces must remain.
 
 | Phase | Confirmed findings / remaining work | Status |
 | --- | --- | --- |
-| 1 | Native initialization occurs outside ownership control; task handles are discarded. Core assigns generation at processing time. Lifecycle notifications are unfenced. Service connected flag survives unexpected termination. | Pending |
-| 2 | Ingress publication precedes gauge increment; consumer can underflow it. Cancellation leaves queued gauge nonzero. Per-event points blocking work can continue after a timeout. Payload count is bounded, decoded payload size is not proven bounded. | In progress |
+| 1 | Transport task ownership, original stamping and stale fencing implemented. Upstream reconnect visibility and signer OS-thread teardown remain. | Partial |
+| 2 | Queue accounting and bounded owned points execution implemented. Payload-byte limits, expensive logging and complete pipeline stress validation remain. | Partial |
 | 3 | Sequence allocation and submission can reorder. Synchronous fallback overtakes FIFO writes. Failed transactions still advance committed sequence; shutdown sets it to MAX regardless of outcome. Full resets clear dirty markers prematurely. | Pending |
 | 4 | Failed workers lose join ownership. Stop can join indefinitely. Startup handshake has no deadline. Process per-call I/O threads are detached. Replacement can race old stop's running flag. | Pending |
-| 5 | Exact plus match-all indexes duplicate a subscriber; repeated exact patterns also duplicate. Polling awaits inside pushed-event receive loop. | Pending |
-| 6 | RPC pending map has no count bound. Feed dedup maps are global and IDs have no age expiry. Debounces cannot cancel. Async connection results have no request fencing. Controller adds an unowned animation callback. Gap refreshes can storm. | Pending |
-| 7 | Existing diagnostics/profile coverage needs extending; old measurements are historical, not evidence for this branch. | Pending |
-| 8 | Full checks, synthetic comparisons and suitable real-LIVE/display validation remain required. | Pending |
+| 5 | Subscriber uniqueness, separate poll/push owners and gauge cleanup implemented. Poll generation/metrics and pushed processing isolation remain. | Partial |
+| 6 | Main RPC bounds, feed ownership, scoped/aged dedup, debounce cancellation and stale response fences implemented. Full composable/WebView/performance audit remains. | Partial |
+| 7 | Profiler thread/CPU/state labels and measured primitive comparisons added. Full host/child/scenario matrix remains unavailable. | Partial |
+| 8 | Rust/frontend checks and native smoke passed; Playwright 3 passed/36 failed. Real-LIVE testing and remaining implementation verification are not complete. | Partial |
 
 ## Evidence and validation
 
@@ -130,3 +130,54 @@ Batch 4 commit: `9f1102e`.
 - Validation: all 11 plugin queue/fan-out tests passed, including saturated cancellation accounting.
 
 Batch 5 commit: `0653ffe`.
+
+
+### Batch 7: measurement and verification record
+
+- Profiler accepts build/workload labels and idle/load/cleanup phase labels;
+  samples host CPU/threads and connection generation/state, treats missing RSS
+  as unknown, and rejects mismatched health PID. Three Python regressions passed.
+- Identical sequential PointsService microbenchmark commands were run on exact
+  baseline `79dd1ab` and candidate. Raw sanitized data is checked in under
+  `docs/benchmarks/live-refactor-2026-10-13.json`. No throughput improvement claim.
+- Analytics-only Linux RSS test: 24 cycles, 98,304 records, 32 batches per cycle,
+  zero pending after each join; RSS 19,784 KiB from cycle 1 through cycle 23.
+- Frontend: 682 scoped unit tests passed; type-check, lint and build passed.
+- Rust: format and workspace Clippy with warnings denied passed; workspace tests,
+  core persistence/native tests, throughput tests, loader all-feature tests and
+  analytics RSS opt-in test passed. Final rerun results are recorded below.
+- Native WebView smoke test was enabled and passed on the configured display.
+- Playwright: 3 passed, 36 failed. `navigation.spec.ts` boot failure from an
+  unhandled `globals.list` was reproduced on exact `79dd1ab` in an isolated
+  checkout. Other failures remain untriaged, not classified as pre-existing.
+- No suitable authenticated real-LIVE session was used. Real-LIVE, full-host
+  idle/peak/cleanup and child/thread comparisons have not been measured.
+- Full refactor is not done: phase 3 durable points and phase 4 plugin lifecycle
+  are still unimplemented, plus the partial phase limitations in the table.
+
+Batch 6 commit: `9a656f0`.
+Single draft PR: https://github.com/nglmercer/TikTools-app/pull/19
+
+
+### Additional frontend regressions
+
+Replay-age expiry and out-of-order concurrent status refreshes now have explicit
+regressions. Final scoped frontend suite: **684 passed**, zero failed;
+frontend type-check and lint passed. Earlier 682/40 counts are historical runs.
+
+### Final Rust rerun on the implemented batches
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | Passed |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Passed |
+| `cargo test --workspace --locked` | Passed; opt-in analytics RSS test ignored here |
+| `cargo test -p tiktools-core --features persistence,native-tiktok --locked` | 290 library tests + 8 throughput tests passed; one RSS test ignored here |
+| Explicit opt-in analytics RSS test | Passed separately, 24 cycles |
+| Plugin-loader `--all-features --locked` tests | Passed |
+| Native WebView smoke with gate enabled | Passed on configured display |
+| Main Playwright suite | **Failed: 36 failed, 3 passed** |
+| Python profiler regressions | 3 passed |
+
+The outstanding phase-3/phase-4 work is an implementation gap, not an environment
+blocker. This draft must not be described as meeting the full definition of done.
