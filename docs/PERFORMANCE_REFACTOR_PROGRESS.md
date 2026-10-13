@@ -87,3 +87,14 @@ Batch 1 commit: `4c3cb3e`. Later lifecycle crash handling is separately tested
   integration, age-expiry and other composable teardown audits remain outstanding.
 
 Batch 2 commit: `46ac837`.
+
+
+### Batch 4: connection task failure guard
+
+- A task exit guard marks unexpected completion/panic failed; a closed startup
+  response channel also marks failure before returning, avoiding a status race.
+- Disconnect domain notification rechecks authority after asynchronous cleanup.
+- Validation: all five transport lifecycle tests passed; workspace Clippy passed
+  with warnings denied after removing unit-valued send bindings.
+
+Batch 3 commit: `5a-placeholder` (updated in the next documentation batch).

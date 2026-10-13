@@ -562,7 +562,7 @@ async fn run_connection(
                         }
                     }
                     Err(error) => {
-                        let _ = event_sender.send(connection_generation, ClientEvent::Error {
+                        event_sender.send(connection_generation, ClientEvent::Error {
                             phase: ErrorPhase::Live,
                             message: format!("could not decode TikTok event batch: {error}"),
                         });
@@ -570,16 +570,16 @@ async fn run_connection(
                     }
                 }
                 Some(Err(error)) => {
-                    let _ = event_sender.send(connection_generation, ClientEvent::Error {
+                    event_sender.send(connection_generation, ClientEvent::Error {
                         phase: ErrorPhase::Live,
                         message: error.to_string(),
                     });
-                    let _ = event_sender.send(connection_generation, ClientEvent::Disconnected { reason: error.to_string() });
+                    event_sender.send(connection_generation, ClientEvent::Disconnected { reason: error.to_string() });
                     tracing::warn!(%error, connection_generation, "TikTok live event task ended after a transport error");
                     return;
                 }
                 None => {
-                    let _ = event_sender.send(connection_generation, ClientEvent::Disconnected { reason: "TikTok closed the live stream".to_owned() });
+                    event_sender.send(connection_generation, ClientEvent::Disconnected { reason: "TikTok closed the live stream".to_owned() });
                     tracing::info!(connection_generation, "TikTok live event task ended because the stream closed");
                     return;
                 }

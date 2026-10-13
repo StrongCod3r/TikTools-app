@@ -100,6 +100,24 @@ impl LifecycleState {
     }
 }
 
+struct TaskExit {
+    generation: u64,
+    state: LifecycleState,
+    stop: CancellationToken,
+}
+impl Drop for TaskExit {
+    fn drop(&mut self) {
+        self.state.transition(
+            self.generation,
+            if self.stop.is_cancelled() {
+                ConnectionState::Idle
+            } else {
+                ConnectionState::Failed
+            },
+        );
+    }
+}
+
 struct ActiveConnection {
     stop: CancellationToken,
     task: tokio::task::JoinHandle<()>,
@@ -164,12 +182,25 @@ impl ConnectionOwner {
         let generation = self.state.advance(ConnectionState::Connecting);
         let stop = CancellationToken::new();
         let (ready, answer) = oneshot::channel();
-        let task = tokio::spawn(launch(generation, stop.clone(), self.state.clone(), ready));
+        let future = launch(generation, stop.clone(), self.state.clone(), ready);
+        let exit = TaskExit {
+            generation,
+            state: self.state.clone(),
+            stop: stop.clone(),
+        };
+        let task = tokio::spawn(async move {
+            let _exit = exit;
+            future.await;
+        });
         *active = Some(ActiveConnection { stop, task });
         drop(active);
-        let info = answer
-            .await
-            .map_err(|error| TikTokError::Task(error.to_string()))??;
+        let info = match answer.await {
+            Ok(result) => result?,
+            Err(error) => {
+                self.state.transition(generation, ConnectionState::Failed);
+                return Err(TikTokError::Task(error.to_string()));
+            }
+        };
         if self.snapshot().generation != generation {
             return Err(TikTokError::Task("connection superseded".into()));
         }
@@ -316,5 +347,20 @@ mod tests {
             },
         );
         assert_eq!(stream.try_recv().unwrap().generation, first);
+    }
+    #[tokio::test]
+    async fn unexpected_task_failure_cannot_leave_connected_status() {
+        let owner = ConnectionOwner::new();
+        let result = owner
+            .connect(|generation, _, state, _ready| async move {
+                state.transition(generation, ConnectionState::Connected);
+                panic!("synthetic connection task crash");
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(owner.snapshot().state, ConnectionState::Failed);
+        assert!(owner.disconnect().await.is_err());
+        assert!(owner.active.lock().await.is_none());
+        owner.disconnect().await.unwrap();
     }
 }

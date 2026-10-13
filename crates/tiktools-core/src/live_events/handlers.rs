@@ -24,7 +24,11 @@ impl AppCore {
                     });
             }
             ClientEvent::Disconnected { reason } => {
+                let generation = self.live.connection_snapshot().generation;
                 self.publish_disconnected_event().await;
+                if self.live.connection_snapshot().generation != generation {
+                    return;
+                }
                 // Native drops publish the same domain events as an explicit
                 // RPC disconnect so every origin converges on one topic.
                 self.events
