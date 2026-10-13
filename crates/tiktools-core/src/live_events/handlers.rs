@@ -53,7 +53,8 @@ impl AppCore {
             Some(context.clone());
 
         #[cfg(feature = "persistence")]
-        self.write_live_session(&info.unique_id, Some(info.room_id.as_str()), true);
+        self.write_live_session(&info.unique_id, Some(info.room_id.as_str()), true)
+            .await;
 
         let gifts = info
             .gifts
@@ -177,13 +178,13 @@ impl AppCore {
                         top_viewers,
                     });
                 #[cfg(feature = "persistence")]
-                self.record_analytics_viewers(room.total);
+                self.record_analytics_viewers(room.total).await;
             }
             return;
         };
 
         #[cfg(feature = "persistence")]
-        self.record_analytics_event(&event);
+        self.record_analytics_event(&event).await;
 
         let should_award = !matches!(
             &event.base,

@@ -101,6 +101,8 @@ pub struct AppCore {
     pub media: Arc<dyn MediaHost>,
     pub plugins: Arc<PluginManager>,
     pub db: Arc<db::DatabaseManager>,
+    #[cfg(feature = "persistence")]
+    analytics_writer: db::AnalyticsWriter,
     pub app_state: Arc<AppStateService>,
     pub events: EventBus,
     emitter: Arc<dyn HostEmitter>,
@@ -218,6 +220,8 @@ impl AppCore {
             capabilities,
             media,
             plugins,
+            #[cfg(feature = "persistence")]
+            analytics_writer: db::AnalyticsWriter::new(Arc::clone(&db)),
             db,
             app_state: Arc::new(AppStateService::default()),
             events: EventBus::new(256),
@@ -460,6 +464,8 @@ impl AppCore {
             let _ = task.await;
         }
         self.plugins.stop_all();
+        #[cfg(feature = "persistence")]
+        self.analytics_writer.shutdown().await;
     }
 }
 

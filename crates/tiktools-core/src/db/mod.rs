@@ -9,6 +9,8 @@ mod sqlite;
 
 #[cfg(feature = "persistence")]
 mod analytics;
+#[cfg(feature = "persistence")]
+pub(crate) use analytics::writer::{AnalyticsWrite, AnalyticsWriter};
 
 #[cfg(feature = "persistence")]
 pub use sqlite::DatabaseError;
