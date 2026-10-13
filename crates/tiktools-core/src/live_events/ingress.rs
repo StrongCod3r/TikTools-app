@@ -34,8 +34,44 @@
 //!
 //! Capacity bounds event count, not decoded payload bytes. A transport-level
 //! payload-size policy remains required before claiming a hard byte bound.
+//!
+//! ## Shutdown contract
+//!
+//! Admission and draining use two different cancellation scopes:
+//!
+//! - `AppCore::live_admission` stops *new* events from entering the queue.
+//!   The pump observes it and drops the sender when it exits.
+//! - `AppCore::live_ingress_stop` is the emergency stop. It is only cancelled
+//!   after the graceful drain deadline expires, and it makes the worker stop
+//!   *between* items — never in the middle of one.
+//!
+//! Graceful shutdown therefore processes every already-admitted event; only
+//! an emergency shutdown releases queued payloads, and every released payload
+//! is counted. `AppCore::stop_live_ingress` owns the ladder and the deadlines.
+//!
+//! ## Accounting invariant
+//!
+//! For an isolated interval with no counter resets, once the pipeline is
+//! settled (`queued == 0` and `in_flight == 0`):
+//!
+//! ```text
+//! accepted = processed + stale + cancelled + abandoned
+//! ```
+//!
+//! While the worker holds an item, `in_flight` carries it and `queued` only
+//! counts items still waiting, so at every await point (the only points where
+//! the worker can be aborted):
+//!
+//! ```text
+//! accepted = processed + stale + cancelled + abandoned + queued + in_flight
+//! ```
+//!
+//! `stale` is *exclusive*: a fenced item is never also counted as processed,
+//! because it performed no processing. `admission_cancelled` counts events
+//! the pump received but never admitted (admission stopped concurrently); it
+//! never entered `accepted`, so it is outside the invariant above.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::Duration;
 
 use crate::*;
@@ -57,12 +93,42 @@ pub(crate) struct IngressItem {
     pub(crate) event: ClientEvent,
 }
 
+/// Explicit ingress lifecycle. Transitions are monotonic, so the pump, the
+/// worker and the shutdown ladder can each advance it without regressing to
+/// an earlier state:
+///
+/// ```text
+/// Running -> StoppingAdmission -> Draining -> Stopped
+/// ```
+///
+/// `Running` is the only state in which new events are admitted, and
+/// `Stopped` is only reachable once no ingress task remains alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub(crate) enum IngressLifecycle {
+    Running = 0,
+    StoppingAdmission = 1,
+    Draining = 2,
+    Stopped = 3,
+}
+
+impl IngressLifecycle {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::StoppingAdmission => "stoppingAdmission",
+            Self::Draining => "draining",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
 /// Low-overhead admission/processing counters. Atomics only; no per-event
 /// logging, no high-cardinality labels.
 pub(crate) struct LiveIngressStats {
     /// Items admitted into the ingress queue.
     pub(crate) accepted: AtomicU64,
-    /// Items the worker finished (including fenced stale drops).
+    /// Items the worker finished processing (stale fences excluded).
     pub(crate) processed: AtomicU64,
     /// Data events shed immediately on a full queue.
     pub(crate) dropped_data: AtomicU64,
@@ -70,16 +136,28 @@ pub(crate) struct LiveIngressStats {
     pub(crate) dropped_critical: AtomicU64,
     /// Upstream broadcast lag reports observed by the pump.
     pub(crate) lagged: AtomicU64,
-    /// Stale-generation data items fenced by the worker.
+    /// Stale-generation data items fenced by the worker. Exclusive: a fenced
+    /// item is never also counted as processed.
     pub(crate) stale: AtomicU64,
     /// Approximate queued items (incremented on admit, decremented on take).
     pub(crate) queued: AtomicU64,
-    /// Admitted payloads released on shutdown before processing.
+    /// Items taken by the worker and not yet finished.
+    pub(crate) in_flight: AtomicU64,
+    /// Admitted payloads released on graceful/emergency shutdown before
+    /// processing.
     pub(crate) cancelled: AtomicU64,
+    /// In-flight items whose processing was cut off by an emergency abort.
+    /// Their outcome is unknown and is never reported as a clean cancel.
+    pub(crate) abandoned: AtomicU64,
+    /// Events the pump received but never admitted because admission had
+    /// already stopped. Outside the `accepted` invariant.
+    pub(crate) admission_cancelled: AtomicU64,
     /// Summed worker processing latency (ms) for mean computation.
     pub(crate) processing_latency_sum_ms: AtomicU64,
     /// Finished items behind the latency sum.
     pub(crate) processing_samples: AtomicU64,
+    /// Monotonic lifecycle state (see [`IngressLifecycle`]).
+    lifecycle: AtomicU8,
     /// Last overload warn timestamp (millis), for rate limiting.
     last_overload_warn_at: AtomicU64,
 }
@@ -94,27 +172,79 @@ impl Default for LiveIngressStats {
             lagged: AtomicU64::new(0),
             stale: AtomicU64::new(0),
             queued: AtomicU64::new(0),
+            in_flight: AtomicU64::new(0),
             cancelled: AtomicU64::new(0),
+            abandoned: AtomicU64::new(0),
+            admission_cancelled: AtomicU64::new(0),
             processing_latency_sum_ms: AtomicU64::new(0),
             processing_samples: AtomicU64::new(0),
+            lifecycle: AtomicU8::new(IngressLifecycle::Running as u8),
             last_overload_warn_at: AtomicU64::new(0),
         }
     }
 }
 
 impl LiveIngressStats {
+    /// Advances the lifecycle monotonically; a stale writer can never move
+    /// the state backwards.
+    pub(crate) fn advance_lifecycle(&self, next: IngressLifecycle) {
+        self.lifecycle.fetch_max(next as u8, Ordering::AcqRel);
+    }
+
+    pub(crate) fn lifecycle(&self) -> IngressLifecycle {
+        match self.lifecycle.load(Ordering::Acquire) {
+            0 => IngressLifecycle::Running,
+            1 => IngressLifecycle::StoppingAdmission,
+            2 => IngressLifecycle::Draining,
+            _ => IngressLifecycle::Stopped,
+        }
+    }
+
+    /// Items that were admitted but are neither finished, released, nor
+    /// still tracked: always `queued + in_flight` while the pipeline is
+    /// consistent, and `0` once it settles.
+    pub(crate) fn outstanding(&self) -> i64 {
+        let accounted = self
+            .processed
+            .load(Ordering::Relaxed)
+            .saturating_add(self.stale.load(Ordering::Relaxed))
+            .saturating_add(self.cancelled.load(Ordering::Relaxed))
+            .saturating_add(self.abandoned.load(Ordering::Relaxed));
+        self.accepted.load(Ordering::Relaxed) as i64 - accounted as i64
+    }
+
+    /// Emergency accounting for work the worker can no longer reach. Called
+    /// only after the worker task is confirmed dead: everything still
+    /// outstanding becomes `cancelled` (queued payloads) or `abandoned`
+    /// (the item that was mid-processing). Derived from `accepted` so an
+    /// abort between two counter updates can never leave an item uncounted.
+    pub(crate) fn abandon_outstanding(&self) {
+        let in_flight = self.in_flight.swap(0, Ordering::AcqRel);
+        let missing = self.outstanding().max(0) as u64;
+        let queued = missing.saturating_sub(in_flight);
+        self.cancelled.fetch_add(queued, Ordering::Relaxed);
+        self.abandoned
+            .fetch_add(missing - queued, Ordering::Relaxed);
+        self.queued.store(0, Ordering::Release);
+    }
+
     pub(crate) fn diagnostics(&self) -> Value {
         let samples = self.processing_samples.load(Ordering::Relaxed);
         json!({
             "capacity": INGRESS_QUEUE_CAPACITY,
+            "lifecycle": self.lifecycle().as_str(),
             "queued": self.queued.load(Ordering::Relaxed),
+            "inFlight": self.in_flight.load(Ordering::Relaxed),
             "cancelled": self.cancelled.load(Ordering::Relaxed),
+            "abandoned": self.abandoned.load(Ordering::Relaxed),
+            "admissionCancelled": self.admission_cancelled.load(Ordering::Relaxed),
             "accepted": self.accepted.load(Ordering::Relaxed),
             "processed": self.processed.load(Ordering::Relaxed),
             "droppedData": self.dropped_data.load(Ordering::Relaxed),
             "droppedCritical": self.dropped_critical.load(Ordering::Relaxed),
             "broadcastLagged": self.lagged.load(Ordering::Relaxed),
             "staleFenced": self.stale.load(Ordering::Relaxed),
+            "outstanding": self.outstanding(),
             "processingSamples": samples,
             "meanProcessingLatencyMs": if samples == 0 {
                 Value::Null
@@ -181,8 +311,7 @@ pub(crate) fn classify_data_event(event: &NativeLiveEvent) -> DataClass {
 }
 
 /// Admits one broadcast event into the bounded ingress queue without
-/// awaiting processing. Returns `false` only when the pump should stop
-/// (never for shed decisions: those are counted, not propagated).
+/// awaiting processing. Shed decisions are counted, never propagated.
 #[cfg(test)]
 pub(crate) async fn admit_event(
     core: &AppCore,
@@ -200,6 +329,11 @@ pub(crate) async fn admit_event(
     .await;
 }
 
+/// Admits one stamped event into the bounded ingress queue without awaiting
+/// processing. Admission observes `AppCore::live_admission`, which stops *new*
+/// events only; already-admitted items stay owned by the queue and drain
+/// normally. An event released here is counted in `admission_cancelled` so it
+/// can never vanish between receive and admission.
 pub(crate) async fn admit_stamped_event(
     core: &AppCore,
     sender: &tokio::sync::mpsc::Sender<IngressItem>,
@@ -207,23 +341,36 @@ pub(crate) async fn admit_stamped_event(
 ) {
     let tiktools_tiktok::StampedClientEvent { generation, event } = stamped;
     let stats = &core.live_ingress;
+    if core.live_admission.is_cancelled() {
+        stats.admission_cancelled.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     match event {
         // Lifecycle transitions are rare and ordering-sensitive: wait for
-        // capacity rather than drop or reorder them.
+        // capacity rather than drop or reorder them — unless admission has
+        // stopped, in which case the wait is abandoned explicitly.
         lifecycle @ (ClientEvent::Connected(_)
         | ClientEvent::Reconnecting { .. }
         | ClientEvent::Disconnected { .. }
-        | ClientEvent::Error { .. }) => match sender.reserve().await {
-            Ok(permit) => publish_reserved(
-                stats,
-                permit,
-                IngressItem {
-                    generation,
-                    event: lifecycle,
-                },
-            ),
-            Err(_) => tracing::debug!("live ingress worker is gone; pump stops"),
-        },
+        | ClientEvent::Error { .. }) => {
+            tokio::select! {
+                biased;
+                () = core.live_admission.cancelled() => {
+                    stats.admission_cancelled.fetch_add(1, Ordering::Relaxed);
+                }
+                reserved = sender.reserve() => match reserved {
+                    Ok(permit) => publish_reserved(
+                        stats,
+                        permit,
+                        IngressItem {
+                            generation,
+                            event: lifecycle,
+                        },
+                    ),
+                    Err(_) => tracing::debug!("live ingress worker is gone; pump stops"),
+                }
+            }
+        }
         ClientEvent::Event(data) => {
             let item = IngressItem {
                 generation,
@@ -274,8 +421,17 @@ async fn admit_full(
     }
     // Critical data: bounded backpressure, then an explicit, gap-reported
     // drop. Delivery beyond this point cannot be guaranteed, and the
-    // counters say exactly that.
-    match tokio::time::timeout(CRITICAL_SEND_TIMEOUT, sender.reserve()).await {
+    // counters say exactly that. Admission stop abandons the wait too, so a
+    // shutdown can never block behind a saturated queue.
+    let reserved = tokio::select! {
+        biased;
+        () = core.live_admission.cancelled() => {
+            stats.admission_cancelled.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        reserved = tokio::time::timeout(CRITICAL_SEND_TIMEOUT, sender.reserve()) => reserved,
+    };
+    match reserved {
         Ok(Ok(permit)) => publish_reserved(stats, permit, item),
         Ok(Err(_)) => {
             tracing::debug!("live ingress worker is gone; pump stops");
@@ -294,17 +450,23 @@ async fn admit_full(
 /// Ordered worker: the sole consumer of the ingress queue. Sequential
 /// processing preserves event order (points sequence, gift streaks,
 /// session/creator attribution) without any parallel-handler reasoning.
-/// Owned by `AppCore`, cancelled and joined at shutdown.
+/// Owned by `AppCore` and joined at shutdown.
+///
+/// The `emergency` token is *not* the admission token: the worker keeps
+/// draining everything already admitted until the sender closes. It only
+/// observes `emergency`, which the shutdown ladder cancels after the graceful
+/// drain deadline — and even then the worker stops between items, never
+/// inside one, so a running points award is never reported as cancelled.
 #[cfg(feature = "native-tiktok")]
 pub(crate) async fn run_ingress_worker(
     core: Arc<AppCore>,
     mut receiver: tokio::sync::mpsc::Receiver<IngressItem>,
-    shutdown: tokio_util::sync::CancellationToken,
+    emergency: tokio_util::sync::CancellationToken,
 ) {
     loop {
         let item = tokio::select! {
             biased;
-            () = shutdown.cancelled() => break,
+            () = emergency.cancelled() => break,
             received = receiver.recv() => received,
         };
         let Some(item) = item else {
@@ -313,7 +475,10 @@ pub(crate) async fn run_ingress_worker(
         // Paired with the admission increment: `admit_event` is the sole
         // sender in production, so every take here matches exactly one
         // admit. Direct test injection must go through admission too.
+        // The two counter updates below are synchronous, so an abort can
+        // only ever observe a consistent `queued`/`in_flight` pair.
         core.live_ingress.queued.fetch_sub(1, Ordering::Relaxed);
+        core.live_ingress.in_flight.fetch_add(1, Ordering::Relaxed);
         // Stale-generation fence: a newer connection exists, so this data
         // item belongs to an older session and must not be credited to the
         // current creator. Lifecycle items always pass; they establish the
@@ -324,8 +489,8 @@ pub(crate) async fn run_ingress_worker(
             .generation
             .max(core.connection_sequence.load(Ordering::Acquire));
         if item.generation < current {
+            core.live_ingress.in_flight.fetch_sub(1, Ordering::Relaxed);
             core.live_ingress.stale.fetch_add(1, Ordering::Relaxed);
-            core.live_ingress.processed.fetch_add(1, Ordering::Relaxed);
             continue;
         }
         if matches!(&item.event, ClientEvent::Connected(_)) {
@@ -334,6 +499,7 @@ pub(crate) async fn run_ingress_worker(
         }
         let started = now_millis();
         core.handle_native_event(item.event).await;
+        core.live_ingress.in_flight.fetch_sub(1, Ordering::Relaxed);
         core.live_ingress.processed.fetch_add(1, Ordering::Relaxed);
         core.live_ingress
             .processing_samples
@@ -342,13 +508,22 @@ pub(crate) async fn run_ingress_worker(
             .processing_latency_sum_ms
             .fetch_add(now_millis().saturating_sub(started), Ordering::Relaxed);
     }
-    // Cancellation releases every retained payload still in the queue.
+    core.live_ingress
+        .advance_lifecycle(IngressLifecycle::Draining);
+    // Released payloads are counted, never silent: graceful shutdown drains
+    // everything (this loop runs with an empty queue), emergency shutdown
+    // accounts for whatever is still buffered.
     receiver.close();
     while receiver.try_recv().is_ok() {
         core.live_ingress.queued.fetch_sub(1, Ordering::Relaxed);
         core.live_ingress.cancelled.fetch_add(1, Ordering::Relaxed);
     }
-    tracing::info!("live ingress worker stopped");
+    core.live_ingress
+        .advance_lifecycle(IngressLifecycle::Stopped);
+    tracing::info!(
+        lifecycle = core.live_ingress.lifecycle().as_str(),
+        "live ingress worker stopped"
+    );
 }
 
 #[cfg(all(test, feature = "native-tiktok"))]
@@ -608,8 +783,11 @@ mod tests {
         .await
         .expect("saturated worker drains and exits");
         assert_eq!(core.live_ingress.stale.load(Ordering::Relaxed), 64);
-        assert_eq!(core.live_ingress.processed.load(Ordering::Relaxed), 64);
+        // Stale is exclusive: a fenced item performed no processing.
+        assert_eq!(core.live_ingress.processed.load(Ordering::Relaxed), 0);
         assert_eq!(core.live_ingress.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.outstanding(), 0);
     }
 
     #[tokio::test]
@@ -618,14 +796,20 @@ mod tests {
         // A newer connection exists: the queued item belongs to the old one.
         core.connection_sequence.store(4, Ordering::Release);
         let (sender, receiver) = tokio::sync::mpsc::channel::<IngressItem>(8);
-        sender
-            .send(IngressItem {
+        // Admission is the sole production entry point, so the item is
+        // stamped and accounted there instead of being pushed into the queue
+        // behind the counters' backs.
+        admit_stamped_event(
+            &core,
+            &sender,
+            tiktools_tiktok::StampedClientEvent {
                 generation: 2,
                 event: ClientEvent::Event(chat()),
-            })
-            .await
-            .unwrap();
-        core.live_ingress.queued.fetch_add(1, Ordering::Relaxed);
+            },
+        )
+        .await;
+        assert_eq!(core.live_ingress.accepted.load(Ordering::Relaxed), 1);
+        assert_eq!(core.live_ingress.queued.load(Ordering::Relaxed), 1);
         let shutdown = tokio_util::sync::CancellationToken::new();
         let worker = tokio::spawn(run_ingress_worker(
             Arc::clone(&core),
@@ -640,7 +824,8 @@ mod tests {
             .expect("worker joins")
             .expect("worker task succeeds");
         assert_eq!(core.live_ingress.stale.load(Ordering::Relaxed), 1);
-        assert_eq!(core.live_ingress.processed.load(Ordering::Relaxed), 1);
+        assert_eq!(core.live_ingress.processed.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.outstanding(), 0);
         // The fenced chat never reached points: no side effects, no viewer.
         assert!(core.points.viewer("spectator").is_none());
         let diagnostics = core.live_ingress.diagnostics();
@@ -767,5 +952,206 @@ mod tests {
             "new"
         );
         assert_eq!(core.live_ingress.stale.load(Ordering::Relaxed), 1);
+    }
+
+    /// Graceful shutdown contract: with the sender gone (pump stopped) the
+    /// worker processes every accepted event before it exits. Nothing is
+    /// released, nothing is lost, and the accounting closes exactly.
+    #[tokio::test]
+    async fn graceful_shutdown_drains_thousands_of_accepted_events() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, receiver) = tokio::sync::mpsc::channel::<IngressItem>(INGRESS_QUEUE_CAPACITY);
+        for _ in 0..INGRESS_QUEUE_CAPACITY {
+            admit_event(&core, &sender, ClientEvent::Event(chat())).await;
+        }
+        assert_eq!(
+            core.live_ingress.accepted.load(Ordering::Relaxed),
+            INGRESS_QUEUE_CAPACITY as u64
+        );
+        assert_eq!(
+            core.live_ingress.queued.load(Ordering::Relaxed),
+            INGRESS_QUEUE_CAPACITY as u64
+        );
+        // A newer connection fences every queued item, so the drain is
+        // deterministic and side-effect free but still exercises the full
+        // "thousands of accepted events" path.
+        core.connection_sequence.store(9, Ordering::Release);
+        drop(sender);
+        let emergency = tokio_util::sync::CancellationToken::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_ingress_worker(Arc::clone(&core), receiver, emergency),
+        )
+        .await
+        .expect("graceful drain must complete");
+        assert_eq!(
+            core.live_ingress.stale.load(Ordering::Relaxed),
+            INGRESS_QUEUE_CAPACITY as u64
+        );
+        assert_eq!(core.live_ingress.processed.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.cancelled.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.in_flight.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.outstanding(), 0);
+        assert_eq!(
+            core.live_ingress.lifecycle(),
+            IngressLifecycle::Stopped,
+            "worker exit must reach the terminal lifecycle state"
+        );
+    }
+
+    /// Emergency stop (drain deadline already expired): every payload still
+    /// buffered is released *and counted*, so the invariant still holds.
+    #[tokio::test]
+    async fn emergency_stop_accounts_every_released_queue_payload() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, receiver) = tokio::sync::mpsc::channel::<IngressItem>(64);
+        for _ in 0..64 {
+            admit_event(&core, &sender, ClientEvent::Event(chat())).await;
+        }
+        let emergency = tokio_util::sync::CancellationToken::new();
+        emergency.cancel();
+        run_ingress_worker(Arc::clone(&core), receiver, emergency).await;
+        assert_eq!(core.live_ingress.cancelled.load(Ordering::Relaxed), 64);
+        assert_eq!(core.live_ingress.abandoned.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.processed.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.outstanding(), 0);
+        assert_eq!(core.live_ingress.lifecycle(), IngressLifecycle::Stopped);
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_empty_queue_exits_cleanly() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, receiver) = tokio::sync::mpsc::channel::<IngressItem>(8);
+        drop(sender);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_ingress_worker(
+                Arc::clone(&core),
+                receiver,
+                tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("empty shutdown must not hang");
+        assert_eq!(core.live_ingress.accepted.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.cancelled.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.outstanding(), 0);
+        assert_eq!(core.live_ingress.lifecycle(), IngressLifecycle::Stopped);
+    }
+
+    /// Cancellation during queue reservation: a lifecycle event that would
+    /// otherwise wait forever on a full queue is released when admission
+    /// stops, and is counted as never admitted — not silently swallowed.
+    #[tokio::test]
+    async fn admission_stop_releases_event_waiting_on_queue_reservation() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, _held) = tokio::sync::mpsc::channel::<IngressItem>(1);
+        sender
+            .send(IngressItem {
+                generation: 0,
+                event: ClientEvent::Event(room_stats()),
+            })
+            .await
+            .unwrap();
+        let accepted_before = core.live_ingress.accepted.load(Ordering::Relaxed);
+        core.live_admission.cancel();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            admit_event(
+                &core,
+                &sender,
+                ClientEvent::Reconnecting {
+                    attempt: 1,
+                    delay_ms: 0,
+                },
+            ),
+        )
+        .await
+        .expect("admission stop must release a blocked reservation");
+        assert_eq!(
+            core.live_ingress
+                .admission_cancelled
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            core.live_ingress.accepted.load(Ordering::Relaxed),
+            accepted_before,
+            "a released reservation must never be counted as accepted"
+        );
+    }
+
+    /// Shutdown racing an active producer: every attempt is either admitted
+    /// or explicitly counted, and the consumer settles the invariant.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn admission_stop_while_producer_admits_accounts_every_event() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<IngressItem>(64);
+        let consumer_core = Arc::clone(&core);
+        let consumer = tokio::spawn(async move {
+            let mut taken = 0u64;
+            while receiver.recv().await.is_some() {
+                consumer_core
+                    .live_ingress
+                    .queued
+                    .fetch_sub(1, Ordering::Relaxed);
+                consumer_core
+                    .live_ingress
+                    .in_flight
+                    .fetch_add(1, Ordering::Relaxed);
+                consumer_core
+                    .live_ingress
+                    .in_flight
+                    .fetch_sub(1, Ordering::Relaxed);
+                consumer_core
+                    .live_ingress
+                    .processed
+                    .fetch_add(1, Ordering::Relaxed);
+                taken += 1;
+            }
+            taken
+        });
+        let producer_core = Arc::clone(&core);
+        let producer = tokio::spawn(async move {
+            let mut attempted = 0u64;
+            for _ in 0..10_000 {
+                attempted += 1;
+                admit_event(
+                    &producer_core,
+                    &sender,
+                    ClientEvent::Reconnecting {
+                        attempt: 1,
+                        delay_ms: 0,
+                    },
+                )
+                .await;
+            }
+            attempted
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        core.live_admission.cancel();
+        let attempted = tokio::time::timeout(std::time::Duration::from_secs(30), producer)
+            .await
+            .expect("producer never deadlocks on a stopped admission")
+            .expect("producer task");
+        let taken = tokio::time::timeout(std::time::Duration::from_secs(10), consumer)
+            .await
+            .expect("consumer joins")
+            .expect("consumer task");
+        let accepted = core.live_ingress.accepted.load(Ordering::Relaxed);
+        let admission_cancelled = core
+            .live_ingress
+            .admission_cancelled
+            .load(Ordering::Relaxed);
+        assert_eq!(
+            accepted + admission_cancelled,
+            attempted,
+            "every attempted admission is accepted or explicitly released"
+        );
+        assert_eq!(taken, accepted, "every accepted event was consumed");
+        assert_eq!(core.live_ingress.queued.load(Ordering::Relaxed), 0);
+        assert_eq!(core.live_ingress.outstanding(), 0);
     }
 }

@@ -2,7 +2,11 @@
 //! The worker owns only PointsService, never AppCore. An executing synchronous
 //! award is awaited to completion; cancellation is only reported before admission.
 use super::{AwardOptions, PointAction, PointAward, PointsService};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(test)]
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -17,14 +21,38 @@ pub(crate) struct PointsWorkService {
     sender: Mutex<Option<mpsc::Sender<AwardJob>>>,
     worker: Mutex<Option<std::thread::JoinHandle<()>>>,
     stopping: CancellationToken,
+    /// Test-only: simulates a wedged synchronous SQLite award so shutdown
+    /// ladders and stall policies can be exercised deterministically. The
+    /// gate always releases when shutdown begins, so a stall can delay
+    /// shutdown only by the configured bound — never hang it.
+    #[cfg(test)]
+    stall_ms: Arc<AtomicU64>,
 }
 impl PointsWorkService {
     pub(crate) fn new(points: Arc<PointsService>) -> Self {
         let (sender, mut receiver) = mpsc::channel::<AwardJob>(CAPACITY);
+        let stopping = CancellationToken::new();
+        let stopping_for_worker = stopping.clone();
+        #[cfg(test)]
+        let stall_ms = Arc::new(AtomicU64::new(0));
+        #[cfg(test)]
+        let stall_for_worker = Arc::clone(&stall_ms);
         let worker = std::thread::Builder::new()
             .name("live-points".into())
             .spawn(move || {
                 while let Some(job) = receiver.blocking_recv() {
+                    #[cfg(test)]
+                    {
+                        let stall = stall_for_worker.load(Ordering::Relaxed);
+                        if stall > 0 {
+                            let deadline = Instant::now() + Duration::from_millis(stall);
+                            while Instant::now() < deadline && !stopping_for_worker.is_cancelled() {
+                                std::thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                    }
+                    #[cfg(not(test))]
+                    let _ = &stopping_for_worker;
                     // Dropped queued callers never cause delayed effects.
                     if job.answer.is_closed() {
                         continue;
@@ -37,17 +65,29 @@ impl PointsWorkService {
             Ok(worker) => Self {
                 sender: Mutex::new(Some(sender)),
                 worker: Mutex::new(Some(worker)),
-                stopping: CancellationToken::new(),
+                stopping,
+                #[cfg(test)]
+                stall_ms,
             },
             Err(error) => {
                 tracing::error!(%error, "LIVE points execution worker unavailable");
                 Self {
                     sender: Mutex::new(None),
                     worker: Mutex::new(None),
-                    stopping: CancellationToken::new(),
+                    stopping,
+                    #[cfg(test)]
+                    stall_ms,
                 }
             }
         }
+    }
+
+    /// Test-only: hold the next award inside the worker for up to `duration`
+    /// (released earlier if shutdown starts).
+    #[cfg(test)]
+    pub(crate) fn stall_for_test(&self, duration: Duration) {
+        self.stall_ms
+            .store(duration.as_millis() as u64, Ordering::SeqCst);
     }
     pub(crate) async fn award(
         &self,

@@ -5,5 +5,5 @@ mod handlers;
 pub(crate) mod ingress;
 mod mapping;
 mod publish;
-mod pump;
+pub(crate) mod pump;
 mod session;

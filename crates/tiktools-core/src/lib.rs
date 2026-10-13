@@ -126,6 +126,19 @@ pub struct AppCore {
     connection_context: RwLock<Option<LiveContext>>,
     #[cfg(feature = "native-tiktok")]
     live_pump_started: AtomicBool,
+    /// Cancels *new* LIVE event admission only. Cancelling it stops the pump,
+    /// which closes the queue sender and lets the worker drain everything
+    /// already accepted. It is deliberately not the worker's token.
+    #[cfg(feature = "native-tiktok")]
+    live_admission: tokio_util::sync::CancellationToken,
+    /// Emergency stop for the ordered worker, cancelled only after the
+    /// graceful drain deadline expires. The worker then stops between items
+    /// and the shutdown ladder accounts for whatever is left.
+    #[cfg(feature = "native-tiktok")]
+    live_ingress_stop: tokio_util::sync::CancellationToken,
+    /// Bounded stage deadlines for `AppCore::stop_live_ingress`.
+    #[cfg(feature = "native-tiktok")]
+    live_shutdown_deadlines: Mutex<crate::live_events::pump::LiveShutdownDeadlines>,
     #[cfg(feature = "native-tiktok")]
     live_pump_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Ordered ingress worker: the sole consumer of the bounded LIVE queue.
@@ -265,6 +278,14 @@ impl AppCore {
             connection_context: RwLock::new(None),
             #[cfg(feature = "native-tiktok")]
             live_pump_started: AtomicBool::new(false),
+            #[cfg(feature = "native-tiktok")]
+            live_admission: tokio_util::sync::CancellationToken::new(),
+            #[cfg(feature = "native-tiktok")]
+            live_ingress_stop: tokio_util::sync::CancellationToken::new(),
+            #[cfg(feature = "native-tiktok")]
+            live_shutdown_deadlines: Mutex::new(
+                crate::live_events::pump::LiveShutdownDeadlines::from_env(),
+            ),
             #[cfg(feature = "native-tiktok")]
             live_pump_task: Mutex::new(None),
             #[cfg(feature = "native-tiktok")]
@@ -476,25 +497,17 @@ impl AppCore {
         // when shutdown begins; `notify_waiters` alone would be lost before
         // the task reaches its select point.
         self.plugin_state.poll_shutdown.notify_one();
+        // LIVE ingestion stops first and in its own order: admission closes,
+        // the pump exits (dropping the queue sender), and the worker drains
+        // every event already accepted before it is joined. The observer
+        // token stays open during that drain so drained events keep their
+        // automation side effects instead of being silently dropped here.
+        #[cfg(feature = "native-tiktok")]
+        self.stop_live_ingress().await;
         // Persistent cancellation: every supervisor and worker observes
         // shutdown no matter when it reaches its select point, and no
         // worker can steal the supervisor's wakeup.
         self.plugin_state.observer_shutdown.cancel();
-        #[cfg(feature = "native-tiktok")]
-        {
-            let pump = recover_mutex(&self.live_pump_task, "LIVE pump").take();
-            if let Some(pump) = pump {
-                let _ = pump.await;
-            }
-            // The pump's exit drops the ingress sender, so joining the
-            // worker next drains every accepted event before returning.
-            // Shutdown therefore never discards admitted LIVE work, and
-            // both tasks release their `Arc` references here.
-            let worker = recover_mutex(&self.live_ingress_task, "LIVE ingress worker").take();
-            if let Some(worker) = worker {
-                let _ = worker.await;
-            }
-        }
         self.events
             .publish_domain(crate::events::DomainEvent::Shutdown);
         self.publish_disconnected_event().await;

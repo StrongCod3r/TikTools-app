@@ -187,6 +187,60 @@ blocker. This draft must not be described as meeting the full definition of done
 Frontend regression commit: `77b6967`.
 Native WebView smoke was rerun after the core execution-worker changes and passed.
 
+
+## Phase 1 — loss-aware graceful ingress shutdown (prompt phase 1)
+
+Root cause fixed: the pump and the ordered ingress worker shared
+`plugin_state.observer_shutdown`, so `AppCore::shutdown` cancelled both at
+once. The worker's biased select therefore released every already-admitted
+event as `cancelled` instead of draining it, contradicting the documented
+graceful-drain contract.
+
+- Two separate scopes now exist: `AppCore::live_admission` stops *new*
+  admission (the pump observes it and drops the queue sender), and
+  `AppCore::live_ingress_stop` is an emergency stop used only after the
+  drain deadline expires. The worker keeps draining until the sender closes.
+- Explicit monotonic lifecycle: `running -> stoppingAdmission -> draining ->
+  stopped`, published in ingress diagnostics. A stale writer can never move
+  it backwards.
+- `AppCore::stop_live_ingress` owns the bounded ladder: pump join
+  (`TIKTOOLS_LIVE_PUMP_STOP_DEADLINE_MS`, 5 s) → ingress drain
+  (`TIKTOOLS_LIVE_DRAIN_DEADLINE_MS`, 10 s) → emergency stop
+  (`TIKTOOLS_LIVE_INGRESS_STOP_DEADLINE_MS`, 5 s) → task abort with explicit
+  accounting. Every stage is bounded, so a wedged synchronous points award
+  cannot deadlock shutdown.
+- Admission accounts every event it receives: an event released because
+  admission stopped is counted in `admission_cancelled`, never dropped
+  silently, including cancellation while a lifecycle event waits on a queue
+  reservation.
+- Accounting: `stale` is now exclusive of `processed`; a new `in_flight`
+  gauge carries items between take and completion; `abandoned` reports
+  in-flight items cut off by an emergency abort (their outcome is unknown,
+  never reported as a clean cancel). Settled invariant:
+  `accepted = processed + stale + cancelled + abandoned`, and
+  `outstanding()` is exposed in diagnostics.
+- Shutdown now cancels the observer token *after* the LIVE drain, so drained
+  events keep their automation side effects instead of being dropped by the
+  cancellation they were admitted for.
+- `start_live_event_pump` refuses to start after shutdown began or admission
+  stopped, so no unjoinable pump can be registered.
+
+Tests (all new/deterministic): graceful drain of 2,048 accepted events;
+emergency stop accounting; empty-queue shutdown; cancellation during queue
+reservation; admission stop racing an active producer; `stop_live_ingress`
+drain + owner release; shutdown racing an active producer; 8 repeated
+start/stop cycles with post-shutdown start refusal; and a wedged synchronous
+points award (test-only stall gate in `PointsWorkService`) proving the ladder
+aborts, accounts 3 queued + 1 in-flight events, and returns ownership to the
+baseline.
+
+Validation: `cargo fmt --all -- --check`, workspace Clippy with `-D warnings`,
+workspace tests (647 passed, 0 failed), and core feature-enabled suite
+(303 library + 8 throughput, 1 ignored RSS test) all pass. No real-LIVE
+measurement was collected.
+
+Phase 1 commit: `pending` (this batch).
+
 ### Reviewable commit sequence
 
 - `4c3cb3e`: connection attempt ownership, transport generation and ingress accounting.
