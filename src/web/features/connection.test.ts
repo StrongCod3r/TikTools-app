@@ -228,3 +228,36 @@ describe('useConnection refreshStatus', () => {
     expect(connection.error.value).toBe('');
   });
 });
+
+test('a stale failed connect cannot overwrite a later disconnect', async () => {
+  let failConnect: ((error: Error) => void) | undefined;
+  const control = stubControl({
+    call: <T,>(method: string): Promise<T> => method === 'live.connect'
+      ? new Promise<T>((_resolve, reject) => { failConnect = reject; })
+      : Promise.resolve({ connected: false } as T),
+  });
+  const connection = useConnection(control, callbacks);
+  connection.handleConnect('first');
+  connection.handleDisconnect();
+  failConnect?.(new Error('old failure'));
+  await flushPromises();
+  expect(connection.status.value).toBe('disconnected');
+  expect(connection.error.value).toBe('');
+  connection.dispose();
+});
+
+test('dispose fences pending status refresh and releases topic subscriptions', async () => {
+  let resolveStatus: ((result: unknown) => void) | undefined;
+  let removed = 0;
+  const control = stubControl({
+    call: <T,>(): Promise<T> => new Promise<T>((resolve) => { resolveStatus = (result) => resolve(result as T); }),
+    onTopic: () => () => { removed += 1; },
+  });
+  const connection = useConnection(control, callbacks);
+  const refresh = connection.refreshStatus();
+  connection.dispose();
+  resolveStatus?.({ connected: true, uniqueId: 'retired' });
+  await refresh;
+  expect(connection.status.value).toBe('idle');
+  expect(removed).toBe(4);
+});

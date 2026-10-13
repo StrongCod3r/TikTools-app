@@ -68,3 +68,22 @@ Later batches are in progress and not covered by this commit's completion record
 
 Batch 1 commit: `4c3cb3e`. Later lifecycle crash handling is separately tested
 (5 transport tests passed); no real-LIVE measurements have been collected.
+
+
+### Batch 3: frontend admission and disposal
+
+- Main control client admits at most 128 pending RPCs, rejects excess with
+  `overloaded`, exposes count diagnostics, and rejects calls after detach.
+- Feed replay maps belong to the composable instance. Message IDs expire after
+  ten minutes; creator/room switching clears them; same-room reconnect keeps them.
+- Feed disposal cancels owned frame callbacks, watchers, scroll listeners and
+  debounces; debounces now expose a compatible callable `cancel` method.
+- Connection RPC completions are fenced by operation/refresh revisions and
+  disposal. Topic subscriptions are explicitly released.
+- Controller uses the feed's coalesced scroll frame and coalesces gap refreshes;
+  gaps during a refresh schedule one further pass rather than unbounded refreshes.
+- Validation: 40 focused tests passed, full scoped suite 682 passed; frontend
+  type-check, lint and production build passed. Full application mount/WebView
+  integration, age-expiry and other composable teardown audits remain outstanding.
+
+Batch 2 commit: `46ac837`.

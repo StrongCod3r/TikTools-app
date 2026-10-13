@@ -187,3 +187,12 @@ test('debounce coalesces rapid calls into one', async () => {
   await new Promise((resolve) => setTimeout(resolve, 45));
   expect(calls).toBe(1);
 });
+
+test('cancelled debounce releases pending callback', async () => {
+  let calls = 0;
+  const callback = debounce(() => { calls += 1; }, 1);
+  callback();
+  callback.cancel();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  expect(calls).toBe(0);
+});

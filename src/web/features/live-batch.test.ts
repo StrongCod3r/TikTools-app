@@ -158,3 +158,29 @@ describe('live feed batching', () => {
     live.dispose();
   });
 });
+
+test('feed identity caches belong to an instance and preserve only the same room', () => {
+  installFrameControl();
+  const harness = createControl();
+  const live = useLive(harness.control, { systemAuthor: () => 'system' });
+  const event = { event: { kind: 'chat', author: 'viewer', text: 'hello', msgId: 'stable' } };
+  harness.emit('live.connected', { uniqueId: 'a', roomId: '1' } as never);
+  harness.emit('live.ui-event', event as never);
+  runFrames();
+  live.resetEvents();
+  harness.emit('live.connected', { uniqueId: 'a', roomId: '1' } as never);
+  harness.emit('live.ui-event', event as never);
+  runFrames();
+  expect(live.events.value).toHaveLength(0);
+  harness.emit('live.connected', { uniqueId: 'b', roomId: '2' } as never);
+  harness.emit('live.ui-event', event as never);
+  runFrames();
+  expect(live.events.value).toHaveLength(1);
+  live.dispose();
+  const next = useLive(harness.control, { systemAuthor: () => 'system' });
+  harness.emit('live.ui-event', event as never);
+  runFrames();
+  expect(next.events.value).toHaveLength(1);
+  next.dispose();
+  uninstallFrameControl();
+});
