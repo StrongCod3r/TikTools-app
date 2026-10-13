@@ -156,6 +156,23 @@ impl PointsInner {
         }
     }
 
+    /// Amortized eviction slack: past `capacity`, up to this many extra
+    /// rows accumulate before one scan evicts back down to `capacity`.
+    /// Without it every insert past the bound would pay a full O(N) scan —
+    /// the same per-event trap the leaderboard sort was. The overshoot is
+    /// a hard +64 rows, never unbounded growth.
+    pub(crate) const EVICT_BATCH_SLACK: usize = 64;
+
+    /// Hot-path gate: run the O(N) eviction scan only once the overshoot
+    /// reaches a full batch, keeping steady-state inserts amortized O(1).
+    /// Cold paths (explicit resize, single-row promotion, resets) call
+    /// `evict_cold` directly for an exact bound.
+    fn evict_if_over(&mut self, committed: u64) {
+        if self.viewers.len() > self.capacity + Self::EVICT_BATCH_SLACK {
+            self.evict_cold(committed);
+        }
+    }
+
     /// Evicts cold viewers until the cache fits `capacity`. Viewers with
     /// uncommitted writes (sequence newer than `committed`) are never
     /// evicted; when every viewer is dirty the cache temporarily exceeds its
@@ -776,10 +793,11 @@ impl PointsService {
                 state.clone()
             };
             inner.pending.insert(unique_id.clone(), seq);
-            // Enforce the memory bound on the insert path only; steady-state
-            // updates never scan. Uncommitted rows are exempt from eviction.
+            // Enforce the memory bound on the insert path only, amortized:
+            // steady-state updates never scan. Uncommitted rows are exempt
+            // from eviction.
             let committed = self.committed_seq();
-            inner.evict_cold(committed);
+            inner.evict_if_over(committed);
             (
                 PointAward {
                     unique_id,
@@ -919,9 +937,10 @@ impl PointsService {
             viewer.last_seen = now_millis();
             let seq = self.next_seq();
             inner.pending.insert(unique_id.clone(), seq);
-            // Bound enforced after the refresh, never on a stale timestamp.
+            // Bound enforced after the refresh (amortized), never on a
+            // stale timestamp.
             let committed = self.committed_seq();
-            inner.evict_cold(committed);
+            inner.evict_if_over(committed);
             (
                 PointAward {
                     unique_id: unique_id.clone(),
@@ -1236,7 +1255,7 @@ mod tests {
         }
         let diagnostics = service.diagnostics();
         assert!(
-            diagnostics.hot_size <= 1_000,
+            diagnostics.hot_size <= 1_000 + PointsInner::EVICT_BATCH_SLACK,
             "hot cache must respect its bound, got {}",
             diagnostics.hot_size
         );
@@ -1316,7 +1335,7 @@ mod tests {
         assert_eq!(first["points"], 28.0);
         let diagnostics = restarted.diagnostics();
         assert!(
-            diagnostics.hot_size <= 50,
+            diagnostics.hot_size <= 50 + PointsInner::EVICT_BATCH_SLACK,
             "hot_size={}",
             diagnostics.hot_size
         );
@@ -1337,7 +1356,7 @@ mod tests {
         }
         let diagnostics = service.diagnostics();
         assert!(
-            diagnostics.hot_size <= 10,
+            diagnostics.hot_size <= 10 + PointsInner::EVICT_BATCH_SLACK,
             "hot_size={}",
             diagnostics.hot_size
         );
@@ -1363,6 +1382,59 @@ mod tests {
         let viewer = service.viewer("racer").expect("racer exists");
         assert_eq!(viewer["totalChats"], 8 * 250);
         assert_eq!(viewer["points"], 8.0 * 250.0);
+    }
+
+    /// Slow/unavailable SQLite must never break awarding or shutdown:
+    /// the hot cache serves reads and writes queue (or fall back loudly),
+    /// and shutdown still joins cleanly.
+    #[cfg(all(feature = "persistence", target_os = "linux"))]
+    #[test]
+    fn unavailable_storage_never_breaks_awards_or_shutdown() {
+        use crate::db::DatabaseManager;
+        use crate::paths::AppPaths;
+        let root = std::env::temp_dir().join(format!(
+            "tiktools-points-unavail-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = AppPaths {
+            data: root.join("data"),
+            plugins: root.join("plugins"),
+            plugin_data: root.join("plugin-data"),
+            builtin_plugins: root.join("builtin-plugins"),
+            development_plugins: None,
+            logs: root.join("logs"),
+            temp: root.join("temp"),
+            root: root.clone(),
+        };
+        paths.ensure_directories().expect("temp dirs");
+        // Poison the database file: every SQLite query under it fails,
+        // exercising the writer-error and fallback paths. (Read-only is
+        // belt-and-braces; the garbage content breaks SQLite regardless.)
+        let db_file = root.join("data").join("tiktok-points.db");
+        std::fs::write(&db_file, b"not a database").expect("poison file");
+        let mut permissions = std::fs::metadata(&db_file).expect("metadata").permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&db_file, permissions).expect("readonly");
+        let database = Arc::new(DatabaseManager::new(paths));
+        let service = PointsService::new(Arc::clone(&database));
+        for id in 0..100 {
+            let award = service
+                .award_points(
+                    &format!("survivor-{id}"),
+                    PointAction::Chat,
+                    AwardOptions::default(),
+                )
+                .expect("awards work from the hot cache");
+            assert_eq!(award.total_points, 1.0);
+        }
+        // Reads still serve from memory; shutdown joins without hanging.
+        let viewer = service.viewer("survivor-0").expect("memory serves reads");
+        assert_eq!(viewer["points"], 1.0);
+        service.shutdown();
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

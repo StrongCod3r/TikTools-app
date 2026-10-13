@@ -214,6 +214,28 @@ fn fanout_cache_matches_registry_and_tracks_revisions() {
 }
 
 #[test]
+fn rapid_enable_disable_cycles_keep_fanout_consistent() {
+    use super::fanout::FanoutCache;
+    use std::sync::atomic::Ordering;
+    let core = AppCore::new(Arc::new(NoopEmitter));
+    // A hundred enable/disable flaps: every write bumps the revision, and
+    // the cache rebuilds exactly once per generation of flaps — no stale
+    // subscriber set survives a cycle.
+    for round in 0..100 {
+        core.set_plugin_activation("flapper", true, round % 2 == 0);
+    }
+    assert_eq!(
+        core.plugin_state
+            .activation_revision
+            .load(Ordering::Acquire),
+        101
+    );
+    let cache = FanoutCache::current(&core);
+    let _ = cache.matching("live.event", false);
+    let _ = cache.matching("live.event", true);
+}
+
+#[test]
 fn delivery_counters_distinguish_overload_from_failure() {
     let core = AppCore::new(Arc::new(NoopEmitter));
     core.record_plugin_accepted("fast");

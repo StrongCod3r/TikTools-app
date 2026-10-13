@@ -295,6 +295,9 @@ pub(crate) async fn run_ingress_worker(
         let Some(item) = item else {
             break; // Sender dropped and queue drained: clean exit.
         };
+        // Paired with the admission increment: `admit_event` is the sole
+        // sender in production, so every take here matches exactly one
+        // admit. Direct test injection must go through admission too.
         core.live_ingress.queued.fetch_sub(1, Ordering::Relaxed);
         // Stale-generation fence: a newer connection exists, so this data
         // item belongs to an older session and must not be credited to the
@@ -505,6 +508,88 @@ mod tests {
             critical_before + 1
         );
         assert_eq!(core.event_gap_stats().0, gaps_before + 1);
+    }
+
+    /// Sustained overload far past queue capacity: admission stays
+    /// responsive (sheddable events never block), accounting is exact
+    /// (every sent item is accepted or counted shed), and memory stays
+    /// bounded (the queue never exceeds its capacity).
+    #[tokio::test]
+    async fn sustained_overload_sheds_with_exact_accounting() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, _held) = tokio::sync::mpsc::channel::<IngressItem>(INGRESS_QUEUE_CAPACITY);
+        // Occupy the queue the same way a stalled worker would: the held
+        // receiver never drains, so every further admit meets pressure.
+        for _ in 0..INGRESS_QUEUE_CAPACITY {
+            sender
+                .send(IngressItem {
+                    generation: 0,
+                    event: ClientEvent::Event(room_stats()),
+                })
+                .await
+                .unwrap();
+        }
+        let sent = 10_000;
+        let started = now_millis();
+        for id in 0..sent {
+            let event = if id % 2 == 0 { chat() } else { room_stats() };
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                admit_event(&core, &sender, ClientEvent::Event(event)),
+            )
+            .await
+            .expect("sheddable admission never blocks");
+        }
+        let elapsed = now_millis().saturating_sub(started);
+        let accepted = core.live_ingress.accepted.load(Ordering::Relaxed);
+        let dropped = core.live_ingress.dropped_data.load(Ordering::Relaxed);
+        // The prefill injected pressure directly (never drained, never
+        // counted); every item sent through admission is either admitted
+        // or counted shed — none vanish.
+        assert_eq!(
+            accepted + dropped,
+            sent as u64,
+            "every admitted item is accepted or counted shed"
+        );
+        assert_eq!(accepted, 0, "a saturated queue admits nothing further");
+        assert!(
+            core.live_ingress.queued.load(Ordering::Relaxed) <= INGRESS_QUEUE_CAPACITY as u64,
+            "the queue never exceeds its bound"
+        );
+        println!(
+            "  sustained overload: {sent} shed-path admits in {elapsed} ms, dropped={dropped}"
+        );
+    }
+
+    /// Shutdown while the queue is saturated: the worker drains every
+    /// accepted item (stale ones fence fast) and joins — no retained
+    /// payloads, no detached task.
+    #[tokio::test]
+    async fn saturated_queue_drains_and_joins_on_shutdown() {
+        let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+        let (sender, receiver) = tokio::sync::mpsc::channel::<IngressItem>(64);
+        // Admit through the real path (the sole production sender), so the
+        // queue gauge pairs exactly with worker takes. Stamps read
+        // generation 0 here ...
+        for _ in 0..64 {
+            admit_event(&core, &sender, ClientEvent::Event(chat())).await;
+        }
+        // ... and a newer connection arrives before the drain: every item
+        // fences on the fast path, so the drain is quick and side-effect
+        // free.
+        core.connection_sequence.store(9, Ordering::Release);
+        assert_eq!(core.live_ingress.queued.load(Ordering::Relaxed), 64);
+        drop(sender);
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_ingress_worker(Arc::clone(&core), receiver, shutdown),
+        )
+        .await
+        .expect("saturated worker drains and exits");
+        assert_eq!(core.live_ingress.stale.load(Ordering::Relaxed), 64);
+        assert_eq!(core.live_ingress.processed.load(Ordering::Relaxed), 64);
+        assert_eq!(core.live_ingress.queued.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
