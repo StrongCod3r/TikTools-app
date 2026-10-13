@@ -197,7 +197,7 @@ fn voice_values(body: serde_json::Value) -> Vec<String> {
 }
 
 impl SpeechEngine {
-    async fn process(&mut self, job: Box<SpeechJob>) {
+    async fn process(&mut self, job: Box<SpeechJob>) -> Option<bool> {
         let SpeechJob {
             text,
             author,
@@ -213,13 +213,13 @@ impl SpeechEngine {
             self.next_index(len)
         });
         if !decision.speak {
-            return;
+            return None;
         }
         if !self.deduper.claim(
             &policy::fingerprint(&author.handle, &decision.spoken_text),
             admitted_at,
         ) {
-            return;
+            return None;
         }
         match self
             .speak(
@@ -231,8 +231,14 @@ impl SpeechEngine {
             )
             .await
         {
-            Ok(summary) => eprintln!("sonicboom: {summary}"),
-            Err(error) => eprintln!("sonicboom: {error}"),
+            Ok(summary) => {
+                eprintln!("sonicboom: {summary}");
+                Some(true)
+            }
+            Err(error) => {
+                eprintln!("sonicboom: {error}");
+                Some(false)
+            }
         }
     }
 }
@@ -246,8 +252,18 @@ struct SpeechJob {
     admitted_at: u64,
 }
 
+#[derive(Default)]
+struct SpeechStats {
+    queued: std::sync::atomic::AtomicU64,
+    spoken: std::sync::atomic::AtomicU64,
+    failed: std::sync::atomic::AtomicU64,
+    rejected: std::sync::atomic::AtomicU64,
+    cancelled: std::sync::atomic::AtomicU64,
+}
+
 struct SonicBoom {
     settings: config::ConfigCache,
+    stats: std::sync::Arc<SpeechStats>,
     jobs: Option<tokio::sync::mpsc::Sender<Box<SpeechJob>>>,
     cancel: tokio::sync::watch::Sender<bool>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -257,6 +273,8 @@ impl Default for SonicBoom {
     fn default() -> Self {
         let (jobs, mut receiver) = tokio::sync::mpsc::channel(SPEECH_QUEUE_CAPACITY);
         let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+        let stats = std::sync::Arc::new(SpeechStats::default());
+        let worker_stats = std::sync::Arc::clone(&stats);
         let worker =
             std::thread::Builder::new()
                 .name("sonicboom-speech".into())
@@ -275,18 +293,24 @@ impl Default for SonicBoom {
                     };
                     tokio::select! {
                         biased;
-                        _ = cancelled.changed() => break,
-                        _ = engine.process(job) => {},
+                        _ = cancelled.changed() => { worker_stats.cancelled.fetch_add(1, std::sync::atomic::Ordering::Relaxed); break; },
+                        outcome = engine.process(job) => match outcome {
+                            Some(true) => { worker_stats.spoken.fetch_add(1, std::sync::atomic::Ordering::Relaxed); },
+                            Some(false) => { worker_stats.failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed); },
+                            None => {},
+                        },
                     }
                 }
                 receiver.close();
                 let pending = receiver.len();
+                worker_stats.cancelled.fetch_add(pending as u64, std::sync::atomic::Ordering::Relaxed);
                 if pending > 0 { eprintln!("sonicboom: cancelled {pending} queued speech jobs"); }
             });
                 })
                 .expect("speech worker");
         Self {
             settings: config::ConfigCache::new(),
+            stats,
             jobs: Some(jobs),
             cancel,
             worker: Some(worker),
@@ -300,6 +324,15 @@ impl SonicBoom {
         self.jobs.take();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+            use std::sync::atomic::Ordering::Relaxed;
+            eprintln!(
+                "sonicboom: speech totals queued={} spoken={} failed={} rejected={} cancelled={}",
+                self.stats.queued.load(Relaxed),
+                self.stats.spoken.load(Relaxed),
+                self.stats.failed.load(Relaxed),
+                self.stats.rejected.load(Relaxed),
+                self.stats.cancelled.load(Relaxed)
+            );
         }
     }
 }
@@ -360,8 +393,15 @@ impl Plugin for SonicBoom {
             admitted_at: now_millis(),
         });
         match self.jobs.as_ref().map(|jobs| jobs.try_send(job)) {
-            Some(Ok(())) => {}
+            Some(Ok(())) => {
+                self.stats
+                    .queued
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             Some(Err(tokio::sync::mpsc::error::TrySendError::Full(_))) => {
+                self.stats
+                    .rejected
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 eprintln!("sonicboom: speech queue full; rejected job");
             }
             _ => return Err(PluginError::other("speech worker stopped")),
