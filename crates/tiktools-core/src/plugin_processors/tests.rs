@@ -11,11 +11,12 @@ type Handler = Arc<dyn Fn(&[u8]) -> Result<Vec<u8>, PluginLoaderError> + Send + 
 
 struct FakeRuntime {
     handler: Handler,
+    kind: tiktools_plugin_api::manifest::PluginRuntimeKind,
 }
 
 impl PluginRuntime for FakeRuntime {
     fn kind(&self) -> tiktools_plugin_api::manifest::PluginRuntimeKind {
-        tiktools_plugin_api::manifest::PluginRuntimeKind::Process
+        self.kind
     }
 
     fn load(
@@ -100,6 +101,18 @@ fn processor_manifest(id: &str, capabilities: &[&str], processors: Value) -> Val
 }
 
 fn make_harness(manifests: &[(&str, Value)], handler: Handler) -> Harness {
+    make_harness_with_kind(
+        manifests,
+        handler,
+        tiktools_plugin_api::manifest::PluginRuntimeKind::Process,
+    )
+}
+
+fn make_harness_with_kind(
+    manifests: &[(&str, Value)],
+    handler: Handler,
+    kind: tiktools_plugin_api::manifest::PluginRuntimeKind,
+) -> Harness {
     let tag = HARNESS_COUNTER.fetch_add(1, Ordering::AcqRel);
     let root = std::env::temp_dir().join(format!(
         "tiktools-processor-test-{}-{tag}",
@@ -116,7 +129,7 @@ fn make_harness(manifests: &[(&str, Value)], handler: Handler) -> Harness {
         std::fs::write(directory.join("entry.bin"), b"fake").unwrap();
     }
     let mut runtimes = RuntimeRegistry::default();
-    runtimes.register(Arc::new(FakeRuntime { handler }) as Arc<dyn PluginRuntime>);
+    runtimes.register(Arc::new(FakeRuntime { handler, kind }) as Arc<dyn PluginRuntime>);
     let plugins = Arc::new(PluginManager::with_runtimes(
         vec![PluginRoot {
             path: root.clone(),
@@ -1042,7 +1055,7 @@ async fn full_global_slots_shed_load_without_calling_plugins() {
 
 #[tokio::test]
 async fn failing_processor_does_not_circuit_break_its_sibling() {
-    let manifest = processor_manifest(
+    let mut manifest = processor_manifest(
         "pair",
         &["events.enrich"],
         json!([
@@ -1050,9 +1063,13 @@ async fn failing_processor_does_not_circuit_break_its_sibling() {
             {"id": "pair.steady", "title": {"default": "Steady"}, "timeoutMs": 2000},
         ]),
     );
+    // This fake executes an opaque blocking handler without process I/O
+    // cancellation. Model it as native: a real process timeout retires the
+    // entire generation and must cancel its queued sibling calls.
+    manifest["runtime"] = json!("native");
     let steady_calls = Arc::new(AtomicU64::new(0));
     let steady_for_handler = Arc::clone(&steady_calls);
-    let harness = make_harness(
+    let harness = make_harness_with_kind(
         &[("pair", manifest)],
         scripted(move |request| {
             let call: tiktools_plugin_sdk::PluginCall = serde_json::from_slice(request).unwrap();
@@ -1070,6 +1087,7 @@ async fn failing_processor_does_not_circuit_break_its_sibling() {
                 json!({}),
             ))
         }),
+        tiktools_plugin_api::manifest::PluginRuntimeKind::Native,
     );
     let flaky = ProcessorKey::new("pair", "pair.flaky");
     let steady = ProcessorKey::new("pair", "pair.steady");
