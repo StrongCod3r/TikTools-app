@@ -20,11 +20,23 @@ pub(crate) async fn run_observer(
 ) {
     let mut workers: BTreeMap<String, WorkerHandle> = BTreeMap::new();
     let mut tasks = tokio::task::JoinSet::new();
+    let mut maintenance = tokio::time::interval(std::time::Duration::from_millis(250));
+    maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
             biased;
             () = shutdown.cancelled() => break,
+            result = tasks.join_next(), if !tasks.is_empty() => {
+                if let Some(Err(error)) = result {
+                    tracing::warn!(%error, "plugin event worker failed");
+                }
+                workers.retain(|_, handle| !handle.sender.is_closed());
+            },
+            _ = maintenance.tick() => {
+                reconcile_workers(&core, &core.plugins.list(), &mut workers);
+                workers.retain(|_, handle| !handle.sender.is_closed());
+            },
             received = subscription.recv() => match received {
                 Ok(event) => dispatch_event(&core, event, &mut workers, &mut tasks, &shutdown),
                 Err(DomainRecvError::ReliableLagged(lost)) => {

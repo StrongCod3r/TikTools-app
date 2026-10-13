@@ -40,18 +40,22 @@ pub(crate) async fn run_plugin_queue(
                 "event.gap",
                 json!({"lost": lost, "resync": true, "at": now_millis()}),
             );
-            if !deliver_event(&core, &invoker, &plugin_id, gap, false).await {
+            let delivered = tokio::select! {
+                biased;
+                () = shutdown.cancelled() => break,
+                delivered = deliver_event(&core, &invoker, &plugin_id, gap, false) => delivered,
+            };
+            if !delivered {
                 // Keep the summary if a transient delivery failure happened
                 // while the plugin remained active; a stopped/crashed plugin
                 // will simply drain it when it is explicitly restarted.
                 pending_reliable_gaps.fetch_add(lost, Ordering::Relaxed);
             }
         }
-        // A cancelled shutdown token does not preempt an in-flight delivery,
-        // but no new delivery starts after cancellation is observed.
-        if shutdown.is_cancelled() {
-            break;
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => break,
+            _ = deliver_event(&core, &invoker, &plugin_id, queued.envelope, queued.lossy) => {},
         }
-        let _ = deliver_event(&core, &invoker, &plugin_id, queued.envelope, queued.lossy).await;
     }
 }

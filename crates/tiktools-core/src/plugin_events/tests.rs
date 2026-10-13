@@ -49,6 +49,64 @@ fn reconcile_keeps_nothing_when_no_workers_exist() {
 }
 
 #[test]
+fn repeated_pruning_cancels_workers_and_releases_queues() {
+    let core = AppCore::new(Arc::new(NoopEmitter));
+    for _ in 0..128 {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(PLUGIN_EVENT_QUEUE_CAPACITY);
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut workers = BTreeMap::from([(
+            "removed".to_owned(),
+            WorkerHandle {
+                sender,
+                token: token.clone(),
+                pending_reliable_gaps: Arc::new(AtomicU64::new(0)),
+            },
+        )]);
+        reconcile_workers(&core, &[], &mut workers);
+        assert!(workers.is_empty());
+        assert!(token.is_cancelled());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn cancelled_queue_worker_releases_core_and_pending_events() {
+    let core = Arc::new(AppCore::new(Arc::new(NoopEmitter)));
+    let baseline = Arc::strong_count(&core);
+    let (sender, receiver) = tokio::sync::mpsc::channel(PLUGIN_EVENT_QUEUE_CAPACITY);
+    let token = tokio_util::sync::CancellationToken::new();
+    for _ in 0..PLUGIN_EVENT_QUEUE_CAPACITY {
+        sender
+            .try_send(super::queue::QueuedPluginEvent {
+                envelope: tiktools_plugin_api::DomainEventEnvelope::new(
+                    "test",
+                    serde_json::json!({}),
+                ),
+                lossy: true,
+            })
+            .unwrap();
+    }
+    token.cancel();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        super::worker::run_plugin_queue(
+            Arc::clone(&core),
+            "removed".to_owned(),
+            receiver,
+            token,
+            Arc::new(AtomicU64::new(0)),
+        ),
+    )
+    .await
+    .expect("cancelled worker must terminate without draining or delivering");
+    assert!(sender.is_closed());
+    assert_eq!(Arc::strong_count(&core), baseline);
+}
+
+#[test]
 fn stable_domain_payload_does_not_expose_the_internal_enum() {
     let event = DomainEvent::PointsChanged {
         unique_id: "viewer".to_owned(),
