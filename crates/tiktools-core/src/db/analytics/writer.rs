@@ -57,6 +57,19 @@ pub(crate) struct AnalyticsWriter {
 }
 
 impl AnalyticsWriter {
+    pub(crate) fn diagnostics(&self) -> serde_json::Value {
+        serde_json::json!({
+            "capacity": CAPACITY,
+            "batchCapacity": BATCH_SIZE,
+            "queued": CAPACITY - self.sender.capacity(),
+            "pending": self.counters.pending.load(Ordering::Acquire),
+            "batches": self.counters.batches.load(Ordering::Acquire),
+            "failures": self.counters.failures.load(Ordering::Acquire),
+            "overload": self.counters.overload.load(Ordering::Acquire),
+            "ready": *self.ready.borrow(),
+            "stopping": self.stop.load(Ordering::Acquire),
+        })
+    }
     pub(crate) fn new(db: Arc<DatabaseManager>) -> Self {
         let (sender, receiver) = mpsc::channel(CAPACITY);
         let (ready_tx, ready) = watch::channel(false);
@@ -141,6 +154,7 @@ impl Drop for AnalyticsWriter {
 fn apply(
     connection: &mut rusqlite::Connection,
     batch: &RecoveryBatch,
+    retain_id: bool,
 ) -> Result<(), crate::db::DatabaseError> {
     let transaction = connection.transaction()?;
     let fresh = transaction.execute(
@@ -176,6 +190,12 @@ fn apply(
         }
     }
     transaction.commit()?;
+    if !retain_id {
+        connection.execute(
+            "DELETE FROM analytics_writer_batches WHERE id = ?1",
+            [&batch.id],
+        )?;
+    }
     Ok(())
 }
 
@@ -236,7 +256,7 @@ fn run_writer(
     };
     for pending in &recovery {
         loop {
-            match apply(&mut connection, pending) {
+            match apply(&mut connection, pending, true) {
                 Ok(()) => break,
                 Err(error) => {
                     counters.failures.fetch_add(1, Ordering::Relaxed);
@@ -283,14 +303,8 @@ fn run_writer(
         }
         let pending = batch(records);
         loop {
-            match apply(&mut connection, &pending) {
+            match apply(&mut connection, &pending, false) {
                 Ok(()) => {
-                    // IDs are needed only while a recovery file can replay them.
-                    // Retaining every successful batch ID would itself grow forever.
-                    let _ = connection.execute(
-                        "DELETE FROM analytics_writer_batches WHERE id = ?1",
-                        [&pending.id],
-                    );
                     counters
                         .pending
                         .fetch_sub(pending.records.len() as u64, Ordering::AcqRel);
@@ -373,6 +387,83 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "native-tiktok", target_os = "linux"))]
+    #[tokio::test]
+    #[ignore = "opt-in Linux RSS stress profiling; run alone with --nocapture"]
+    async fn synthetic_canonical_analytics_memory_cycles() {
+        fn rss_kib() -> u64 {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find(|line| line.starts_with("VmRSS:"))
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse()
+                .unwrap()
+        }
+        let db = Arc::new(super::super::tests::test_manager());
+        let event = crate::NativeLiveEvent {
+            base: tiktools_tiktok::events::CanonicalLiveEvent::Chat(
+                tiktools_tiktok::events::ChatEvent {
+                    user: tiktools_tiktok::events::EventUser {
+                        id: 1,
+                        unique_id: "synthetic".into(),
+                        nickname: "Synthetic".into(),
+                        sec_uid: String::new(),
+                        avatar_url: None,
+                    },
+                    comment: "synthetic fixture".into(),
+                },
+            ),
+            metadata: tiktools_tiktok::events::EventMetadata {
+                method: "WebcastChatMessage".into(),
+                msg_id: 1,
+                is_history: false,
+            },
+            gift: None,
+        };
+        let record = AnalyticsEventRecord::from_canonical_event(&event).unwrap();
+        let mut warmed_rss = 0;
+        println!("cycle,rss_kib,pending,batches");
+        for cycle in 0..24 {
+            let writer = AnalyticsWriter::new(Arc::clone(&db));
+            for _ in 0..4096 {
+                writer
+                    .submit(AnalyticsWrite::Event {
+                        creator: "synthetic".into(),
+                        record: record.clone(),
+                        at: 86400,
+                    })
+                    .await
+                    .unwrap();
+            }
+            writer.shutdown().await;
+            assert_eq!(writer.counters.pending.load(Ordering::Acquire), 0);
+            let batches = writer.counters.batches.load(Ordering::Acquire);
+            drop(writer);
+            let rss = rss_kib();
+            println!("{cycle},{rss},0,{batches}");
+            if cycle == 3 {
+                warmed_rss = rss;
+            }
+            if cycle > 3 {
+                assert!(
+                    rss <= warmed_rss + 16 * 1024,
+                    "persistent RSS growth exceeds 16 MiB allowance"
+                );
+            }
+        }
+        assert_eq!(
+            db.analytics_summary("synthetic", 1, 1, 10, 0)
+                .unwrap()
+                .totals
+                .chats,
+            24 * 4096
+        );
+    }
+
     #[tokio::test]
     async fn sustained_batched_traffic_flushes_exact_isolated_totals_on_shutdown() {
         let db = Arc::new(super::super::tests::test_manager());
@@ -390,6 +481,11 @@ mod tests {
         }
         assert!(writer.counters.batches.load(Ordering::Acquire) < 8192);
         assert!(writer.submit(chat("one")).await.is_err());
+        let diagnostics = writer.diagnostics();
+        assert_eq!(diagnostics["pending"], 0);
+        assert_eq!(diagnostics["queued"], 0);
+        assert_eq!(diagnostics["capacity"], CAPACITY);
+        assert_eq!(diagnostics["stopping"], true);
     }
 
     #[tokio::test]
@@ -462,7 +558,7 @@ mod tests {
         connection
             .execute_batch("CREATE TABLE analytics_writer_batches(id TEXT PRIMARY KEY)")
             .unwrap();
-        apply(&mut connection, &pending).unwrap();
+        apply(&mut connection, &pending, true).unwrap();
         let path = db.analytics_path().with_extension("pending.json");
         std::fs::write(&path, serde_json::to_vec(&vec![pending]).unwrap()).unwrap();
         drop(connection);
