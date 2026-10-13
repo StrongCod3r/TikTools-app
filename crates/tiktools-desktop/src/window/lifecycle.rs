@@ -606,19 +606,22 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 self.plugin_ui.close(&plugin_id, &page_id);
             }
             DesktopEvent::Command(DesktopCommand::PluginUiRespond {
+                window_id,
                 plugin_id,
                 page_id,
                 response,
             }) => {
-                self.plugin_ui.respond(&plugin_id, &page_id, &response);
+                self.plugin_ui
+                    .respond(&plugin_id, &page_id, &response, window_id);
             }
             DesktopEvent::Command(DesktopCommand::PluginUiSubscribe {
+                window_id,
                 plugin_id,
                 page_id,
                 effect,
             }) => {
                 self.plugin_ui
-                    .apply_subscription(&plugin_id, &page_id, effect);
+                    .apply_subscription(&plugin_id, &page_id, effect, window_id);
             }
         }
     }
