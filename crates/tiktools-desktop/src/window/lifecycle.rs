@@ -39,6 +39,9 @@ impl DesktopApp {
         log_path: PathBuf,
     ) -> Self {
         let control = Arc::new(ControlApi::new(core.clone()));
+        let domain_mailbox = Arc::new(std::sync::Mutex::new(
+            super::outbox::ForwardMailbox::default(),
+        ));
         // Persistent local IPC shares the desktop's one AppCore: the CLI
         // and agents observe the same runtime the WebView drives. The
         // server runs on Tokio without blocking Winit and exits on core
@@ -111,10 +114,16 @@ impl DesktopApp {
             let events = control.subscribe();
             let core = core.clone();
             let proxy = proxy.clone();
+            let mailbox = Arc::clone(&domain_mailbox);
             runtime.spawn(forward_domain_events(events, core, move |notification| {
-                let _ = proxy.send_event(DesktopEvent::Command(DesktopCommand::EmitToWebview(
-                    notification,
-                )));
+                let wake = mailbox
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(notification);
+                if wake {
+                    let _ =
+                        proxy.send_event(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch));
+                }
             }));
         }
         Self {
@@ -128,6 +137,7 @@ impl DesktopApp {
             proxy,
             tray: None,
             pending_host_messages: WebviewOutbox::new(),
+            domain_mailbox,
             shutting_down: false,
             startup_state: StartupState::Initializing,
             startup_deadline: None,
@@ -394,6 +404,10 @@ impl DesktopApp {
         if self.reload_pending && !self.shutting_down {
             self.reload_pending = false;
             self.pending_host_messages.recover_transport();
+            self.domain_mailbox
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .recover();
             self.webview_failed.store(false, Ordering::SeqCst);
             self.core.set_webview_error(None);
             tracing::error!("WebView transport recovered after reload");
@@ -611,6 +625,23 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         platform::pump();
+        let (messages, failed, wake) = self
+            .domain_mailbox
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .drain();
+        if failed {
+            self.core.record_event_gap();
+            self.fail_webview_transport();
+        }
+        for message in messages {
+            self.emit_to_webview(message);
+        }
+        if wake {
+            let _ = self
+                .proxy
+                .send_event(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch));
+        }
         // One batch per UI tick: all host messages queued since the last
         // tick share a single `evaluate_script`.
         self.flush_webview_batch();

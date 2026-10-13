@@ -32,6 +32,7 @@ pub struct DesktopApp {
     proxy: EventLoopProxy<DesktopEvent>,
     tray: Option<TrayController>,
     pending_host_messages: WebviewOutbox,
+    domain_mailbox: Arc<std::sync::Mutex<outbox::ForwardMailbox>>,
     shutting_down: bool,
     startup_state: StartupState,
     startup_deadline: Option<Instant>,

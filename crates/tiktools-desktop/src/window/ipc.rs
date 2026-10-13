@@ -236,7 +236,7 @@ impl DesktopApp {
     /// WebView reloads. The latch releases when the fresh page completes
     /// its handshake (see `frontend_ready`); without that handshake the
     /// transport stays failed rather than delivering to a dead page.
-    fn fail_webview_transport(&mut self) {
+    pub(crate) fn fail_webview_transport(&mut self) {
         self.webview_failed.store(true, Ordering::SeqCst);
         self.core.set_webview_error(Some(
             "WebView transport failed: reliable backlog overflow; reloading".to_owned(),
