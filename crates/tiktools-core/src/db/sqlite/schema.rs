@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS points_transactions (
   metadata TEXT,
   created_at INTEGER
 );
+-- Justified indexes: per-viewer transaction history lookups and the
+-- leaderboard warm-up / direct viewer reloads that replace the old
+-- full-table scans. Both serve the bounded hot-cache design.
+CREATE INDEX IF NOT EXISTS idx_points_transactions_viewer ON points_transactions(unique_id);
+CREATE INDEX IF NOT EXISTS idx_viewers_points ON viewers(points DESC);
 CREATE TABLE IF NOT EXISTS creator_history (
   unique_id TEXT PRIMARY KEY,
   room_id TEXT,

@@ -477,6 +477,10 @@ impl AppCore {
         self.plugins.stop_all();
         #[cfg(feature = "persistence")]
         self.analytics_writer.shutdown().await;
+        // Join the owned points writer last: every earlier shutdown step may
+        // still award points (disconnect handling included), and accepted
+        // writes must reach SQLite before the process exits.
+        self.points.shutdown();
     }
 }
 

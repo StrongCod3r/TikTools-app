@@ -31,5 +31,8 @@ pub use media::{
     validate_media_picker_options, MediaApiError, MediaError, MediaHost, MediaHostError,
     MediaHostFuture, NoopMediaHost, AUDIO_EXTENSIONS, MAX_AUDIO_FILE_BYTES,
 };
-pub use points::{AwardOptions, PointAction, PointAward, PointsService};
+#[cfg(feature = "persistence")]
+pub(crate) use points::PointsWriteOp;
+pub use points::{AwardOptions, PointAction, PointAward, PointsService, ViewerState};
+pub use points::{PointsDiagnostics, DEFAULT_HOT_VIEWER_CAPACITY};
 pub use script::ScriptService;

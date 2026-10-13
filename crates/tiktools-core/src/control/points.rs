@@ -29,13 +29,12 @@ impl AppCore {
         if needle.is_empty() {
             return Err(OperationError::invalid("uniqueId must not be empty"));
         }
-        self.points
-            .leaderboard(Some(1_000))
-            .into_iter()
-            .find(|viewer| viewer.get("uniqueId").and_then(Value::as_str) == Some(needle))
-            .ok_or_else(|| {
-                OperationError::not_found(format!("viewer `{needle}` has no points record"))
-            })
+        // Direct indexed lookup (hot cache, then one SQLite primary-key
+        // read): O(1)-average independent of leaderboard position, with no
+        // 1,000-row window. Cold viewers reload from durable storage.
+        self.points.viewer(needle).ok_or_else(|| {
+            OperationError::not_found(format!("viewer `{needle}` has no points record"))
+        })
     }
 
     /// Manual adjustment, matching the WebView adjust-points path: creates

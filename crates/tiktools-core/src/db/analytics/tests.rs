@@ -102,10 +102,21 @@ fn top_viewers_carry_points_avatars() {
         .expect("record");
     db.record_analytics_event("creator", &record_chats("bob", 1), day)
         .expect("record");
-    db.save_viewer(
+    // Seed the viewer row through the owned-writer op path (the same
+    // durable write the points writer applies per award).
+    let seed = crate::services::ViewerState::from_value(
         &serde_json::json!({"uniqueId": "alice", "avatarUrl": "https://cdn.example/a.png"}),
-        "chat",
-        1.0,
+    )
+    .expect("seed viewer");
+    let mut connection = db.open_points_writer().expect("writer connection");
+    db.apply_points_op(
+        &mut connection,
+        &crate::services::PointsWriteOp::Save {
+            seq: 1,
+            viewer: seed,
+            reason: "chat",
+            awarded: 1.0,
+        },
     )
     .expect("viewer");
 
