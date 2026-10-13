@@ -84,64 +84,157 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   const giftCatalog = ref<GiftCatalogEntry[]>([]);
   const autoScroll = ref(savedFeed?.autoScroll ?? true);
   const unreadCount = ref(0);
+  /** UI-side shed counter: staged events dropped while the tab is
+   *  backgrounded or frames stall. Backend delivery is unaffected. */
+  const droppedUiEvents = ref(0);
   const nextEventId = ref(0);
   const streamContainerRef = ref<HTMLDivElement | null>(null);
   let restoreScrollTop = savedFeed?.scrollTop;
   let scrollSaveHandler: (() => void) | null = null;
+  const unsubscribers: Array<() => void> = [];
+  // Topic handlers keep their exact control-client overload types; only
+  // the unsubscribers are collected so dispose() can release them.
+
+  // Bounded nonreactive staging buffer: inbound messages accumulate here
+  // without touching reactivity, and one scheduled frame moves them into
+  // the reactive feed in a single assignment. A burst of N messages per
+  // frame costs one render, never N.
+  const MAX_VISIBLE_FEED = 300;
+  const MAX_STAGED_EVENTS = 900;
+  let staged: DisplayEvent[] = [];
+  let flushQueued = false;
+  let flushFrame = 0;
+  let scrollFrame = 0;
+  let disposed = false;
+
+  // Frame scheduler with a synchronous fallback: unit tests and
+  // non-browser hosts have no `requestAnimationFrame`, and the feed must
+  // still update there (without batching, which needs real frames).
+  const scheduleFrame = (callback: () => void): number => {
+    if (typeof requestAnimationFrame === 'function') return requestAnimationFrame(callback);
+    callback();
+    return 0;
+  };
+  const cancelFrame = (id: number): void => {
+    if (id !== 0 && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(id);
+  };
+
+  const stageEvent = (event: DisplayEvent): void => {
+    staged.push(event);
+    if (staged.length > MAX_STAGED_EVENTS) {
+      // Shed the oldest staged events first: the feed shows the latest
+      // 300, so stale backlog is the cheapest thing to lose. Counted for
+      // visibility; backend/points state is unaffected.
+      const shed = staged.length - MAX_STAGED_EVENTS;
+      staged.splice(0, shed);
+      droppedUiEvents.value += shed;
+    }
+    if (!flushQueued && !disposed) {
+      flushQueued = true;
+      flushFrame = scheduleFrame(flushStaged);
+    }
+  };
+
+  const flushStaged = (): void => {
+    flushQueued = false;
+    flushFrame = 0;
+    if (disposed || staged.length === 0) return;
+    const batch = staged;
+    staged = [];
+    const now = Date.now();
+    for (const stagedEvent of batch) stagedEvent.receivedAt = now;
+    events.value = [...events.value, ...batch].slice(-MAX_VISIBLE_FEED);
+    if (!autoScroll.value) unreadCount.value += batch.length;
+    for (const stagedEvent of batch) {
+      if (stagedEvent.kind === 'chat' && stagedEvent.text) {
+        callbacks.onChat?.(
+          stagedEvent.author,
+          stagedEvent.text,
+          stagedEvent.points,
+          stagedEvent.isSubscriber,
+        );
+      }
+    }
+    if (autoScroll.value) queueScroll();
+  };
 
   const resetEvents = (): void => {
     nextEventId.value = 0;
+    staged = [];
     events.value = [];
     unreadCount.value = 0;
+    droppedUiEvents.value = 0;
     topViewers.value = [];
     liveViewers.value = 0;
   };
 
-  const scrollToBottom = (): void => {
+  const applyScroll = (): void => {
+    scrollFrame = 0;
+    // Never mutate scroll while paused: one coalesced write per frame,
+    // only when pinned to the bottom.
+    if (disposed || !autoScroll.value) return;
     const container = streamContainerRef.value;
     if (container) container.scrollTop = container.scrollHeight;
+  };
+
+  const queueScroll = (): void => {
+    if (scrollFrame !== 0 || disposed) return;
+    scrollFrame = scheduleFrame(applyScroll);
+  };
+
+  const scrollToBottom = (): void => {
+    queueScroll();
+  };
+
+  const dispose = (): void => {
+    disposed = true;
+    cancelFrame(flushFrame);
+    cancelFrame(scrollFrame);
+    flushFrame = 0;
+    scrollFrame = 0;
+    flushQueued = false;
+    staged = [];
+    while (unsubscribers.length > 0) unsubscribers.pop()?.();
+    const container = streamContainerRef.value;
+    if (container && scrollSaveHandler) {
+      container.removeEventListener('scroll', scrollSaveHandler);
+      scrollSaveHandler = null;
+    }
+  };
+
+  const pushFeedEvent = (event: UiEvent): void => {
+    // Drop replays before they reach the feed: a reconnect
+    // replay must not re-render, count as unread, or re-fire
+    // the chat observer.
+    if (isDuplicateEvent(event, Date.now())) return;
+    stageEvent({ ...event, id: nextEventId.value++, receivedAt: Date.now() });
   };
 
   // Live feed state arrives only via authoritative domain topics; the
   // legacy `live-event` / `room-stats` / `gift-catalog` pushes are no
   // longer subscribed (backend keeps them solely for compatibility).
-  control.onTopic<{ event: UiEvent }>('live.ui-event', (data) => {
-    const event = data.event;
-    // Drop replays before they reach the feed: a reconnect
-    // replay must not re-render, count as unread, or re-fire
-    // the chat observer.
-    if (isDuplicateEvent(event, Date.now())) return;
-    events.value = [
-      ...events.value,
-      { ...event, id: nextEventId.value++, receivedAt: Date.now() },
-    ].slice(-300);
-    if (!autoScroll.value) unreadCount.value += 1;
-    if (event.kind === 'chat' && event.text) {
-      callbacks.onChat?.(event.author, event.text, event.points, event.isSubscriber);
-    }
-  });
-  control.onTopic<{ viewers: number; totalUsers: number; topViewers: TopViewerPayload[] }>(
+  unsubscribers.push(control.onTopic<{ event: UiEvent }>('live.ui-event', (data) => {
+    pushFeedEvent(data.event);
+  }));
+  unsubscribers.push(control.onTopic<{ viewers: number; totalUsers: number; topViewers: TopViewerPayload[] }>(
     'room.stats',
     (data) => {
       topViewers.value = data.topViewers;
       liveViewers.value = data.viewers;
     },
-  );
-  control.onTopic<{ gifts: GiftCatalogEntry[] }>('gifts.catalog', (data) => {
+  ));
+  unsubscribers.push(control.onTopic<{ gifts: GiftCatalogEntry[] }>('gifts.catalog', (data) => {
     giftCatalog.value = data.gifts;
-  });
-  control.onTopic<{ phase: string; message: string }>('live.error', (data) => {
-    events.value = [
-      ...events.value,
-      {
-        kind: 'member' as const,
-        author: callbacks.systemAuthor(),
-        text: data.message,
-        id: nextEventId.value++,
-        receivedAt: Date.now(),
-      },
-    ].slice(-300);
-  });
+  }));
+  unsubscribers.push(control.onTopic<{ phase: string; message: string }>('live.error', (data) => {
+    stageEvent({
+      kind: 'member' as const,
+      author: callbacks.systemAuthor(),
+      text: data.message,
+      id: nextEventId.value++,
+      receivedAt: Date.now(),
+    });
+  }));
 
   const refresh = async (): Promise<void> => {
     try {
@@ -200,7 +293,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     // Restore the position the user left when auto-scroll is
     // off; with auto-scroll on, the controller's watcher keeps
     // the stream pinned to the bottom instead.
-    requestAnimationFrame(applySavedScrollTop);
+    scheduleFrame(applySavedScrollTop);
     scrollSaveHandler = debounce(saveFeedState);
     container.addEventListener('scroll', scrollSaveHandler);
   };
@@ -214,6 +307,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     giftCatalog,
     autoScroll,
     unreadCount,
+    droppedUiEvents,
     streamContainerRef,
     resetEvents,
     scrollToBottom,
@@ -222,5 +316,6 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     setSearchQuery,
     setStreamContainerRef,
     refresh,
+    dispose,
   };
 }

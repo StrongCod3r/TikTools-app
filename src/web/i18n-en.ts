@@ -25,6 +25,7 @@ export const english = {
   disconnect: 'Disconnect',
   messageCountOne: '{count} event',
   messageCountMany: '{count} events',
+  uiEventsDropped: '{count} older UI updates skipped under load',
   live: 'LIVE',
   retrying: 'Reconnecting',
   disconnected: 'Offline',

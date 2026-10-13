@@ -23,6 +23,7 @@ type FeedViewProps = {
   searchQuery: string;
   autoScroll: boolean;
   unreadCount: number;
+  droppedUiEvents?: number;
   onFilterChange: (f: EventFilter) => void;
   onSearchChange: (q: string) => void;
   onToggleAutoScroll: () => void;
@@ -34,6 +35,13 @@ type FeedViewProps = {
 type UserSource = { uniqueId: string; nickname?: string; avatarUrl?: string };
 
 const VIEWERS_COLLAPSED_KEY = 'tiktok-live-viewers-collapsed';
+
+/** Shared filter memo across renders: re-renders from unrelated state
+ * reuse the last scan instead of re-filtering up to 300 events. */
+const filterCache = new WeakMap<
+  DisplayEvent[],
+  { key: string; result: DisplayEvent[] }
+>;
 
 function readViewersCollapsed(): boolean {
   try {
@@ -53,6 +61,7 @@ function renderFeedView({
   searchQuery,
   autoScroll,
   unreadCount,
+  droppedUiEvents = 0,
   onFilterChange,
   onSearchChange,
   onToggleAutoScroll,
@@ -78,19 +87,31 @@ function renderFeedView({
     { key: 'social', tooltip: t(locale, 'filterSocial'), icon: <IconUsers /> },
   ];
 
-  const filteredEvents = events.filter((ev) => {
-    if (filter !== 'all') {
-      if (filter === 'chat' && ev.kind !== 'chat') return false;
-      if (filter === 'gift' && ev.kind !== 'gift') return false;
-      if (filter === 'like' && ev.kind !== 'like') return false;
-      if (filter === 'social' && ev.kind !== 'social' && ev.kind !== 'member') return false;
-    }
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      return ev.author.toLowerCase().includes(q) || ev.text.toLowerCase().includes(q);
-    }
-    return true;
-  });
+  // Memoized filtering: re-renders from unrelated state (locale,
+  // leaderboard, connection) reuse the last scan instead of re-filtering
+  // up to 300 events. Keyed weakly on the events array, which the batched
+  // feed replaces at most once per frame.
+  const filterCacheKey = `${filter}::${searchQuery.toLowerCase()}`;
+  let filteredEvents: typeof events;
+  const cached = filterCache.get(events);
+  if (cached && cached.key === filterCacheKey) {
+    filteredEvents = cached.result;
+  } else {
+    filteredEvents = events.filter((ev) => {
+      if (filter !== 'all') {
+        if (filter === 'chat' && ev.kind !== 'chat') return false;
+        if (filter === 'gift' && ev.kind !== 'gift') return false;
+        if (filter === 'like' && ev.kind !== 'like') return false;
+        if (filter === 'social' && ev.kind !== 'social' && ev.kind !== 'member') return false;
+      }
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase();
+        return ev.author.toLowerCase().includes(q) || ev.text.toLowerCase().includes(q);
+      }
+      return true;
+    });
+    filterCache.set(events, { key: filterCacheKey, result: filteredEvents });
+  }
 
   const viewersTotal = liveViewers > 0
     ? liveViewers
@@ -142,6 +163,15 @@ function renderFeedView({
               {t(locale, filteredEvents.length === 1 ? 'messageCountOne' : 'messageCountMany', {
                 count: filteredEvents.length,
               })}
+              {(droppedUiEvents ?? 0) > 0 ? (
+                <span
+                  class="feed-dropped-hint"
+                  title={t(locale, 'uiEventsDropped', { count: droppedUiEvents ?? 0 })}
+                >
+                  {' '}
+                  ({t(locale, 'uiEventsDropped', { count: droppedUiEvents ?? 0 })})
+                </span>
+              ) : null}
             </span>
             <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
               <Button
@@ -233,6 +263,7 @@ export const FeedView = defineVueComponent<FeedViewProps>(
     'searchQuery',
     'autoScroll',
     'unreadCount',
+    'droppedUiEvents',
     'onFilterChange',
     'onSearchChange',
     'onToggleAutoScroll',

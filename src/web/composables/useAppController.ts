@@ -182,6 +182,11 @@ export function useAppController() {
   });
 
   onUnmounted(() => {
+    // Release frame callbacks, scroll listeners, and topic subscriptions
+    // so repeated mount/unmount cycles (rapid tab navigation, HMR) cannot
+    // accumulate pending frames or duplicated listeners.
+    live.dispose();
+    points.dispose();
     control.detach();
   });
 
@@ -413,6 +418,7 @@ export function useAppController() {
     dismissPluginProgress: plugins.dismissPluginProgress,
     autoScroll: live.autoScroll,
     unreadCount: live.unreadCount,
+    droppedUiEvents: live.droppedUiEvents,
     resetEvents: live.resetEvents,
     setActiveTab,
     setUniqueId: connection.setUniqueId,

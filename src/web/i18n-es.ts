@@ -27,6 +27,7 @@ export const spanish: Record<TranslationKey, string> = {
   disconnect: 'Desconectar',
   messageCountOne: '{count} evento',
   messageCountMany: '{count} eventos',
+  uiEventsDropped: '{count} actualizaciones de UI omitidas bajo carga',
   live: 'EN VIVO',
   retrying: 'Reconectando',
   disconnected: 'Desconectado',

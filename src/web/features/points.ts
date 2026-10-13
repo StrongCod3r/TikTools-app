@@ -38,6 +38,12 @@ export interface PointsChangedData {
 export function usePoints(control: ControlClient) {
   const pointsConfig = ref<PointsConfig>(defaultPointsConfig);
   const leaderboard = ref<ViewerRecord[]>([]);
+  const unsubscribers: Array<() => void> = [];
+  // Handlers keep their exact control-client overload types; only the
+  // unsubscribers are collected so dispose() can release them.
+  // Memoized identity lookup: chat-rate calls resolve against a cached
+  // map rebuilt only when the board array itself is replaced.
+  let lookupCache: { board: ViewerRecord[]; map: Map<string, number> } | null = null;
 
   const applyAward = (uniqueId: string, totalPoints: number, level: number): boolean => {
     const index = leaderboard.value.findIndex((viewer) => viewer.uniqueId === uniqueId);
@@ -56,14 +62,14 @@ export function usePoints(control: ControlClient) {
     return true;
   };
 
-  control.onPush('points-config', (message) => {
+  unsubscribers.push(control.onPush('points-config', (message) => {
     if (message.type !== 'points-config') return;
     pointsConfig.value = message.config;
-  });
-  control.onPush('leaderboard', (message) => {
+  }));
+  unsubscribers.push(control.onPush('leaderboard', (message) => {
     if (message.type !== 'leaderboard') return;
     leaderboard.value = message.viewers;
-  });
+  }));
 
   const refresh = async (): Promise<void> => {
     try {
@@ -79,22 +85,50 @@ export function usePoints(control: ControlClient) {
   };
 
   // Awards for viewers missing from the loaded page re-read the board so
-  // new chatters appear. One in-flight refresh at a time: it re-reads the
-  // full leaderboard, so concurrent triggers would only duplicate it.
+  // new chatters appear. Coalesced to at most one refresh per window: the
+  // first miss in a quiet period refreshes immediately (leading edge), and
+  // misses inside the window share one trailing refresh instead of one RPC
+  // per unknown viewer. A burst of N new chatters costs one refresh now
+  // and at most one catch-up later — never N.
+  const MISSING_VIEWER_WINDOW_MS = 500;
   let missingViewerRefreshInFlight = false;
-  const refreshMissingViewer = (): void => {
-    if (missingViewerRefreshInFlight) return;
+  let missingViewerWindowStart = 0;
+  let missingViewerTimer: ReturnType<typeof setTimeout> | null = null;
+  const startMissingViewerRefresh = (): void => {
     missingViewerRefreshInFlight = true;
+    missingViewerWindowStart = Date.now();
     void refresh().finally(() => {
       missingViewerRefreshInFlight = false;
     });
   };
+  const refreshMissingViewer = (): void => {
+    const now = Date.now();
+    if (
+      missingViewerRefreshInFlight ||
+      now - missingViewerWindowStart < MISSING_VIEWER_WINDOW_MS
+    ) {
+      // Covered by the running refresh or one trailing catch-up: schedule
+      // at most one timer so a sustained trickle still converges without
+      // stacking timers.
+      if (missingViewerTimer === null) {
+        const wait = missingViewerRefreshInFlight
+          ? MISSING_VIEWER_WINDOW_MS
+          : MISSING_VIEWER_WINDOW_MS - (now - missingViewerWindowStart);
+        missingViewerTimer = setTimeout(() => {
+          missingViewerTimer = null;
+          startMissingViewerRefresh();
+        }, wait);
+      }
+      return;
+    }
+    startMissingViewerRefresh();
+  };
 
-  control.onTopic<PointsChangedData>('points.changed', (data) => {
+  unsubscribers.push(control.onTopic<PointsChangedData>('points.changed', (data) => {
     if (!applyAward(data.uniqueId, data.totalPoints, data.level)) {
       refreshMissingViewer();
     }
-  });
+  }));
 
   const handleUpdatePointsConfig = (config: Partial<PointsConfig>): void => {
     void control
@@ -128,12 +162,31 @@ export function usePoints(control: ControlClient) {
     });
   };
 
+  /** Chat-rate lookup, memoized: the map rebuilds only when the board
+   * array is replaced, keeping per-message resolution O(1) with
+   * first-match wins (matching the previous linear scan). */
   const leaderboardPointsFor = (handle: string): number | undefined => {
     const clean = handle.trim().replace(/^@/, '').toLowerCase();
-    const viewer = leaderboard.value.find(
-      (entry) => entry.uniqueId.trim().replace(/^@/, '').toLowerCase() === clean,
-    );
-    return viewer?.points;
+    if (!clean) return undefined;
+    const board = leaderboard.value;
+    if (lookupCache?.board !== board) {
+      const map = new Map<string, number>();
+      for (const entry of board) {
+        const key = entry.uniqueId.trim().replace(/^@/, '').toLowerCase();
+        if (key && !map.has(key)) map.set(key, entry.points);
+      }
+      lookupCache = { board, map };
+    }
+    return lookupCache.map.get(clean);
+  };
+
+  const dispose = (): void => {
+    while (unsubscribers.length > 0) unsubscribers.pop()?.();
+    if (missingViewerTimer !== null) {
+      clearTimeout(missingViewerTimer);
+      missingViewerTimer = null;
+    }
+    lookupCache = null;
   };
 
   return {
@@ -144,5 +197,6 @@ export function usePoints(control: ControlClient) {
     handleResetPoints,
     handleAdjustPoints,
     refresh,
+    dispose,
   };
 }
