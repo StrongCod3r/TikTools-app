@@ -1,10 +1,10 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex, RwLock,
+        Arc, Condvar, Mutex, MutexGuard, RwLock,
     },
-    time::SystemTime,
+    time::{Duration, Instant, SystemTime},
 };
 
 use serde_json::{json, Value};
@@ -18,13 +18,33 @@ use tiktools_plugin_api::sync::{recover_mutex, recover_rwlock_read, recover_rwlo
 /// through the indexed `viewers.unique_id` primary key.
 pub const DEFAULT_HOT_VIEWER_CAPACITY: usize = 10_000;
 /// Upper bound for queued durable writes. When the writer cannot keep up,
-/// awarding falls back to a synchronous write (backpressure on the caller)
-/// instead of growing memory, and records an overload diagnostic.
+/// admission waits (bounded) for a free slot and then rejects the op
+/// without mutating memory. There is deliberately no synchronous write
+/// path: an inline write could jump the queue and win the FIFO race with a
+/// stale row snapshot, silently dropping the increments already queued.
 #[cfg(feature = "persistence")]
 const WRITER_QUEUE_CAPACITY: usize = 4_096;
 /// Maximum durable writes folded into one SQLite transaction.
 #[cfg(feature = "persistence")]
 const WRITER_BATCH_SIZE: usize = 128;
+/// How long an award/adjust/reset waits for a free queue slot. Exceeding it
+/// is an explicit rejection (`writeRejected` in diagnostics, an error log
+/// with the exact sequence): memory is left untouched, so the caller's
+/// view, the hot cache and SQLite all agree that the op did not happen.
+#[cfg(feature = "persistence")]
+const WRITE_ADMISSION_TIMEOUT_MS: u64 = 5_000;
+/// Poll interval for an admission waiting on a free slot. The condvar
+/// wakeup is the primary path; this bounds the wait if a wakeup is lost.
+#[cfg(feature = "persistence")]
+const WRITE_ADMISSION_POLL_MS: u64 = 50;
+/// Bounded whole-transaction retries before the writer falls back to
+/// per-op transactions. Storage that is merely busy recovers here; storage
+/// that is broken moves on to an explicit per-op failure report.
+#[cfg(feature = "persistence")]
+const WRITE_BATCH_RETRIES: u32 = 3;
+/// Base backoff between writer retries, doubled per attempt.
+#[cfg(feature = "persistence")]
+const WRITE_RETRY_BACKOFF_MS: u64 = 5;
 
 /// Strongly typed viewer row. The wire shape stays JSON (`Value`) at the API
 /// boundary; internally every hot-path field is typed so awards avoid dynamic
@@ -141,6 +161,11 @@ struct PointsInner {
     /// Sequences with durable writes still queued in the writer. Eviction
     /// must never drop these: a reload would read stale SQLite state.
     pending: HashMap<String, u64>,
+    /// Sequence of the newest full reset whose durable op has not resolved
+    /// yet. A cold reload before that reset lands would resurrect
+    /// pre-reset rows, so reloads wait on it exactly like a per-viewer
+    /// marker. Cleared when the reset resolves.
+    reset_pending: u64,
     hits: u64,
     misses: u64,
 }
@@ -151,6 +176,7 @@ impl PointsInner {
             viewers: HashMap::new(),
             capacity: capacity.max(1),
             pending: HashMap::new(),
+            reset_pending: 0,
             hits: 0,
             misses: 0,
         }
@@ -167,25 +193,30 @@ impl PointsInner {
     /// reaches a full batch, keeping steady-state inserts amortized O(1).
     /// Cold paths (explicit resize, single-row promotion, resets) call
     /// `evict_cold` directly for an exact bound.
-    fn evict_if_over(&mut self, committed: u64) {
+    fn evict_if_over(&mut self, resolved: u64) {
         if self.viewers.len() > self.capacity + Self::EVICT_BATCH_SLACK {
-            self.evict_cold(committed);
+            self.evict_cold(resolved);
         }
     }
 
     /// Evicts cold viewers until the cache fits `capacity`. Viewers with
-    /// uncommitted writes (sequence newer than `committed`) are never
-    /// evicted; when every viewer is dirty the cache temporarily exceeds its
-    /// bound rather than losing acknowledged updates.
-    fn evict_cold(&mut self, committed: u64) {
-        // Retire commit markers the writer has already made durable so the
-        // pending map itself stays bounded.
-        self.pending.retain(|_, seq| *seq > committed);
+    /// unresolved writes (sequence newer than the resolved watermark) are
+    /// never evicted; when every viewer is dirty the cache temporarily
+    /// exceeds its bound rather than losing acknowledged updates.
+    fn evict_cold(&mut self, resolved: u64) {
+        // Retire markers the writer has already resolved — durable or
+        // explicitly reported failed — so the pending map itself stays
+        // bounded. A failed write is not retried by eviction; reloading it
+        // would resurrect state the operator was told had been rejected.
+        self.pending.retain(|_, seq| *seq > resolved);
+        if self.reset_pending <= resolved {
+            self.reset_pending = 0;
+        }
         while self.viewers.len() > self.capacity {
             let victim = self
                 .viewers
                 .iter()
-                .filter(|(id, _)| self.pending.get(*id).is_none_or(|seq| *seq <= committed))
+                .filter(|(id, _)| self.pending.get(*id).is_none_or(|seq| *seq <= resolved))
                 .min_by(|(left_id, left), (right_id, right)| {
                     left.last_seen
                         .cmp(&right.last_seen)
@@ -195,6 +226,17 @@ impl PointsInner {
             let Some(victim) = victim else { break };
             self.viewers.remove(&victim);
         }
+    }
+
+    /// Sequence a reload must wait for before it may read SQLite: its own
+    /// outstanding write, or an unresolved full reset (which zeroes rows
+    /// this viewer may still carry).
+    fn reload_wait_seq(&self, unique_id: &str) -> u64 {
+        self.pending
+            .get(unique_id)
+            .copied()
+            .unwrap_or(0)
+            .max(self.reset_pending)
     }
 }
 
@@ -250,8 +292,14 @@ pub struct PointsService {
     next_op: AtomicU64,
     #[cfg(feature = "persistence")]
     database: Option<Arc<DatabaseManager>>,
+    /// Ordered durable-write queue plus the counters both sides update.
+    /// Always present under `persistence`; when no writer thread runs the
+    /// queue starts closed so admissions reject loudly instead of piling
+    /// up work that nothing will ever apply.
     #[cfg(feature = "persistence")]
-    writer: Mutex<Option<PointsWriterHandle>>,
+    writer: Arc<PointsWriterShared>,
+    #[cfg(feature = "persistence")]
+    writer_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 /// Durable-write diagnostics for `system.health`. Contains counts only, never
@@ -265,9 +313,23 @@ pub struct PointsDiagnostics {
     pub writer_queued: usize,
     pub write_batches: u64,
     pub write_errors: u64,
+    /// Admissions that found the queue full and had to wait for space.
     pub writer_overload: u64,
+    /// Admissions the writer refused (queue closed or saturated for the
+    /// full admission timeout). Nothing was mutated or queued for these.
+    pub write_rejected: u64,
+    /// Ops the writer could not make durable even after bounded retries.
+    pub write_failed: u64,
+    pub write_applied: u64,
+    pub writer_executing: usize,
     pub pending_writes: usize,
+    /// Contiguous durable watermark: every sequence <= this is on disk.
     pub committed_seq: u64,
+    /// Resolved watermark: every sequence <= this is either durable or was
+    /// explicitly reported as a permanent failure.
+    pub resolved_seq: u64,
+    pub commit_latency_mean_ms: f64,
+    pub commit_latency_max_ms: u64,
 }
 
 impl PointsDiagnostics {
@@ -279,9 +341,17 @@ impl PointsDiagnostics {
             "cacheHits": self.cache_hits,
             "cacheMisses": self.cache_misses,
             "writerQueued": self.writer_queued,
+            "writerExecuting": self.writer_executing,
             "writeBatches": self.write_batches,
             "writeErrors": self.write_errors,
             "writerOverload": self.writer_overload,
+            "writeRejected": self.write_rejected,
+            "writeFailed": self.write_failed,
+            "writeApplied": self.write_applied,
+            "committedSeq": self.committed_seq,
+            "resolvedSeq": self.resolved_seq,
+            "commitLatencyMeanMs": self.commit_latency_mean_ms,
+            "commitLatencyMaxMs": self.commit_latency_max_ms,
             "pendingWrites": self.pending_writes,
         })
     }
@@ -320,124 +390,315 @@ impl PointsWriteOp {
     }
 }
 
-/// Counters shared between the service and its writer thread. The thread
-/// updates batches/errors/committed; service threads update overload.
+/// FIFO state behind one lock. Sequence allocation and the push that
+/// admits an op both happen while the caller holds the viewer lock, so
+/// sequence order and queue order are the same order by construction.
 #[cfg(feature = "persistence")]
 #[derive(Debug, Default)]
+struct PointsQueueState {
+    queue: VecDeque<PointsWriteOp>,
+    /// Set by `shutdown` (or by construction when no writer thread runs).
+    /// Once set the queue drains and then stops accepting.
+    closed: bool,
+}
+
+/// Counters shared between the service and its writer thread.
+///
+/// Two watermarks are kept on purpose:
+/// - `committed_seq` is contiguous and durable: a permanently failed write
+///   stops it, so it never claims more than SQLite actually holds.
+/// - `resolved_seq` is finished: durable *or* explicitly reported failed.
+///   Eviction and reload waits key off this, because outstanding work for
+///   a failed op is over — pinning the cache or stalling a reload forever
+///   would hide the failure instead of surfacing it.
+#[cfg(feature = "persistence")]
+#[derive(Debug)]
 struct PointsWriterShared {
+    queue: Mutex<PointsQueueState>,
+    wake: Condvar,
+    /// Batches the writer folded into one transaction.
     batches: AtomicU64,
+    /// Transient storage errors the writer recovered from by retrying.
     errors: AtomicU64,
+    /// Ops that could not be made durable even after bounded retries.
+    failed_ops: AtomicU64,
+    /// First sequence that permanently failed, if any.
+    first_failed_seq: AtomicU64,
     committed_seq: AtomicU64,
+    resolved_seq: AtomicU64,
+    /// Admissions that found the queue full and waited for a free slot.
     overload: AtomicU64,
-    /// Approximate queued ops (`std::sync::mpsc` exposes no length).
-    /// Incremented on admission, decremented as batches are taken.
+    /// Admissions refused (queue closed, or saturated past the timeout).
+    rejected: AtomicU64,
+    /// Ops admitted into the queue.
+    admitted: AtomicU64,
+    /// Ops applied to SQLite (applied or retried successfully).
+    applied: AtomicU64,
+    /// Gauge: ops waiting in the queue.
     queued: AtomicU64,
+    /// Gauge: ops currently inside a batch the writer is applying.
+    executing: AtomicU64,
+    commit_latency_sum_ms: AtomicU64,
+    commit_samples: AtomicU64,
+    commit_latency_max_ms: AtomicU64,
+    /// Admission wait bound in milliseconds. Per service (not a global) so a
+    /// saturation test cannot shorten another service's timeout.
+    admission_timeout_ms: AtomicU64,
+    /// Test-only stall gate (like the LIVE ingress gate): simulates a
+    /// wedged SQLite without touching the rest of the service.
+    #[cfg(test)]
+    stall_ms: AtomicU64,
 }
 
-/// Owned background writer: one thread, one reused SQLite connection, writes
-/// folded into bounded transactions. Created by `PointsService::new`, joined
-/// by `PointsService::shutdown`.
 #[cfg(feature = "persistence")]
-struct PointsWriterHandle {
-    sender: Option<std::sync::mpsc::SyncSender<PointsWriteOp>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-    shared: Arc<PointsWriterShared>,
-}
+impl PointsWriterShared {
+    fn new(writer_running: bool) -> Self {
+        Self {
+            queue: Mutex::new(PointsQueueState {
+                queue: VecDeque::new(),
+                closed: !writer_running,
+            }),
+            wake: Condvar::new(),
+            batches: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            failed_ops: AtomicU64::new(0),
+            first_failed_seq: AtomicU64::new(0),
+            committed_seq: AtomicU64::new(0),
+            resolved_seq: AtomicU64::new(0),
+            overload: AtomicU64::new(0),
+            rejected: AtomicU64::new(0),
+            admitted: AtomicU64::new(0),
+            applied: AtomicU64::new(0),
+            queued: AtomicU64::new(0),
+            executing: AtomicU64::new(0),
+            commit_latency_sum_ms: AtomicU64::new(0),
+            commit_samples: AtomicU64::new(0),
+            commit_latency_max_ms: AtomicU64::new(0),
+            admission_timeout_ms: AtomicU64::new(WRITE_ADMISSION_TIMEOUT_MS),
+            #[cfg(test)]
+            stall_ms: AtomicU64::new(0),
+        }
+    }
 
-#[cfg(feature = "persistence")]
-impl PointsWriterHandle {
-    fn start(database: Arc<DatabaseManager>) -> Self {
-        let (sender, receiver) =
-            std::sync::mpsc::sync_channel::<PointsWriteOp>(WRITER_QUEUE_CAPACITY);
-        let shared = Arc::new(PointsWriterShared::default());
-        let thread = std::thread::Builder::new()
-            .name("points-writer".to_owned())
-            .spawn({
-                let database = Arc::clone(&database);
-                let shared = Arc::clone(&shared);
-                move || run_points_writer(database, receiver, shared)
+    fn lock_queue(&self) -> MutexGuard<'_, PointsQueueState> {
+        recover_mutex(&self.queue, "points write queue")
+    }
+
+    /// Records that a sequence could not be made durable. The first such
+    /// sequence caps the contiguous durable watermark.
+    fn record_failure(&self, seq: u64) {
+        self.failed_ops.fetch_add(1, Ordering::Relaxed);
+        self.first_failed_seq
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some(if current == 0 { seq } else { current.min(seq) })
             })
             .ok();
-        if thread.is_none() {
-            tracing::warn!("points writer thread failed to start; writes fall back to synchronous");
-        }
-        Self {
-            sender: Some(sender),
-            thread,
-            shared,
-        }
     }
 }
 
-/// Writer entry point. Opens one connection, configures WAL/busy-timeout,
-/// then folds queued ops into bounded transactions until the service drops
-/// the sender at shutdown. Every received op is applied: storage failures
-/// are counted and logged with the affected sequence range, never silently
-/// dropped, and a failed batch falls back to per-op writes so one bad row
-/// cannot discard its neighbors.
 #[cfg(feature = "persistence")]
-fn run_points_writer(
-    database: Arc<DatabaseManager>,
-    receiver: std::sync::mpsc::Receiver<PointsWriteOp>,
-    shared: Arc<PointsWriterShared>,
-) {
+impl Default for PointsWriterShared {
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+/// Waits until the queue has work or admission is closed. Re-locks on
+/// poison: a panicked writer must not wedge every award forever.
+#[cfg(feature = "persistence")]
+fn queue_wait<'a>(
+    shared: &PointsWriterShared,
+    guard: MutexGuard<'a, PointsQueueState>,
+) -> MutexGuard<'a, PointsQueueState> {
+    shared
+        .wake
+        .wait(guard)
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(feature = "persistence")]
+fn queue_wait_timeout<'a>(
+    shared: &PointsWriterShared,
+    guard: MutexGuard<'a, PointsQueueState>,
+    timeout: Duration,
+) -> MutexGuard<'a, PointsQueueState> {
+    shared
+        .wake
+        .wait_timeout(guard, timeout)
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .0
+}
+
+/// Writer entry point. Opens one connection, configures WAL/busy-timeout,
+/// then folds queued ops into bounded transactions until `shutdown` closes
+/// admission and the queue drains. Every admitted op is either applied or
+/// explicitly reported as failed with its exact sequence: storage trouble
+/// is counted and logged, never silently dropped, and one bad row cannot
+/// discard its neighbours (bounded whole-transaction retries, then per-op
+/// transactions). A failed write stops the contiguous durable watermark
+/// while the resolved watermark keeps moving, so eviction and reloads stay
+/// live without claiming durability they do not have.
+#[cfg(feature = "persistence")]
+fn run_points_writer(database: Arc<DatabaseManager>, shared: Arc<PointsWriterShared>) {
     let mut connection = match database.open_points_writer() {
-        Ok(connection) => connection,
+        Ok(connection) => Some(connection),
         Err(error) => {
-            tracing::error!(%error, "points writer could not open SQLite; draining queue without persistence");
+            // No connection means no durability for anything still queued,
+            // or anything queued later. Keep draining and reporting: the
+            // alternative is an unbounded queue and a shutdown that hangs
+            // on work nobody can apply.
+            tracing::error!(
+                %error,
+                "points writer could not open SQLite; every queued op is reported as a permanent failure"
+            );
             shared.errors.fetch_add(1, Ordering::Relaxed);
-            for op in receiver {
-                tracing::error!(
-                    seq = op.seq(),
-                    "points write lost: writer has no database connection"
-                );
-                shared.errors.fetch_add(1, Ordering::Relaxed);
-            }
-            return;
+            None
         }
     };
     let mut batch = Vec::with_capacity(WRITER_BATCH_SIZE);
     loop {
         batch.clear();
-        // Block for the first op so an idle writer sleeps; then drain
-        // whatever else is already queued into the same transaction.
-        let first = match receiver.recv() {
-            Ok(op) => op,
-            Err(_) => break, // Sender dropped: shutdown, queue is empty.
-        };
-        batch.push(first);
-        while batch.len() < WRITER_BATCH_SIZE {
-            match receiver.try_recv() {
-                Ok(op) => batch.push(op),
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        // Test-only: simulate a wedged SQLite so saturation/rejection paths
+        // are reachable deterministically. Sleeps outside the queue lock.
+        #[cfg(test)]
+        {
+            let stall = shared.stall_ms.load(Ordering::Relaxed);
+            if stall > 0 {
+                std::thread::sleep(Duration::from_millis(stall));
             }
         }
-        let max_seq = batch.iter().map(PointsWriteOp::seq).max().unwrap_or(0);
+        {
+            let mut state = shared.lock_queue();
+            // Block for the first op so an idle writer sleeps; then take
+            // whatever else is already queued into the same transaction.
+            loop {
+                if !state.queue.is_empty() {
+                    break;
+                }
+                if state.closed {
+                    return;
+                }
+                state = queue_wait(&shared, state);
+            }
+            while batch.len() < WRITER_BATCH_SIZE {
+                match state.queue.pop_front() {
+                    Some(op) => batch.push(op),
+                    None => break,
+                }
+            }
+            shared
+                .queued
+                .store(state.queue.len() as u64, Ordering::Relaxed);
+        }
+        // Slots freed by the pop: admissions waiting on capacity can proceed
+        // while this batch is being written, not after it.
+        shared.wake.notify_all();
         shared
-            .queued
+            .executing
+            .fetch_add(batch.len() as u64, Ordering::Relaxed);
+        let started = Instant::now();
+        let first_failed =
+            apply_points_batch_resilient(&database, connection.as_mut(), &batch, &shared);
+        shared
+            .executing
             .fetch_sub(batch.len() as u64, Ordering::Relaxed);
-        if let Err(error) = database.apply_points_batch(&mut connection, &batch) {
+        let max_seq = batch.last().map_or(0, PointsWriteOp::seq);
+        record_commit_latency(&shared, started.elapsed());
+        match first_failed {
+            Some(failed) => shared
+                .committed_seq
+                .store(failed.saturating_sub(1), Ordering::Release),
+            None => shared.committed_seq.store(max_seq, Ordering::Release),
+        }
+        shared.resolved_seq.store(max_seq, Ordering::Release);
+        shared.batches.fetch_add(1, Ordering::Relaxed);
+        shared.wake.notify_all();
+    }
+}
+
+/// Applies one batch: whole transaction first, bounded retries for storage
+/// that is merely busy, then one transaction per op so a single bad row
+/// cannot discard its neighbours. Returns the first sequence that failed
+/// permanently, if any.
+#[cfg(feature = "persistence")]
+fn apply_points_batch_resilient(
+    database: &DatabaseManager,
+    connection: Option<&mut rusqlite::Connection>,
+    batch: &[PointsWriteOp],
+    shared: &PointsWriterShared,
+) -> Option<u64> {
+    let Some(connection) = connection else {
+        for op in batch {
             tracing::error!(
-                %error,
-                ops = batch.len(),
-                max_seq,
-                "points batch transaction failed; retrying ops individually"
+                seq = op.seq(),
+                "points write lost: writer has no database connection"
             );
-            shared.errors.fetch_add(1, Ordering::Relaxed);
-            for op in &batch {
-                if let Err(error) = database.apply_points_op(&mut connection, op) {
-                    // Storage itself is failing (full disk, read-only FS);
-                    // preservation cannot be guaranteed, so say so loudly
-                    // with the exact op identity instead of vanishing.
-                    tracing::error!(%error, seq = op.seq(), "points write failed and cannot be retried further");
+            shared.record_failure(op.seq());
+        }
+        return batch.first().map(PointsWriteOp::seq);
+    };
+    if let Err(error) = database.apply_points_batch(connection, batch) {
+        tracing::error!(
+            %error,
+            ops = batch.len(),
+            max_seq = batch.last().map_or(0, PointsWriteOp::seq),
+            "points batch transaction failed; retrying the transaction"
+        );
+        shared.errors.fetch_add(1, Ordering::Relaxed);
+        let mut recovered = false;
+        for attempt in 1..=WRITE_BATCH_RETRIES {
+            std::thread::sleep(Duration::from_millis(
+                WRITE_RETRY_BACKOFF_MS * u64::from(attempt),
+            ));
+            match database.apply_points_batch(connection, batch) {
+                Ok(()) => {
+                    recovered = true;
+                    break;
+                }
+                Err(error) => {
                     shared.errors.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(%error, attempt, "points batch transaction retry failed");
                 }
             }
         }
-        shared.batches.fetch_add(1, Ordering::Relaxed);
-        shared.committed_seq.store(max_seq, Ordering::Release);
+        if !recovered {
+            tracing::error!(
+                ops = batch.len(),
+                "points batch could not be applied; retrying each op on its own transaction"
+            );
+            let mut first_failed = None;
+            for op in batch {
+                match database.apply_points_op(connection, op) {
+                    Ok(()) => {}
+                    // Storage itself is failing (full disk, read-only FS);
+                    // preservation cannot be guaranteed, so say so loudly
+                    // with the exact op identity instead of vanishing.
+                    Err(error) => {
+                        tracing::error!(%error, seq = op.seq(), "points write failed and cannot be retried further");
+                        shared.record_failure(op.seq());
+                        first_failed.get_or_insert_with(|| op.seq());
+                    }
+                }
+            }
+            return first_failed;
+        }
     }
+    shared
+        .applied
+        .fetch_add(batch.len() as u64, Ordering::Relaxed);
+    None
+}
+
+#[cfg(feature = "persistence")]
+fn record_commit_latency(shared: &PointsWriterShared, elapsed: Duration) {
+    let millis = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    shared.commit_samples.fetch_add(1, Ordering::Relaxed);
+    shared
+        .commit_latency_sum_ms
+        .fetch_add(millis, Ordering::Relaxed);
+    shared
+        .commit_latency_max_ms
+        .fetch_max(millis, Ordering::Relaxed);
 }
 
 impl Default for PointsService {
@@ -449,7 +710,9 @@ impl Default for PointsService {
             #[cfg(feature = "persistence")]
             database: None,
             #[cfg(feature = "persistence")]
-            writer: Mutex::new(None),
+            writer: Arc::new(PointsWriterShared::new(false)),
+            #[cfg(feature = "persistence")]
+            writer_thread: Mutex::new(None),
         }
     }
 }
@@ -467,7 +730,9 @@ impl PointsService {
             #[cfg(feature = "persistence")]
             database: None,
             #[cfg(feature = "persistence")]
-            writer: Mutex::new(None),
+            writer: Arc::new(PointsWriterShared::new(false)),
+            #[cfg(feature = "persistence")]
+            writer_thread: Mutex::new(None),
         };
         #[cfg(feature = "persistence")]
         {
@@ -495,12 +760,32 @@ impl PointsService {
                     tracing::warn!(%error, "could not warm points hot cache; cold viewers load on demand");
                 }
             }
-            *service.writer.lock().expect("points writer poisoned") =
-                Some(PointsWriterHandle::start(Arc::clone(&database)));
+            let shared = Arc::new(PointsWriterShared::new(true));
+            let thread = std::thread::Builder::new()
+                .name("points-writer".to_owned())
+                .spawn({
+                    let database = Arc::clone(&database);
+                    let shared = Arc::clone(&shared);
+                    move || run_points_writer(database, shared)
+                })
+                .ok();
+            if thread.is_none() {
+                // No thread means nothing will ever drain the queue: close
+                // admission now so awards reject loudly instead of queueing
+                // writes nobody applies.
+                tracing::error!("points writer thread failed to start; durable writes are rejected until it is restarted");
+                let mut state = shared.lock_queue();
+                state.closed = true;
+            }
+            *service
+                .writer_thread
+                .lock()
+                .expect("points writer thread poisoned") = thread;
             // Keep the connection boundary in the service while the writer
             // owns its long-lived connection.
             let mut service = service;
             service.database = Some(database);
+            service.writer = shared;
             service
         }
         #[cfg(not(feature = "persistence"))]
@@ -511,14 +796,14 @@ impl PointsService {
     }
 
     /// Resizes the hot-viewer bound. Shrinking below the current size evicts
-    /// cold viewers immediately (never uncommitted ones); growing only
-    /// raises the ceiling, with cold rows reloading from SQLite on demand.
+    /// cold viewers immediately (never ones with unresolved writes); growing
+    /// only raises the ceiling, with cold rows reloading from SQLite on demand.
     pub fn set_cache_capacity(&self, capacity: usize) {
         let capacity = capacity.clamp(1, 1_000_000);
-        let committed = self.committed_seq();
+        let resolved = self.resolved_seq();
         let mut inner = recover_rwlock_write(&self.inner, "points viewers");
         inner.capacity = capacity;
-        inner.evict_cold(committed);
+        inner.evict_cold(resolved);
     }
 
     pub fn cache_capacity(&self) -> usize {
@@ -533,53 +818,68 @@ impl PointsService {
         self.next_op.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Records that a durable write for `unique_id` is outstanding, so
+    /// eviction cannot drop the row before it lands. With no database
+    /// configured there is no durable write to wait for, so nothing is
+    /// tracked — an unretired marker would pin every row in the cache.
+    fn track_pending(&self, inner: &mut PointsInner, unique_id: &str, seq: u64) {
+        #[cfg(feature = "persistence")]
+        {
+            if self.database.is_some() {
+                inner.pending.insert(unique_id.to_owned(), seq);
+            }
+        }
+        #[cfg(not(feature = "persistence"))]
+        let _ = (inner, unique_id, seq);
+    }
+
+    /// Highest sequence the writer finished: durable, or explicitly reported
+    /// as a permanent failure. Outstanding work for any lower sequence is
+    /// over, so this is what eviction and reload waits key off.
     #[cfg(feature = "persistence")]
-    fn committed_seq(&self) -> u64 {
-        recover_mutex(&self.writer, "points writer")
-            .as_ref()
-            .map(|writer| writer.shared.committed_seq.load(Ordering::Acquire))
-            .unwrap_or(u64::MAX)
+    fn resolved_seq(&self) -> u64 {
+        self.writer.resolved_seq.load(Ordering::Acquire)
     }
 
     #[cfg(not(feature = "persistence"))]
-    fn committed_seq(&self) -> u64 {
+    fn resolved_seq(&self) -> u64 {
         u64::MAX
     }
 
     /// Waits (bounded) until every op queued so far for `unique_id` is
-    /// durable, then the caller may reload the row from SQLite without
+    /// finished, then the caller may reload the row from SQLite without
     /// losing queued increments to a stale read.
     ///
-    /// Why this exists: eviction is allowed once the writer commits a row,
+    /// Why this exists: eviction is allowed once the writer resolves a row,
     /// but a later award for that same viewer may still sit queued behind
     /// other work. Reloading the durable row before that op applies would
     /// base new math on stale state and the stale-based snapshot would win
-    /// the FIFO race, silently dropping the queued increment. The wait
-    /// closes that window. It triggers only on a cache miss with
-    /// outstanding work for that viewer — steady-state hot viewers never
-    /// pay it — and it always terminates: shutdown marks every prior
-    /// sequence committed, a dead writer trips the timeout with a warning.
+    /// the FIFO race, silently dropping the queued increment. An
+    /// unresolved full reset is waited on too: it zeroes rows this viewer
+    /// may still carry, and reloading early would resurrect them.
+    ///
+    /// It triggers only on a cache miss with outstanding work for that
+    /// viewer — steady-state hot viewers never pay it — and it always
+    /// terminates: the resolved watermark advances for durable *and*
+    /// permanently failed writes, a dead writer trips the timeout with a
+    /// warning.
     #[cfg(feature = "persistence")]
     fn wait_for_viewer_committed(&self, unique_id: &str) {
-        let seq = recover_rwlock_read(&self.inner, "points viewers")
-            .pending
-            .get(unique_id)
-            .copied()
-            .unwrap_or(0);
-        if seq == 0 || self.committed_seq() >= seq {
+        let seq = recover_rwlock_read(&self.inner, "points viewers").reload_wait_seq(unique_id);
+        if seq == 0 || self.resolved_seq() >= seq {
             return;
         }
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while self.committed_seq() < seq {
-            if std::time::Instant::now() >= deadline {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while self.resolved_seq() < seq {
+            if Instant::now() >= deadline {
                 tracing::warn!(
                     viewer_seq = seq,
-                    committed = self.committed_seq(),
+                    resolved = self.resolved_seq(),
                     "points reload timed out waiting for queued writes; proceeding with durable state"
                 );
                 return;
             }
-            std::thread::sleep(std::time::Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -606,12 +906,12 @@ impl PointsService {
                 .and_then(|database| database.load_viewer_by_id(&needle).ok().flatten())
                 .and_then(|value| ViewerState::from_value(&value));
             if let Some(state) = loaded {
-                let committed = self.committed_seq();
+                let resolved = self.resolved_seq();
                 let mut inner = recover_rwlock_write(&self.inner, "points viewers");
                 // A concurrent award may have created the row while the
                 // database read was in flight: keep the newer resident.
                 let resident = inner.viewers.entry(needle).or_insert(state).clone();
-                inner.evict_cold(committed);
+                inner.evict_cold(resolved);
                 return Some(resident.to_value());
             }
         }
@@ -622,30 +922,30 @@ impl PointsService {
         let inner = recover_rwlock_read(&self.inner, "points viewers");
         #[cfg(feature = "persistence")]
         {
-            let writer = recover_mutex(&self.writer, "points writer");
-            let (queued, batches, errors, overload, committed) = writer
-                .as_ref()
-                .map(|writer| {
-                    (
-                        writer.shared.queued.load(Ordering::Relaxed) as usize,
-                        writer.shared.batches.load(Ordering::Relaxed),
-                        writer.shared.errors.load(Ordering::Relaxed),
-                        writer.shared.overload.load(Ordering::Relaxed),
-                        writer.shared.committed_seq.load(Ordering::Acquire),
-                    )
-                })
-                .unwrap_or_default();
+            let samples = self.writer.commit_samples.load(Ordering::Relaxed);
+            let sum = self.writer.commit_latency_sum_ms.load(Ordering::Relaxed);
             PointsDiagnostics {
                 hot_size: inner.viewers.len(),
                 hot_capacity: inner.capacity,
                 cache_hits: inner.hits,
                 cache_misses: inner.misses,
-                writer_queued: queued,
-                write_batches: batches,
-                write_errors: errors,
-                writer_overload: overload,
+                writer_queued: self.writer.queued.load(Ordering::Relaxed) as usize,
+                writer_executing: self.writer.executing.load(Ordering::Relaxed) as usize,
+                write_batches: self.writer.batches.load(Ordering::Relaxed),
+                write_errors: self.writer.errors.load(Ordering::Relaxed),
+                writer_overload: self.writer.overload.load(Ordering::Relaxed),
+                write_rejected: self.writer.rejected.load(Ordering::Relaxed),
+                write_failed: self.writer.failed_ops.load(Ordering::Relaxed),
+                write_applied: self.writer.applied.load(Ordering::Relaxed),
                 pending_writes: inner.pending.len(),
-                committed_seq: committed,
+                committed_seq: self.writer.committed_seq.load(Ordering::Acquire),
+                resolved_seq: self.writer.resolved_seq.load(Ordering::Acquire),
+                commit_latency_mean_ms: if samples == 0 {
+                    0.0
+                } else {
+                    sum as f64 / samples as f64
+                },
+                commit_latency_max_ms: self.writer.commit_latency_max_ms.load(Ordering::Relaxed),
             }
         }
         #[cfg(not(feature = "persistence"))]
@@ -660,36 +960,38 @@ impl PointsService {
         }
     }
 
-    /// Closes the writer queue and joins the writer thread, flushing every
-    /// accepted op. Ordinary shutdown must never lose committed-intent work:
-    /// after `shutdown` returns, the queue is empty and all sequences are
-    /// committed. Safe to call more than once.
+    /// Closes admission, joins the writer thread and flushes every admitted
+    /// op. Ordinary shutdown never loses accepted-intent work: when this
+    /// returns the queue is empty and every admitted sequence is resolved.
+    /// Safe to call more than once.
+    ///
+    /// Bounded by construction: closing admission lets the writer drain and
+    /// exit, and a writer with no connection drains without applying.
+    /// [`AppCore::shutdown`](crate::AppCore::shutdown) still wraps this in
+    /// its own deadline and reports a stuck writer explicitly.
     pub fn shutdown(&self) {
         #[cfg(feature = "persistence")]
         {
-            let thread = {
-                let mut writer = recover_mutex(&self.writer, "points writer");
-                // Dropping the sender closes admission; the writer drains
-                // what remains and then exits.
-                if let Some(writer) = writer.as_mut() {
-                    writer.sender.take();
-                }
-                writer.as_mut().and_then(|writer| writer.thread.take())
-            };
+            {
+                let mut state = self.writer.lock_queue();
+                state.closed = true;
+            }
+            self.writer.wake.notify_all();
+            let thread = recover_mutex(&self.writer_thread, "points writer thread").take();
             if let Some(thread) = thread {
                 if let Err(error) = thread.join() {
                     tracing::warn!(?error, "points writer thread panicked during shutdown");
                 }
             }
-            // The queue is drained and every accepted op is durable (or was
-            // applied by the synchronous fallback), so retire all pending
-            // markers: post-shutdown reloads must never stall waiting.
-            if let Some(writer) = recover_mutex(&self.writer, "points writer").as_ref() {
-                writer
-                    .shared
-                    .committed_seq
-                    .store(u64::MAX, Ordering::Release);
-            }
+            // Post-shutdown reloads must never stall on the wait above: the
+            // writer drained, so every admitted sequence is resolved. This
+            // never stores a sentinel maximum — a permanently failed write
+            // stays visible as a gap between `committed_seq` and
+            // `resolved_seq` instead of being papered over.
+            let admitted = self.writer.admitted.load(Ordering::Acquire);
+            self.writer
+                .resolved_seq
+                .fetch_max(admitted, Ordering::Release);
         }
     }
 
@@ -775,6 +1077,14 @@ impl PointsService {
             let points_per_level = config.points_per_level.max(10.0);
             let level = (total_points / points_per_level).floor() as u32 + 1;
 
+            // Reserve durable-queue space *before* mutating anything. A
+            // rejected admission must leave memory exactly as it was, so the
+            // hot cache never claims an award SQLite will never hold. This
+            // wait also pins sequence order to queue order: nothing else can
+            // allocate a sequence while this critical section holds `inner`.
+            if !self.wait_write_capacity() {
+                return None;
+            }
             let seq = self.next_seq();
             let snapshot = {
                 let state = inner
@@ -792,12 +1102,12 @@ impl PointsService {
                 );
                 state.clone()
             };
-            inner.pending.insert(unique_id.clone(), seq);
+            self.track_pending(&mut inner, &unique_id, seq);
             // Enforce the memory bound on the insert path only, amortized:
-            // steady-state updates never scan. Uncommitted rows are exempt
-            // from eviction.
-            let committed = self.committed_seq();
-            inner.evict_if_over(committed);
+            // steady-state updates never scan. Rows with unresolved writes
+            // are exempt from eviction.
+            let resolved = self.resolved_seq();
+            inner.evict_if_over(resolved);
             (
                 PointAward {
                     unique_id,
@@ -866,33 +1176,61 @@ impl PointsService {
 
     pub fn reset(&self, unique_id: Option<&str>) {
         let unique_id = unique_id.and_then(clean_unique_id);
-        let seq = self.next_seq();
-        #[cfg(feature = "persistence")]
-        self.submit_reset_op(seq, unique_id.clone());
-        let committed = self.committed_seq();
+        // Admission first: a rejected reset must not zero memory the durable
+        // store will never match.
+        if !self.wait_write_capacity() {
+            return;
+        }
+        let resolved = self.resolved_seq();
         let mut inner = recover_rwlock_write(&self.inner, "points viewers");
+        let seq = self.next_seq();
+        let PointsInner {
+            viewers,
+            pending,
+            reset_pending,
+            ..
+        } = &mut *inner;
         match unique_id.as_deref() {
             Some(unique_id) => {
-                if let Some(viewer) = inner.viewers.get_mut(unique_id) {
+                if let Some(viewer) = viewers.get_mut(unique_id) {
                     viewer.points = 0.0;
                     viewer.level = 1;
-                    inner.pending.insert(unique_id.to_owned(), seq);
+                    #[cfg(feature = "persistence")]
+                    if self.database.is_some() {
+                        pending.insert(unique_id.to_owned(), seq);
+                    }
                 }
                 // A cold (evicted or never-cached) viewer is already reset
-                // durably above; nothing is fabricated in memory.
+                // durably below; nothing is fabricated in memory.
+                #[cfg(feature = "persistence")]
+                self.submit_points_op(PointsWriteOp::Reset {
+                    seq,
+                    unique_id: Some(unique_id.to_owned()),
+                });
             }
             None => {
-                for viewer in inner.viewers.values_mut() {
+                for viewer in viewers.values_mut() {
                     viewer.points = 0.0;
                     viewer.level = 1;
                 }
-                // Full resets retire every pending marker: the reset op is
-                // queued behind all earlier writes and zeroes every row.
-                inner.pending.clear();
-                inner.pending.insert(String::new(), seq);
+                // Full reset: markers retire when the reset op resolves (it
+                // zeroes every row and is queued behind all earlier writes),
+                // so nothing is cleared here. Clearing early would let a
+                // concurrent eviction reload a row the reset is about to
+                // zero, and the reload would win the FIFO race. The reset
+                // sequence itself gates every cold reload until it lands.
+                #[cfg(feature = "persistence")]
+                if self.database.is_some() {
+                    *reset_pending = seq;
+                }
+                #[cfg(feature = "persistence")]
+                self.submit_points_op(PointsWriteOp::Reset {
+                    seq,
+                    unique_id: None,
+                });
             }
         }
-        inner.evict_cold(committed);
+        inner.evict_cold(resolved);
     }
 
     pub fn adjust(&self, unique_id: &str, delta: f64) -> Option<PointAward> {
@@ -926,21 +1264,30 @@ impl PointsService {
         }
         // Read config outside the viewer lock: one lock at a time.
         let config = self.config();
-        let award = {
+        let (award_value, seq) = {
             let mut inner = recover_rwlock_write(&self.inner, "points viewers");
-            let viewer = inner.viewers.get_mut(&unique_id)?;
+            let viewer = inner.viewers.get(&unique_id)?;
             let points = round_points((viewer.points + delta).max(0.0));
             let level =
                 ((points / config.points_per_level.max(10.0)).floor() as u32).saturating_add(1);
+            // Reserve before mutating: a rejected admission leaves the row
+            // untouched instead of diverging from the durable store.
+            if !self.wait_write_capacity() {
+                return None;
+            }
+            let seq = self.next_seq();
+            let viewer = inner
+                .viewers
+                .get_mut(&unique_id)
+                .expect("viewer checked above the admission wait");
             viewer.points = points;
             viewer.level = level;
             viewer.last_seen = now_millis();
-            let seq = self.next_seq();
-            inner.pending.insert(unique_id.clone(), seq);
+            self.track_pending(&mut inner, &unique_id, seq);
             // Bound enforced after the refresh (amortized), never on a
             // stale timestamp.
-            let committed = self.committed_seq();
-            inner.evict_if_over(committed);
+            let resolved = self.resolved_seq();
+            inner.evict_if_over(resolved);
             (
                 PointAward {
                     unique_id: unique_id.clone(),
@@ -952,7 +1299,6 @@ impl PointsService {
                 seq,
             )
         };
-        let (award_value, seq) = award;
         #[cfg(feature = "persistence")]
         self.submit_points_op(PointsWriteOp::Adjust {
             seq,
@@ -965,60 +1311,89 @@ impl PointsService {
         Some(award_value)
     }
 
-    /// Queues one durable op. The queue is bounded: when the writer is
-    /// saturated, the op is applied synchronously on this thread (bounded
-    /// backpressure, never unbounded memory) and an overload diagnostic is
-    /// recorded. Either path preserves the op — saturation delays the
-    /// caller instead of discarding committed-intent work.
+    /// Bounded wait for one free slot in the ordered writer queue. Called
+    /// while the caller holds the viewer lock — that is what makes sequence
+    /// allocation order and queue order the same order.
+    ///
+    /// There is no synchronous write fallback on this path: an inline write
+    /// could jump the queue and win the FIFO race with the ops already in
+    /// it, overwriting newer state with a stale snapshot. Saturation
+    /// therefore delays the caller, and the timeout rejects the op without
+    /// mutating memory so caller-visible state and SQLite stay consistent.
     #[cfg(feature = "persistence")]
-    fn submit_points_op(&self, op: PointsWriteOp) {
-        // `try_send` returns the op on saturation/disconnect, so the
-        // fallback below still owns it. Never drop `op` on this path.
-        let pending = {
-            let writer = recover_mutex(&self.writer, "points writer");
-            match writer.as_ref() {
-                Some(writer) => match writer.sender.as_ref() {
-                    Some(sender) => match sender.try_send(op) {
-                        Ok(()) => {
-                            writer.shared.queued.fetch_add(1, Ordering::Relaxed);
-                            None
-                        }
-                        Err(std::sync::mpsc::TrySendError::Full(op)) => Some(op),
-                        Err(std::sync::mpsc::TrySendError::Disconnected(op)) => Some(op),
-                    },
-                    None => Some(op),
-                },
-                None => Some(op),
-            }
-        };
-        let Some(op) = pending else { return };
-        // Causal path for `admitted == false`: queue full, writer missing,
-        // or shutdown in progress. Fall back to a direct write so the
-        // caller's update is still durable.
-        if let Some(writer) = recover_mutex(&self.writer, "points writer")
-            .as_ref()
-            .map(|writer| Arc::clone(&writer.shared))
-        {
-            writer.overload.fetch_add(1, Ordering::Relaxed);
+    fn wait_write_capacity(&self) -> bool {
+        // No database configured (in-memory service): nothing durable to
+        // admit, so awards proceed directly.
+        if self.database.is_none() {
+            return true;
         }
-        tracing::warn!("points writer saturated; applying write synchronously");
-        if let Some(database) = self.database.as_ref() {
-            match database.open_points_writer() {
-                Ok(mut connection) => {
-                    if let Err(error) = database.apply_points_op(&mut connection, &op) {
-                        tracing::error!(%error, seq = op.seq(), "synchronous points fallback write failed");
-                    }
-                }
-                Err(error) => {
-                    tracing::error!(%error, seq = op.seq(), "synchronous points fallback could not open SQLite");
-                }
+        let timeout =
+            Duration::from_millis(self.writer.admission_timeout_ms.load(Ordering::Relaxed));
+        let deadline = Instant::now() + timeout;
+        let mut state = self.writer.lock_queue();
+        let mut waited = false;
+        loop {
+            if state.closed {
+                return false;
             }
+            if state.queue.len() < WRITER_QUEUE_CAPACITY {
+                break;
+            }
+            if !waited {
+                self.writer.overload.fetch_add(1, Ordering::Relaxed);
+                waited = true;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    queued = state.queue.len(),
+                    timeout_ms = timeout.as_millis() as u64,
+                    "points writer saturated; rejecting write without mutating memory"
+                );
+                self.writer.rejected.fetch_add(1, Ordering::Relaxed);
+                return false;
+            }
+            state = queue_wait_timeout(
+                &self.writer,
+                state,
+                Duration::from_millis(WRITE_ADMISSION_POLL_MS),
+            );
         }
+        true
     }
 
+    #[cfg(not(feature = "persistence"))]
+    fn wait_write_capacity(&self) -> bool {
+        true
+    }
+
+    /// Pushes one op onto the ordered writer queue. Capacity was reserved
+    /// through [`Self::wait_write_capacity`] inside the same critical
+    /// section that allocated the sequence, so this push cannot block and
+    /// cannot reorder.
     #[cfg(feature = "persistence")]
-    fn submit_reset_op(&self, seq: u64, unique_id: Option<String>) {
-        self.submit_points_op(PointsWriteOp::Reset { seq, unique_id });
+    fn submit_points_op(&self, op: PointsWriteOp) {
+        if self.database.is_none() {
+            return;
+        }
+        let mut state = self.writer.lock_queue();
+        if state.closed {
+            // Admission closed between the capacity wait and this push
+            // (shutdown racing an award). The op cannot be made durable
+            // anymore and memory already carries the update, so report the
+            // loss loudly instead of pretending the queue accepted it.
+            tracing::error!(
+                seq = op.seq(),
+                "points write rejected: writer queue closed while admitting"
+            );
+            self.writer.rejected.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        state.queue.push_back(op);
+        self.writer
+            .queued
+            .store(state.queue.len() as u64, Ordering::Relaxed);
+        self.writer.admitted.fetch_add(1, Ordering::Relaxed);
+        self.writer.wake.notify_one();
     }
 }
 
@@ -1110,6 +1485,53 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds an isolated on-disk service plus its temp root. Every
+    /// persistence test owns its directory so a crash cannot leak state
+    /// into the next run.
+    #[cfg(feature = "persistence")]
+    fn temp_service(tag: &str) -> (Arc<DatabaseManager>, PointsService, std::path::PathBuf) {
+        use crate::paths::AppPaths;
+        let root = std::env::temp_dir().join(format!(
+            "tiktools-points-{tag}-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = AppPaths {
+            data: root.join("data"),
+            plugins: root.join("plugins"),
+            plugin_data: root.join("plugin-data"),
+            builtin_plugins: root.join("builtin-plugins"),
+            development_plugins: None,
+            logs: root.join("logs"),
+            temp: root.join("temp"),
+            root: root.clone(),
+        };
+        paths.ensure_directories().expect("temp dirs");
+        let database = Arc::new(DatabaseManager::new(paths));
+        let service = PointsService::new(Arc::clone(&database));
+        (database, service, root)
+    }
+
+    /// Waits until the writer has taken and applied everything queued.
+    #[cfg(feature = "persistence")]
+    fn wait_for_writer_idle(service: &PointsService) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let diagnostics = service.diagnostics();
+            if diagnostics.writer_queued == 0 && diagnostics.writer_executing == 0 {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "writer never drained: {:?}",
+                diagnostics
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     #[test]
     fn award_points_matches_existing_defaults() {
@@ -1384,8 +1806,8 @@ mod tests {
         assert_eq!(viewer["points"], 8.0 * 250.0);
     }
 
-    /// Slow/unavailable SQLite must never break awarding or shutdown:
-    /// the hot cache serves reads and writes queue (or fall back loudly),
+    /// Slow/unavailable SQLite must never break awarding or shutdown: the
+    /// hot cache serves reads, writes queue and are reported as failures,
     /// and shutdown still joins cleanly.
     #[cfg(all(feature = "persistence", target_os = "linux"))]
     #[test]
@@ -1434,6 +1856,25 @@ mod tests {
         let viewer = service.viewer("survivor-0").expect("memory serves reads");
         assert_eq!(viewer["points"], 1.0);
         service.shutdown();
+        // Every op is resolved (applied or explicitly failed) so nothing is
+        // left outstanding, but nothing was durable either: the failure is
+        // visible as a gap between the watermarks instead of being hidden.
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.writer_queued, 0, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics.write_applied + diagnostics.write_failed,
+            100,
+            "{diagnostics:?}"
+        );
+        assert!(diagnostics.write_failed > 0, "{diagnostics:?}");
+        assert!(
+            diagnostics.resolved_seq >= diagnostics.committed_seq,
+            "{diagnostics:?}"
+        );
+        assert!(
+            diagnostics.committed_seq < diagnostics.resolved_seq,
+            "a permanently failed write must stay visible as a watermark gap: {diagnostics:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -1448,5 +1889,191 @@ mod tests {
         let diagnostics = service.diagnostics();
         assert!(diagnostics.cache_hits >= 1);
         assert!(diagnostics.cache_misses >= 1);
+    }
+
+    /// A wedged writer must never be papered over with an out-of-order
+    /// synchronous write. Admission waits, then rejects without mutating
+    /// memory; once the writer recovers, every admitted op is durable and
+    /// the newest snapshot wins — which is only true if the queue order is
+    /// the sequence order.
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn saturated_writer_rejects_instead_of_bypassing_the_fifo() {
+        let (database, service, root) = temp_service("saturated");
+        // Short admission bound so the rejection is reachable in a test.
+        service
+            .writer
+            .admission_timeout_ms
+            .store(50, Ordering::Relaxed);
+        // Wedge the writer: the queue fills, then admissions must reject.
+        service.writer.stall_ms.store(1_000, Ordering::Relaxed);
+        let accepted = WRITER_QUEUE_CAPACITY;
+        for _ in 0..accepted {
+            let award = service.award_points("racer", PointAction::Chat, AwardOptions::default());
+            assert!(
+                award.is_some(),
+                "admissions must succeed while the queue has room"
+            );
+        }
+        assert_eq!(
+            service.viewer("racer").expect("racer")["points"],
+            accepted as f64
+        );
+        // The next award finds a full queue and is rejected with no memory
+        // mutation: the caller and the durable store agree it did not land.
+        let rejected = service.award_points("racer", PointAction::Chat, AwardOptions::default());
+        assert!(
+            rejected.is_none(),
+            "saturated queue must reject, never write inline"
+        );
+        assert_eq!(
+            service.viewer("racer").expect("racer")["points"],
+            accepted as f64,
+            "a rejected admission must not mutate the hot cache"
+        );
+        let saturated = service.diagnostics();
+        assert_eq!(saturated.write_rejected, 1, "{saturated:?}");
+        assert!(saturated.writer_overload >= 1, "{saturated:?}");
+        assert!(saturated.writer_queued > 0, "{saturated:?}");
+        assert_eq!(saturated.write_applied, 0, "{saturated:?}");
+
+        // Recover the writer and drain: the durable row must carry the
+        // newest accepted snapshot, not an older one that jumped the queue.
+        service.writer.stall_ms.store(0, Ordering::Relaxed);
+        service.shutdown();
+        let drained = service.diagnostics();
+        assert_eq!(drained.writer_queued, 0, "{drained:?}");
+        assert_eq!(drained.write_failed, 0, "{drained:?}");
+        assert_eq!(drained.write_applied as usize, accepted, "{drained:?}");
+        assert_eq!(drained.committed_seq, drained.resolved_seq, "{drained:?}");
+        drop(service);
+        let restarted = PointsService::new(database);
+        let durable = restarted.viewer("racer").expect("racer persisted");
+        assert_eq!(
+            durable["points"], accepted as f64,
+            "durable state must equal the newest admitted snapshot"
+        );
+        restarted.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A full reset zeroes rows that may still be cold in SQLite. Reloading
+    /// one before the reset op lands would resurrect its pre-reset points
+    /// and the later FIFO winner would be the stale snapshot.
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn full_reset_blocks_cold_reloads_until_it_lands() {
+        let (_database, service, root) = temp_service("reset");
+        service.set_cache_capacity(4);
+        service.award_points(
+            "alice",
+            PointAction::Manual,
+            AwardOptions {
+                custom_amount: Some(5.0),
+                ..AwardOptions::default()
+            },
+        );
+        service.award_points(
+            "bob",
+            PointAction::Manual,
+            AwardOptions {
+                custom_amount: Some(3.0),
+                ..AwardOptions::default()
+            },
+        );
+        wait_for_writer_idle(&service);
+        // Wedge the writer so the reset op cannot land while we reload.
+        service.writer.stall_ms.store(500, Ordering::Relaxed);
+        service.reset(None);
+        // Touch bob so alice is the coldest row, then shrink to force the
+        // reload path for alice.
+        service.adjust("bob", 0.0).expect("bob is cached");
+        service.set_cache_capacity(1);
+        let shrunk = service.diagnostics();
+        assert_eq!(shrunk.hot_size, 1, "alice must be cold: {shrunk:?}");
+        assert_eq!(
+            service.viewer("bob").expect("bob is cached")["points"],
+            0.0,
+            "reset applies to memory immediately"
+        );
+        let alice = service.viewer("alice").expect("alice reloads");
+        assert_eq!(
+            alice["points"], 0.0,
+            "a reload must not resurrect pre-reset points"
+        );
+        service.writer.stall_ms.store(0, Ordering::Relaxed);
+        service.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Order at scale: 100,000 sequential awards to one viewer must leave
+    /// exactly 100,000 durable points. The writer applies full row
+    /// snapshots, so this only holds if it applies them in sequence order.
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn hundred_thousand_ordered_awards_are_durable_in_order() {
+        const EVENTS: u64 = 100_000;
+        let (database, service, root) = temp_service("ordered");
+        for _ in 0..EVENTS {
+            service.award_points("marathon", PointAction::Chat, AwardOptions::default());
+        }
+        let in_memory = service.viewer("marathon").expect("marathon");
+        assert_eq!(in_memory["points"], EVENTS as f64);
+        service.shutdown();
+        let diagnostics = service.diagnostics();
+        assert_eq!(diagnostics.writer_queued, 0, "{diagnostics:?}");
+        assert_eq!(diagnostics.write_rejected, 0, "{diagnostics:?}");
+        assert_eq!(diagnostics.write_failed, 0, "{diagnostics:?}");
+        assert_eq!(diagnostics.write_applied, EVENTS, "{diagnostics:?}");
+        assert_eq!(
+            diagnostics.committed_seq, diagnostics.resolved_seq,
+            "{diagnostics:?}"
+        );
+        drop(service);
+        let restarted = PointsService::new(database);
+        let durable = restarted.viewer("marathon").expect("marathon durable");
+        assert_eq!(durable["points"], EVENTS as f64);
+        restarted.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Concurrent awards from many threads must be durable in whatever
+    /// order they were admitted, with nothing lost between memory and
+    /// SQLite.
+    #[cfg(feature = "persistence")]
+    #[test]
+    fn concurrent_awards_are_durable_and_exact() {
+        let (database, service, root) = temp_service("concurrent");
+        let service = Arc::new(service);
+        let mut handles = Vec::new();
+        for worker in 0..8 {
+            let service = Arc::clone(&service);
+            handles.push(std::thread::spawn(move || {
+                for _ in 0..250 {
+                    service.award_points("racer", PointAction::Chat, AwardOptions::default());
+                    if worker % 2 == 0 {
+                        service.adjust("racer", -0.5);
+                    }
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("worker finishes");
+        }
+        let expected = service.viewer("racer").expect("racer")["points"]
+            .as_f64()
+            .expect("points are a number");
+        wait_for_writer_idle(&service);
+        let memory = service.diagnostics();
+        assert_eq!(memory.writer_queued, 0, "{memory:?}");
+        assert_eq!(memory.write_rejected, 0, "{memory:?}");
+        assert_eq!(memory.write_failed, 0, "{memory:?}");
+        service.shutdown();
+        drop(service);
+        let restarted = PointsService::new(database);
+        let durable = restarted.viewer("racer").expect("racer durable");
+        assert_eq!(durable["points"], expected);
+        restarted.shutdown();
+        let _ = std::fs::remove_dir_all(root);
     }
 }

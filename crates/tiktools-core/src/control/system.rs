@@ -156,7 +156,17 @@ impl AppCore {
         let live_generation_seq = self.connection_sequence.load(Ordering::Acquire);
         #[cfg(not(feature = "native-tiktok"))]
         let live_generation_seq = 0u64;
-        let points = self.points.diagnostics().to_value();
+        let points_diagnostics = self.points.diagnostics();
+        // Rejected or permanently failed writes are user-visible data loss:
+        // memory served the update, SQLite did not receive it. Surface that
+        // as degraded health instead of leaving it buried in counters.
+        if points_diagnostics.write_rejected > 0 || points_diagnostics.write_failed > 0 {
+            degraded.push(format!(
+                "{} points write(s) rejected and {} failed; those updates are memory-only; see points diagnostics",
+                points_diagnostics.write_rejected, points_diagnostics.write_failed
+            ));
+        }
+        let points = points_diagnostics.to_value();
         let plugin_delivery = crate::plugin_events::fanout::delivery_snapshot(&recover_mutex(
             &self.plugin_delivery,
             "plugin delivery",

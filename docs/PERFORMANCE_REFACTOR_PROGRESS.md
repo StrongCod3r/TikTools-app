@@ -15,7 +15,7 @@ Existing bounded queues, replay guards and compatibility interfaces must remain.
 | --- | --- | --- |
 | 1 | Transport task ownership, original stamping and stale fencing implemented. Upstream reconnect visibility and signer OS-thread teardown remain. | Partial |
 | 2 | Queue accounting and bounded owned points execution implemented. Payload-byte limits, expensive logging and complete pipeline stress validation remain. | Partial |
-| 3 | Sequence allocation and submission can reorder. Synchronous fallback overtakes FIFO writes. Failed transactions still advance committed sequence; shutdown sets it to MAX regardless of outcome. Full resets clear dirty markers prematurely. | Pending |
+| 3 | Durable FIFO ordering implemented: single ordered queue, no synchronous fallback, separate durable/resolved watermarks, atomic per-op recovery, full-reset reload gating. Real-stress throughput numbers still pending. | Complete |
 | 4 | Failed workers lose join ownership. Stop can join indefinitely. Startup handshake has no deadline. Process per-call I/O threads are detached. Replacement can race old stop's running flag. | Pending |
 | 5 | Subscriber uniqueness, separate poll/push owners and gauge cleanup implemented. Poll generation/metrics and pushed processing isolation remain. | Partial |
 | 6 | Main RPC bounds, feed ownership, scoped/aged dedup, debounce cancellation and stale response fences implemented. Full composable/WebView/performance audit remains. | Partial |
@@ -239,7 +239,58 @@ workspace tests (647 passed, 0 failed), and core feature-enabled suite
 (303 library + 8 throughput, 1 ignored RSS test) all pass. No real-LIVE
 measurement was collected.
 
-Phase 1 commit: `pending` (this batch).
+Phase 1 commit: `ed3e042`.
+
+## Phase 2 — durable points FIFO ordering and SQLite correctness
+
+Root cause fixed: sequence allocation and the queue push happened in
+different critical sections, and a saturated queue fell back to a
+*sequential inline write* on the awarding thread. That inline write could
+land after ops with higher sequences and overwrite them with a stale row
+snapshot (each op upserts a whole row), silently dropping queued
+increments. Failed batches also advanced the committed sequence, and
+shutdown stored `u64::MAX` regardless of outcome, hiding durable gaps.
+
+- One ordered queue (`VecDeque` + `Condvar`) replaces the `mpsc` channel.
+  Sequence allocation, the memory mutation and the push all happen inside
+  the viewer lock, so queue order *is* sequence order by construction.
+- No synchronous fallback. Admission waits (bounded, 5 s, per-service) for
+  a free slot, then rejects **without mutating memory** — the caller, the
+  hot cache and SQLite agree the op did not happen. Saturation is reported
+  as `writerOverload`/`writeRejected`, never papered over with an
+  out-of-order write.
+- Two watermarks: `committedSeq` is contiguous and durable and stops at the
+  first permanently failed op; `resolvedSeq` covers applied *or* explicitly
+  failed ops and drives eviction and cold-reload waits. A failed write
+  stays visible as a watermark gap instead of being erased by a sentinel.
+- Writer: bounded whole-transaction retries with exponential backoff, then
+  per-op **atomic** transactions (each op is its own transaction, so a
+  retry can never half-apply an op and re-insert its award row). One bad
+  row cannot discard its neighbours. A writer with no SQLite connection
+  drains and reports every op as a permanent failure rather than
+  accumulating unbounded work.
+- Full resets no longer clear dirty markers early. A `reset_pending`
+  watermark gates every cold reload until the reset op lands, so a reload
+  cannot resurrect pre-reset rows and win the FIFO race. With no database
+  configured, no markers are tracked at all (they would pin the cache).
+- `PointsService::shutdown` closes admission, joins the writer and never
+  claims durability it does not have. `AppCore::shutdown` bounds the join
+  in a 30 s timeout with an explicit error policy.
+- Diagnostics: queue depth, executing gauge, rejected/failed/applied counts,
+  both watermarks, and commit latency (mean/max). `system.health` reports
+  degraded when writes are rejected or permanently failed.
+
+Tests (new): saturated-writer rejection with a durable order check after
+recovery; full-reset reload gating; 100,000 ordered awards durable in
+order; concurrent awards durable and exact across 8 threads; watermark-gap
+assertions on a poisoned database. A test-only writer stall gate mirrors
+the Phase 1 ingress gate.
+
+Validation: `cargo fmt --all -- --check`, workspace Clippy with
+`-D warnings`, workspace tests (all pass; 307 core library tests), and
+`bun run check:web` all pass. No real-LIVE measurement was collected.
+
+Phase 2 commit: `pending` (this batch).
 
 ### Reviewable commit sequence
 
@@ -250,5 +301,6 @@ Phase 1 commit: `pending` (this batch).
 - `0653ffe`: owned bounded LIVE points execution and off-Tokio writer joining.
 - `9a656f0`: per-plugin reserve-before-publication and cancellation accounting.
 - `77b6967`: replay age and concurrent refresh regressions plus verification tracking.
-- The following measurement/documentation commit adds the sanitized benchmark record
-  and Python profiler changes; its hash is recorded in the PR and final report.
+- `da366ba`: sanitized benchmark record and Python profiler changes.
+- `ed3e042`: loss-aware graceful LIVE ingress shutdown (phase 1 of this refactor).
+- This batch: durable points FIFO ordering and SQLite correctness (phase 2).

@@ -536,9 +536,18 @@ impl AppCore {
         // writes must reach SQLite before the process exits.
         #[cfg(feature = "native-tiktok")]
         self.live_points_work.shutdown().await;
+        // Bounded: a wedged SQLite must not block process shutdown
+        // forever. The deadline is an explicit failure policy — the error
+        // below is the report that durable work may remain unresolved, and
+        // the writer thread is joined (or abandoned) with that on record.
         let points = Arc::clone(&self.points);
-        if let Err(error) = tokio::task::spawn_blocking(move || points.shutdown()).await {
-            tracing::error!(%error, "points writer shutdown failed");
+        let flush = tokio::task::spawn_blocking(move || points.shutdown());
+        match tokio::time::timeout(std::time::Duration::from_secs(30), flush).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!(%error, "points writer shutdown failed"),
+            Err(_) => tracing::error!(
+                "points writer failed to stop within 30s; durable points work may remain unresolved"
+            ),
         }
     }
 }
