@@ -180,6 +180,7 @@ mod tests {
                 user: user(),
                 gift_id: 1,
                 gift_name: "Rose".to_owned(),
+                gift_image_url: None,
                 diamond_count: 1,
                 repeat_count: 3,
                 combo_count: 3,

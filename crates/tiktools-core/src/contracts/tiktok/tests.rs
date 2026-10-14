@@ -21,6 +21,10 @@ fn probe_field(value_kind: FieldValueKind, cardinality: FieldCardinality) -> Fie
         kind: FieldKind::Varint,
         value_kind,
         cardinality,
+        is_map: false,
+        oneof_name: None,
+        oneof_index: None,
+        deprecated: false,
     }
 }
 
