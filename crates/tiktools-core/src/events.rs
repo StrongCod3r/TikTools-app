@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
 /// Domain event observed identically by every control client.
@@ -96,6 +97,8 @@ pub enum DomainEvent {
         total_points: f64,
         level: u32,
     },
+    #[serde(rename = "points.reset", rename_all = "camelCase")]
+    PointsReset { unique_id: Option<String> },
     #[serde(rename = "workflow.changed", rename_all = "camelCase")]
     WorkflowChanged {
         kind: String,
@@ -132,6 +135,7 @@ impl DomainEvent {
             Self::LiveReconnecting { .. } => "live.reconnecting",
             Self::LiveError { .. } => "live.error",
             Self::PointsChanged { .. } => "points.changed",
+            Self::PointsReset { .. } => "points.reset",
             Self::WorkflowChanged { .. } => "workflow.changed",
             Self::CreatorChanged { .. } => "creator.changed",
             Self::AnalyticsUpdated { .. } => "analytics.updated",
@@ -198,9 +202,17 @@ impl DomainEvent {
 }
 
 #[derive(Clone)]
+struct PublishedEvent {
+    event: Arc<DomainEvent>,
+    ui_sequence: Option<u64>,
+}
+
+#[derive(Clone)]
 pub struct EventBus {
-    reliable: broadcast::Sender<DomainEvent>,
-    lossy: broadcast::Sender<DomainEvent>,
+    reliable: broadcast::Sender<PublishedEvent>,
+    lossy: broadcast::Sender<PublishedEvent>,
+    ui_sequence: Arc<Mutex<u64>>,
+    history_subscribers: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl EventBus {
@@ -209,24 +221,69 @@ impl EventBus {
     pub fn new(capacity: usize) -> Self {
         let (reliable, _) = broadcast::channel(capacity);
         let (lossy, _) = broadcast::channel(capacity.saturating_mul(4).max(1));
-        Self { reliable, lossy }
+        Self {
+            reliable,
+            lossy,
+            ui_sequence: Arc::new(Mutex::new(0)),
+            history_subscribers: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
     }
 
     /// Publishes to the reliable or lossy lane by event class. Like
     /// `broadcast::send`, this never blocks and never fails for a slow
     /// subscriber: laggards skip on their own cursor only.
     pub fn publish_domain(&self, event: DomainEvent) {
-        if event.is_lossy() {
-            let _ = self.lossy.send(event);
+        if matches!(event, DomainEvent::LiveUiEvent { .. }) {
+            // Serialize sequence assignment with publication, so concurrent
+            // producers cannot reverse feed sequence order. No wire changes.
+            let mut sequence = self.ui_sequence.lock().unwrap_or_else(|e| e.into_inner());
+            *sequence += 1;
+            let _ = self.lossy.send(PublishedEvent {
+                event: Arc::new(event),
+                ui_sequence: Some(*sequence),
+            });
         } else {
-            let _ = self.reliable.send(event);
+            let lossy = event.is_lossy();
+            let published = PublishedEvent {
+                event: Arc::new(event),
+                ui_sequence: None,
+            };
+            let _ = if lossy {
+                self.lossy.send(published)
+            } else {
+                self.reliable.send(published)
+            };
         }
     }
 
     pub fn subscribe_domain(&self) -> DomainSubscription {
+        self.subscribe(true)
+    }
+
+    /// Completion/state projections do not request the compatibility full
+    /// automation history on every action. Default domain subscribers still
+    /// request the complete historical contract.
+    pub fn subscribe_projection(&self) -> DomainSubscription {
+        self.subscribe(false)
+    }
+
+    pub fn history_requested(&self) -> bool {
+        self.history_subscribers
+            .load(std::sync::atomic::Ordering::Acquire)
+            > 0
+    }
+
+    fn subscribe(&self, history: bool) -> DomainSubscription {
+        let sequence = self.ui_sequence.lock().unwrap_or_else(|e| e.into_inner());
+        if history {
+            self.history_subscribers
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        }
         DomainSubscription {
+            history_owner: history.then(|| self.history_subscribers.clone()),
             reliable: self.reliable.subscribe(),
             lossy: self.lossy.subscribe(),
+            last_ui_sequence: *sequence,
         }
     }
 }
@@ -269,16 +326,52 @@ pub enum DomainTryRecvError {
 /// always drained first, so a state transition never waits behind feed
 /// backlog.
 pub struct DomainSubscription {
-    reliable: broadcast::Receiver<DomainEvent>,
-    lossy: broadcast::Receiver<DomainEvent>,
+    reliable: broadcast::Receiver<PublishedEvent>,
+    lossy: broadcast::Receiver<PublishedEvent>,
+    last_ui_sequence: u64,
+    history_owner: Option<Arc<std::sync::atomic::AtomicUsize>>,
+}
+
+impl Drop for DomainSubscription {
+    fn drop(&mut self) {
+        if let Some(owner) = &self.history_owner {
+            owner.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        }
+    }
 }
 
 impl DomainSubscription {
+    pub fn ui_sequence(&self) -> u64 {
+        self.last_ui_sequence
+    }
+
+    /// Shared receive lets projections discard unused events without cloning
+    /// their entire payload (notably the 60-item automation history).
+    pub async fn recv_shared(&mut self) -> Result<Arc<DomainEvent>, DomainRecvError> {
+        let published = self.recv_published().await?;
+        if let Some(sequence) = published.ui_sequence {
+            self.last_ui_sequence = sequence;
+        }
+        Ok(published.event)
+    }
+
+    pub async fn recv(&mut self) -> Result<DomainEvent, DomainRecvError> {
+        self.recv_shared().await.map(|event| (*event).clone())
+    }
+
+    pub fn try_recv(&mut self) -> Result<DomainEvent, DomainTryRecvError> {
+        let published = self.try_recv_published()?;
+        if let Some(sequence) = published.ui_sequence {
+            self.last_ui_sequence = sequence;
+        }
+        Ok((*published.event).clone())
+    }
+
     /// Receives the next event, reliable lane first. A lagged lane
     /// reports once and then streams its retained backlog; the other
     /// lane is unaffected.
-    pub async fn recv(&mut self) -> Result<DomainEvent, DomainRecvError> {
-        match self.try_recv() {
+    async fn recv_published(&mut self) -> Result<PublishedEvent, DomainRecvError> {
+        match self.try_recv_published() {
             Err(DomainTryRecvError::Empty) => {}
             Ok(event) => return Ok(event),
             Err(DomainTryRecvError::ReliableLagged(skipped)) => {
@@ -335,7 +428,7 @@ impl DomainSubscription {
         }
     }
 
-    pub fn try_recv(&mut self) -> Result<DomainEvent, DomainTryRecvError> {
+    fn try_recv_published(&mut self) -> Result<PublishedEvent, DomainTryRecvError> {
         use broadcast::error::TryRecvError;
         match self.reliable.try_recv() {
             Err(TryRecvError::Empty) => {}
@@ -530,6 +623,11 @@ mod tests {
                 },
             ),
             (
+                DomainEvent::PointsReset { unique_id: None },
+                "points.reset",
+                |data| assert!(data["uniqueId"].is_null()),
+            ),
+            (
                 DomainEvent::PointsChanged {
                     unique_id: "viewer".to_owned(),
                     delta: 2.0,
@@ -577,7 +675,7 @@ mod tests {
         let cases = all_variant_cases();
         assert_eq!(
             cases.len(),
-            23,
+            24,
             "a DomainEvent variant is missing test coverage"
         );
         for (event, topic, check_data) in &cases {
@@ -609,5 +707,74 @@ mod tests {
             let serialized = serde_json::to_value(&event).expect("variant must serialize");
             assert_eq!(serialized.get("topic").and_then(Value::as_str), Some(topic));
         }
+    }
+}
+
+#[cfg(test)]
+mod shared_projection_tests {
+    use super::*;
+    #[tokio::test]
+    async fn shared_subscribers_see_the_same_payload_without_deep_cloning() {
+        let bus = EventBus::new(16);
+        let mut first = bus.subscribe_domain();
+        let mut second = bus.subscribe_domain();
+        bus.publish_domain(DomainEvent::AutomationRunsChanged {
+            runs: vec![serde_json::json!({"id": "large-run", "text": "x".repeat(10_000)})],
+        });
+        let left = first.recv_shared().await.unwrap();
+        let right = second.recv_shared().await.unwrap();
+        assert!(Arc::ptr_eq(&left, &right));
+        assert_eq!(left.to_envelope().unwrap(), right.to_envelope().unwrap());
+    }
+    #[tokio::test]
+    async fn feed_sequence_distinguishes_skipped_ui_events_from_normalized_duplicates() {
+        let bus = EventBus::new(1);
+        let mut subscriber = bus.subscribe_domain();
+        for i in 0..10 {
+            bus.publish_domain(DomainEvent::LiveEvent {
+                event_type: "chat".to_owned(),
+                event: serde_json::json!({"n": i}),
+            });
+            bus.publish_domain(DomainEvent::LiveUiEvent {
+                event: serde_json::json!({"n": i}),
+            });
+        }
+        assert!(matches!(
+            subscriber.recv_shared().await,
+            Err(DomainRecvError::LossyLagged(_))
+        ));
+        let mut last = 0;
+        let mut missing = 0;
+        for _ in 0..4 {
+            if matches!(
+                subscriber.recv_shared().await.unwrap().as_ref(),
+                DomainEvent::LiveUiEvent { .. }
+            ) {
+                let next = subscriber.ui_sequence();
+                missing += next - last - 1;
+                last = next;
+            }
+        }
+        assert_eq!(last, 10);
+        assert_eq!(missing, 8); // Eight actual UI messages, not 16 domain duplicates.
+    }
+}
+
+#[cfg(test)]
+mod history_interest_tests {
+    use super::*;
+    #[test]
+    fn compatibility_history_is_requested_only_for_the_lifetime_of_raw_subscribers() {
+        let bus = EventBus::new(16);
+        let projection = bus.subscribe_projection();
+        assert!(!bus.history_requested());
+        let raw = bus.subscribe_domain();
+        assert!(bus.history_requested());
+        let second = bus.clone().subscribe_domain();
+        drop(raw);
+        assert!(bus.history_requested());
+        drop(second);
+        assert!(!bus.history_requested());
+        drop(projection);
     }
 }

@@ -1,7 +1,10 @@
 mod domain_events;
 mod ipc;
 mod lifecycle;
+#[cfg(all(test, feature = "live-benchmark"))]
+mod live_benchmark;
 pub(crate) mod outbox;
+pub(crate) mod projection;
 #[cfg(test)]
 mod smoke;
 #[cfg(test)]
@@ -26,6 +29,8 @@ use wry::WebView;
 pub struct DesktopApp {
     window: Option<Window>,
     webview: Option<WebView>,
+    #[cfg(all(test, feature = "live-benchmark"))]
+    benchmark_context: Option<wry::WebContext>,
     core: Arc<AppCore>,
     router: Arc<IpcRouter>,
     control: Arc<ControlApi>,

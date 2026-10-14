@@ -68,6 +68,7 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     status.value = 'retrying';
   });
   subscribe<{ phase: string; message: string }>('live.error', (data) => {
+    revision += 1;
     status.value = 'error';
     error.value = data.message;
   });
@@ -186,7 +187,7 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
         status.value = 'disconnected';
       }
     } catch (failure) {
-      console.warn(`live status refresh failed: ${errorMessage(failure)}`);
+      if (requestRevision === revision && refresh === statusRefresh) console.warn(`live status refresh failed: ${errorMessage(failure)}`);
     }
   };
 

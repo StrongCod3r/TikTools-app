@@ -111,27 +111,26 @@ impl DesktopApp {
         // notifications so the frontend control client observes the same
         // bus as CLI/IPC streaming clients.
         {
-            let events = control.subscribe();
+            let events = core.events.subscribe_projection();
             let core = core.clone();
-            let proxy = proxy.clone();
-            let mailbox = Arc::clone(&domain_mailbox);
-            runtime.spawn(forward_domain_events(events, core, move |notification| {
-                let wake = mailbox
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .push_value(notification);
-                if wake
-                    && proxy
-                        .send_coalesced(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch))
-                        .is_err()
-                {
-                    mailbox.lock().unwrap_or_else(|e| e.into_inner()).shutdown();
-                }
-            }));
+            let emitter = emitter.clone();
+            let projection = emitter.projection.clone();
+            runtime.spawn(forward_domain_events(
+                events,
+                core,
+                projection,
+                move |notification, generation| {
+                    emitter.send_value_generation(notification, generation);
+                },
+            ));
         }
         Self {
             window: None,
             webview: None,
+            #[cfg(all(test, feature = "live-benchmark"))]
+            benchmark_context: std::env::var_os("TIKTOOLS_BENCH_CASE")
+                .and_then(|_| std::env::var_os("TIKTOOLS_HOME"))
+                .map(|home| wry::WebContext::new(Some(PathBuf::from(home).join("webview-data")))),
             core,
             router,
             control,
@@ -182,7 +181,15 @@ impl DesktopApp {
         let admission = self.emitter.ipc_slots.clone();
         let page_emitter = self.emitter.clone();
         let navigation_frontend = self.frontend.clone();
-        let mut builder = WebViewBuilder::new()
+        #[cfg(all(test, feature = "live-benchmark"))]
+        let base_builder = match self.benchmark_context.as_mut() {
+            // Isolate benchmark cookies/localStorage/cache from the user's app.
+            Some(context) => WebViewBuilder::new_with_web_context(context),
+            None => WebViewBuilder::new(),
+        };
+        #[cfg(not(all(test, feature = "live-benchmark")))]
+        let base_builder = WebViewBuilder::new();
+        let mut builder = base_builder
             .with_devtools(cfg!(debug_assertions) || cfg!(feature = "devtools"))
             .with_focused(false)
             .with_autoplay(true)
@@ -392,6 +399,13 @@ impl DesktopApp {
     fn open_devtools(&self) {}
 
     fn set_window_visible(&self, visible: bool) {
+        self.emitter.projection.set_host_visible(visible);
+        self.emitter.send_value_generation(
+            &serde_json::json!({"jsonrpc": "2.0", "method": "event", "params": {
+                "topic": "ui.host.visibility", "data": {"visible": visible},
+            }}),
+            self.emitter.generation.load(Ordering::Acquire),
+        );
         if let Some(webview) = self.webview.as_ref() {
             if let Err(error) = webview.set_visible(visible) {
                 tracing::debug!(%error, visible, "could not change WebView visibility");
@@ -443,12 +457,18 @@ impl DesktopApp {
         if generation == self.ui_generation {
             return;
         }
+        let replacing_page = self.ui_generation != 0;
         self.ui_generation = generation;
         self.page_ready = false;
         self.pending_batch = None;
         self.emitter.clear_batch();
         if !self.pending_host_messages.is_empty() {
-            self.core.record_event_gap();
+            // Initial bootstrap snapshots precede the first page's full
+            // authoritative fetch; only replacing an existing page creates
+            // a discontinuity for a client that was already consuming.
+            if replacing_page {
+                self.core.record_event_gap();
+            }
             self.pending_host_messages.clear_for_reload();
         }
     }
@@ -621,6 +641,22 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                             && batch.sequence == self.emitter.batch_sequence.load(Ordering::Acquire)
                     })
                 {
+                    if let Some(batch) = self.pending_batch.as_ref() {
+                        let latency = Instant::now()
+                            .saturating_duration_since(
+                                batch.deadline - std::time::Duration::from_secs(5),
+                            )
+                            .as_micros() as u64;
+                        self.emitter
+                            .ack_latency_us
+                            .store(latency, Ordering::Relaxed);
+                        self.emitter
+                            .ack_latency_max_us
+                            .fetch_max(latency, Ordering::Relaxed);
+                        self.emitter
+                            .ack_latency_total_us
+                            .fetch_add(latency, Ordering::Relaxed);
+                    }
                     self.pending_batch = None;
                     self.emitter.clear_batch();
                     self.emitter
@@ -628,6 +664,8 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                         .fetch_add(1, Ordering::Relaxed);
                 }
             }
+            #[cfg(all(test, feature = "live-benchmark"))]
+            DesktopEvent::Command(DesktopCommand::BenchmarkSample { .. }) => {}
             DesktopEvent::Command(DesktopCommand::IpcFailed(message)) => {
                 // A second owner at startup means a stale host is still
                 // running: fail fast instead of mixing runtimes. After

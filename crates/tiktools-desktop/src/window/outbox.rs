@@ -120,9 +120,12 @@ fn classify_value(value: &serde_json::Value) -> WebviewMessageClass {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         return match topic {
-            "room.stats" | "analytics.updated" | "gifts.catalog" => {
-                WebviewMessageClass::Coalescable
-            }
+            "room.stats"
+            | "analytics.updated"
+            | "gifts.catalog"
+            | "ui.points.snapshot"
+            | "ui.automation.runs"
+            | "ui.projection.stats" => WebviewMessageClass::Coalescable,
             "live.event" | "live.ui-event" => WebviewMessageClass::Droppable,
             // Connection/lifecycle/state transitions, errors, shutdown,
             // and unknown topics: never evicted.

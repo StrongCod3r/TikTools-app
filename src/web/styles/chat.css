@@ -120,7 +120,9 @@
   margin-right: 5px;
   vertical-align: middle;
   line-height: 1;
-  backdrop-filter: blur(4px);
+  /* Per-row backdrop blur caused large native WebKit renderer growth in
+     the LIVE A/B. The existing background/border provide badge contrast
+     without a compositor filter for every card. */
 }
 :root[data-theme="light"] .tt-badge-level {
   background: #fef3c7;

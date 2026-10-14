@@ -4,8 +4,9 @@ declare global {
   interface Window {
     ipc?: { postMessage: (message: string) => void };
     __webview_on_message__?: (message: string) => void;
-    __tiktools_receive_batch__?: (messages: string[]) => void;
+    __tiktools_receive_batch__?: (messages: string[], generation?: number) => void;
     __tiktools_host_message_queue__?: string[];
+    __tiktools_presentation_revision__?: number;
   }
 }
 
@@ -66,7 +67,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+export interface PresentationView {
+  feed: boolean;
+  behavior: boolean;
+  points: boolean;
+  visible: boolean;
+}
+
 export interface ControlClient {
+  setPresentation?(view: PresentationView): Promise<void>;
   diagnostics?(): { pending: number; capacity: number; overloaded: number; topicCount?: number; topicSubscriptions?: number; pushSubscriptions?: number };
   attach(): void;
   detach(): void;
@@ -92,6 +101,20 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
   // unique IDs jointly prevent a queued old-page reply resolving a new call.
   const requestPrefix = globalThis.crypto?.randomUUID?.() ??
     `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  let presentationRevision = 0;
+  let presentationGeneration: number | null = null;
+  let projectionBaselineSet = false;
+  let parsedMessages = 0;
+  let parsedBytes = 0;
+  let handledMessages = 0;
+  let ignoredMessages = 0;
+  let batches = 0;
+  let parseMs = 0;
+  let maxBatchMs = 0;
+  const longTasksSupported = typeof PerformanceObserver !== 'undefined' && (PerformanceObserver.supportedEntryTypes?.includes('longtask') ?? false);
+  let longTasks = 0;
+  let longTaskMs = 0;
+  let longTaskObserver: PerformanceObserver | null = null;
   let overloaded = 0;
   let detached = false;
   const pending = new Map<number | string, PendingCall>();
@@ -113,11 +136,15 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
 
   const receive = (raw: string): void => {
     let value: unknown;
+    const parseStarted = performance.now();
+    parsedMessages += 1;
+    parsedBytes += raw.length; // UTF-16 string units; native diagnostics report encoded bytes.
     try {
       value = JSON.parse(raw) as unknown;
     } catch {
       return;
     }
+    parseMs += performance.now() - parseStarted;
     if (!isRecord(value)) return;
     // JSON-RPC response to call(): { type: 'rpc-response', response: {...} }.
     if (value['type'] === 'rpc-response' && isRecord(value['response'])) {
@@ -125,6 +152,7 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
       if (response.id === undefined || response.id === null) return;
       const call = pending.get(response.id);
       if (!call) return;
+      handledMessages += 1;
       pending.delete(response.id);
       clearTimeout(call.timer);
       call.cleanupAbort();
@@ -155,10 +183,13 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
     }
     // Domain event notification: { method: 'event', params: { topic, data } }.
     if (value['method'] === 'event' && isRecord(value['params'])) {
-      const params = value['params'] as { topic?: unknown; data?: unknown };
+      const params = value['params'] as { topic?: unknown; data?: unknown; revision?: unknown; generation?: unknown };
+      if (typeof params.generation === 'number' && params.generation !== presentationGeneration) { ignoredMessages += 1; return; }
+      if (typeof params.revision === 'number' && params.revision !== presentationRevision) { ignoredMessages += 1; return; }
       if (typeof params.topic !== 'string') return;
       const handlers = topics.get(params.topic);
-      if (!handlers) return;
+      if (!handlers) { ignoredMessages += 1; return; }
+      handledMessages += 1;
       for (const handler of handlers) {
         try {
           handler(params.data);
@@ -171,7 +202,8 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
     // Legacy host push, routed by message.type.
     if (typeof value['type'] === 'string') {
       const handlers = pushes.get(value['type']);
-      if (!handlers) return;
+      if (!handlers) { ignoredMessages += 1; return; }
+      handledMessages += 1;
       const message = value as unknown as HostMessage;
       for (const handler of handlers) {
         try {
@@ -183,18 +215,64 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
     }
   };
 
-  const receiveBatch = (messages: string[]): void => {
+  const receiveBatch = (messages: string[], generation?: number): void => {
+    // A queued evaluate_script from a retired document may execute after
+    // navigation. Fence the whole batch once this page's handshake confirms
+    // its generation; RPC request namespaces protect bootstrap replies.
+    if (generation !== undefined && presentationGeneration !== null && generation !== presentationGeneration) {
+      ignoredMessages += messages.length;
+      return;
+    }
+    batches += 1;
+    const started = performance.now();
     for (const item of messages) receive(item);
+    maxBatchMs = Math.max(maxBatchMs, performance.now() - started);
   };
 
-  return {
-    diagnostics: () => ({ pending: pending.size, capacity: MAX_PENDING_CALLS, overloaded,
+  const client: ControlClient = {
+    async setPresentation(view): Promise<void> {
+      const nextRevision = (): number => {
+        const next = Math.max(presentationRevision, window.__tiktools_presentation_revision__ ?? 0) + 1;
+        presentationRevision = next;
+        window.__tiktools_presentation_revision__ = next;
+        return next;
+      };
+      let revision = nextRevision();
+      const configure = (revision: number) => client.call<{ stats?: unknown; generation?: number }>('ui.projection', { version: 1, revision, ...view });
+      let response;
+      try { response = await configure(revision); }
+      catch (failure) {
+        // A queued bootstrap handshake from the previous document can race
+        // the first new-page handshake. Retry that read/presentation-only
+        // negotiation once above the host revision, never retry mutations.
+        const hostRevision = failure instanceof ControlCallError && isRecord(failure.data) ? failure.data['revision'] : undefined;
+        if (!(failure instanceof ControlCallError) || failure.code !== 'stale' ||
+            presentationGeneration !== null || revision !== presentationRevision ||
+            typeof hostRevision !== 'number' || !Number.isSafeInteger(hostRevision) || hostRevision < 0) throw failure;
+        window.__tiktools_presentation_revision__ = Math.max(window.__tiktools_presentation_revision__ ?? 0, hostRevision);
+        revision = nextRevision();
+        response = await configure(revision);
+      }
+      if (revision === presentationRevision && typeof response.generation === 'number') presentationGeneration = response.generation;
+      if (!projectionBaselineSet && response.stats && revision === presentationRevision) {
+        projectionBaselineSet = true;
+        for (const handler of topics.get('ui.projection.stats') ?? []) handler(response.stats);
+      }
+    },
+    diagnostics: () => ({ parsedMessages, parsedStringUnits: parsedBytes, handledMessages, ignoredMessages, batches, parseMs, maxBatchMs, longTasksSupported, longTasks, longTaskMs, pending: pending.size, capacity: MAX_PENDING_CALLS, overloaded,
       topicCount: topics.size, topicSubscriptions: [...topics.values()].reduce((total, handlers) => total + handlers.size, 0),
       pushSubscriptions: [...pushes.values()].reduce((total, handlers) => total + handlers.size, 0),
     }),
     attach(): void {
       detached = false;
       attachedReceive = receive;
+      if (longTasksSupported) {
+        longTaskObserver?.disconnect();
+        longTaskObserver = new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) { longTasks += 1; longTaskMs += entry.duration; }
+        });
+        longTaskObserver.observe({ entryTypes: ['longtask'] });
+      }
       window.__webview_on_message__ = receive;
       window.__tiktools_receive_batch__ = receiveBatch;
       const queued = window.__tiktools_host_message_queue__ ?? [];
@@ -204,6 +282,8 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
 
     detach(): void {
       detached = true;
+      longTaskObserver?.disconnect();
+      longTaskObserver = null;
       if (window.__webview_on_message__ === attachedReceive) {
         window.__webview_on_message__ = undefined;
       }
@@ -245,7 +325,9 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
         const id = `rpc-${requestPrefix}-${++nextId}`;
         let payload: string;
         try {
-          payload = JSON.stringify({ jsonrpc: '2.0', id, method, params: params ?? {} });
+          payload = JSON.stringify({ jsonrpc: '2.0', id, method, params: params ?? {},
+            ...(presentationGeneration === null ? {} : { pageGeneration: presentationGeneration }),
+          });
         } catch (error) {
           reject(
             new ControlCallError('transport', `could not serialize ${method}: ${String(error)}`),
@@ -337,6 +419,7 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
       };
     },
   };
+  return client;
 }
 
 /**

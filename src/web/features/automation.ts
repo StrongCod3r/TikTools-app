@@ -1,5 +1,5 @@
 import { ownControlSubscriptions } from './control-owner.ts';
-import { computed, ref, type ComputedRef } from 'vue';
+import { computed, ref, shallowRef, type ComputedRef } from 'vue';
 
 import type { AutomationEventType, AutomationScriptAnalysis } from '../../automation/types.ts';
 import type {
@@ -62,7 +62,43 @@ export function useAutomation(control: ControlClient) {
     actionTypes: [],
     translations: {},
   });
-  const behaviorRuns = ref<BehaviorRun[]>([]);
+  const behaviorRuns = shallowRef<BehaviorRun[]>([]);
+  let runsRevision = 0;
+  let presentationActive = true;
+  const pendingRuns = new Map<string, BehaviorRun>();
+  let runsTimer: ReturnType<typeof setTimeout> | null = null;
+  const applyRuns = (runs: BehaviorRun[]): void => {
+    if (!presentationActive) return;
+    ++runsRevision;
+    pendingRuns.clear();
+    behaviorRuns.value = runs.slice(0, 60);
+  };
+  const commitRuns = (): void => {
+    runsTimer = null;
+    if (disposed || !presentationActive || pendingRuns.size === 0) return;
+    const incoming = [...pendingRuns.values()].reverse();
+    const ids = new Set(pendingRuns.keys());
+    applyRuns([...incoming, ...behaviorRuns.value.filter((run) => !ids.has(run.id))]);
+  };
+  control.onTopic<{ run: BehaviorRun }>('automation.run.completed', (data) => {
+    if (!presentationActive || !data?.run?.id) return;
+    ++runsRevision;
+    pendingRuns.delete(data.run.id);
+    pendingRuns.set(data.run.id, data.run);
+    if (pendingRuns.size > 60) {
+      const oldest = pendingRuns.keys().next().value;
+      if (oldest !== undefined) pendingRuns.delete(oldest);
+    }
+    if (runsTimer === null) runsTimer = setTimeout(commitRuns, 100);
+  });
+  const setPresentationActive = (active: boolean): void => {
+    presentationActive = active;
+    if (!active) {
+      if (runsTimer !== null) clearTimeout(runsTimer);
+      runsTimer = null;
+      pendingRuns.clear();
+    }
+  };
   const behaviorTestRuns = ref<BehaviorRun[]>([]);
   const behaviorError = ref('');
   const hotkeyStatus = ref<HotkeyStatusData | null>(null);
@@ -119,11 +155,15 @@ export function useAutomation(control: ControlClient) {
   // Both write the same ref, so no manual refresh is ever required.
   control.onPush('behavior-runs', (message) => {
     if (message.type !== 'behavior-runs') return;
-    behaviorRuns.value = message.runs;
+    applyRuns(message.runs);
   });
   control.onTopic<{ runs: BehaviorRun[] }>('automation.runs.changed', (data) => {
     if (!data || !Array.isArray(data.runs)) return;
-    behaviorRuns.value = data.runs;
+    applyRuns(data.runs);
+  });
+  control.onTopic<AutomationRunsResult>('ui.automation.runs', (data) => {
+    if (!data || !Array.isArray(data.runs)) return;
+    applyRuns(data.runs);
   });
   control.onTopic<{ pluginId?: unknown; eventType?: unknown; event?: unknown }>(
     'plugin.event',
@@ -178,6 +218,7 @@ export function useAutomation(control: ControlClient) {
   const refresh = async (): Promise<void> => {
     if (disposed) return;
     const revision = ++refreshRevision;
+    const runsAtStart = runsRevision;
     try {
       const [snapshot, runs] = await Promise.all([
         control.call<BehaviorSnapshot>('automation.snapshot', {}),
@@ -185,7 +226,7 @@ export function useAutomation(control: ControlClient) {
       ]);
       if (disposed || revision !== refreshRevision) return;
       applySnapshot(snapshot);
-      behaviorRuns.value = runs.runs;
+      if (runsAtStart === runsRevision) applyRuns(runs.runs);
     } catch (failure) {
       if (disposed || revision !== refreshRevision) return;
       behaviorError.value = errorMessage(failure);
@@ -399,11 +440,15 @@ export function useAutomation(control: ControlClient) {
     ++refreshRevision;
     if (refreshTimer !== null) clearTimeout(refreshTimer);
     refreshTimer = null;
+    if (runsTimer !== null) clearTimeout(runsTimer);
+    runsTimer = null;
+    pendingRuns.clear();
   };
 
   return {
-    diagnostics: () => ({ timers: Number(refreshTimer !== null), disposed }),
+    diagnostics: () => ({ timers: Number(refreshTimer !== null) + Number(runsTimer !== null), disposed }),
     dispose,
+    setPresentationActive,
     behavior,
     behaviorRuns,
     behaviorTestRuns,

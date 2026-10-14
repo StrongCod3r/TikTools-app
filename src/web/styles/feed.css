@@ -104,7 +104,9 @@
   display: flex;
   flex-direction: column;
   gap: 7px;
-  scroll-behavior: smooth;
+  /* Live updates pin the viewport directly; smooth scroll keeps chasing
+     an advancing bottom and can continue after presentation is paused. */
+  scroll-behavior: auto;
 }
 
 .feed-stream::-webkit-scrollbar {

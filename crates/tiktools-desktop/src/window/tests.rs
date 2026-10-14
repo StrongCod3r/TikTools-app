@@ -325,12 +325,17 @@ async fn lagged_burst_emits_gap_and_forwarder_survives() {
     let task = {
         let forwarded = std::sync::Arc::clone(&forwarded);
         let core = Arc::clone(&core);
-        tokio::spawn(forward_domain_events(receiver, core, move |notification| {
-            forwarded
-                .lock()
-                .expect("forwarded lock poisoned")
-                .push(notification.to_string());
-        }))
+        tokio::spawn(forward_domain_events(
+            receiver,
+            core,
+            test_projection(),
+            move |notification, _generation| {
+                forwarded
+                    .lock()
+                    .expect("forwarded lock poisoned")
+                    .push(notification.to_string());
+            },
+        ))
     };
     // Only terminate once the post-burst message is through, so the
     // Shutdown cannot collapse into the lagged burst itself.
@@ -386,12 +391,17 @@ async fn lossy_burst_forwards_without_gap_signal() {
     let task = {
         let forwarded = std::sync::Arc::clone(&forwarded);
         let core = Arc::clone(&core);
-        tokio::spawn(forward_domain_events(receiver, core, move |notification| {
-            forwarded
-                .lock()
-                .expect("forwarded lock poisoned")
-                .push(notification.to_string());
-        }))
+        tokio::spawn(forward_domain_events(
+            receiver,
+            core,
+            test_projection(),
+            move |notification, _generation| {
+                forwarded
+                    .lock()
+                    .expect("forwarded lock poisoned")
+                    .push(notification.to_string());
+            },
+        ))
     };
     // Wait for the retained lossy backlog, then terminate cleanly.
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -576,4 +586,217 @@ fn batch_acknowledgments_are_small_and_strictly_correlated() {
         parse_batch_ack(&format!("tiktools-batch-ack:1:{}", "9".repeat(128))),
         None
     );
+}
+
+#[tokio::test]
+async fn main_page_filters_normalized_live_events_without_changing_bus() {
+    let (core, home) = forwarder_test_core("projection");
+    let bus = tiktools_core::events::EventBus::new(16);
+    let receiver = bus.subscribe_domain();
+    let mut independent = bus.subscribe_domain();
+    bus.publish_domain(tiktools_core::events::DomainEvent::LiveEvent {
+        event_type: "chat".to_owned(),
+        event: serde_json::json!({"text": "hello"}),
+    });
+    bus.publish_domain(tiktools_core::events::DomainEvent::LiveUiEvent {
+        event: serde_json::json!({"kind": "chat"}),
+    });
+    let forwarded = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&forwarded);
+    let task = tokio::spawn(forward_domain_events(
+        receiver,
+        core,
+        test_projection(),
+        move |notification, _generation| {
+            captured.lock().unwrap().push(notification.clone());
+        },
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while forwarded.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    // The independent subscriber still observes both source contracts.
+    let first = independent.recv().await.unwrap();
+    assert!(matches!(
+        first,
+        tiktools_core::events::DomainEvent::LiveEvent { .. }
+    ));
+    bus.publish_domain(tiktools_core::events::DomainEvent::Shutdown);
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let messages = forwarded.lock().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["params"]["topic"], "live.ui-event");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+fn test_projection() -> Arc<super::projection::MainPageProjection> {
+    let projection = Arc::new(super::projection::MainPageProjection::default());
+    projection.update(0, 1, true, false, false, true);
+    projection
+}
+
+#[tokio::test]
+async fn points_burst_projects_exact_top_k_and_preserves_individual_domain_updates() {
+    let (core, home) = forwarder_test_core("points-projection");
+    let projection = Arc::new(super::projection::MainPageProjection::default());
+    projection.update(0, 1, true, false, true, true);
+    let receiver = core.events.subscribe_domain();
+    let mut independent = core.events.subscribe_domain();
+    let raw = tokio::spawn(async move {
+        let mut awards = 0;
+        loop {
+            match independent.recv().await {
+                Ok(tiktools_core::events::DomainEvent::PointsChanged { .. }) => awards += 1,
+                Ok(tiktools_core::events::DomainEvent::Shutdown) => return awards,
+                Ok(_) | Err(tiktools_core::events::DomainRecvError::LossyLagged(_)) => {}
+                Err(error) => panic!("individual subscriber gap: {error:?}"),
+            }
+        }
+    });
+    let forwarded = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let task = {
+        let forwarded = forwarded.clone();
+        tokio::spawn(forward_domain_events(
+            receiver,
+            core.clone(),
+            projection.clone(),
+            move |notification, _| {
+                forwarded.lock().unwrap().push(notification.clone());
+            },
+        ))
+    };
+    for index in 0..10_000 {
+        core.points_adjust("alice", 1.0).unwrap();
+        if index % 32 == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    core.events
+        .publish_domain(tiktools_core::events::DomainEvent::Shutdown);
+    task.await.unwrap();
+    assert_eq!(raw.await.unwrap(), 10_000);
+    {
+        let messages = forwarded.lock().unwrap();
+        assert!(!messages
+            .iter()
+            .any(|m| m["params"]["topic"] == "points.changed"));
+        let snapshots: Vec<_> = messages
+            .iter()
+            .filter(|m| m["params"]["topic"] == "ui.points.snapshot")
+            .collect();
+        assert!(!snapshots.is_empty());
+        assert!(
+            snapshots.len() < 100,
+            "one snapshot per timer, not per award"
+        );
+        assert_eq!(
+            snapshots.last().unwrap()["params"]["data"]["viewers"][0]["points"],
+            10_000.0
+        );
+        assert_eq!(
+            projection
+                .points_coalesced
+                .load(std::sync::atomic::Ordering::Relaxed),
+            10_000
+        );
+    }
+    core.shutdown().await;
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[tokio::test]
+async fn ten_thousand_actions_keep_exact_history_without_per_action_ui_lists() {
+    let (core, home) = forwarder_test_core("runs-projection");
+    let projection = Arc::new(super::projection::MainPageProjection::default());
+    projection.update(0, 1, false, true, false, true);
+    let receiver = core.events.subscribe_domain();
+    let mut independent = core.events.subscribe_domain();
+    let raw = tokio::spawn(async move {
+        let mut completions = 0;
+        loop {
+            match independent.recv_shared().await {
+                Ok(event) => match event.as_ref() {
+                    tiktools_core::events::DomainEvent::AutomationRunCompleted { .. } => {
+                        completions += 1
+                    }
+                    tiktools_core::events::DomainEvent::Shutdown => return completions,
+                    _ => {}
+                },
+                Err(tiktools_core::events::DomainRecvError::LossyLagged(_)) => {}
+                Err(error) => panic!("requested action stream gap: {error:?}"),
+            }
+        }
+    });
+    let forwarded = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let task = {
+        let captured = forwarded.clone();
+        tokio::spawn(forward_domain_events(
+            receiver,
+            core.clone(),
+            projection.clone(),
+            move |message, _| {
+                captured.lock().unwrap().push(message.clone());
+            },
+        ))
+    };
+    let action = serde_json::json!({"id": "bench", "name": "Benchmark", "typeId": "core.log", "config": {"message": "complete"}});
+    let mut last = serde_json::Value::Null;
+    for index in 0..10_000 {
+        last = core.test_automation_action(&action, None).await;
+        assert_eq!(last["status"], "ok");
+        if index % 16 == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    core.events
+        .publish_domain(tiktools_core::events::DomainEvent::Shutdown);
+    task.await.unwrap();
+    assert_eq!(raw.await.unwrap(), 10_000);
+    {
+        let messages = forwarded.lock().unwrap();
+        assert!(!messages
+            .iter()
+            .any(|m| m["params"]["topic"] == "automation.runs.changed"));
+        let snapshots: Vec<_> = messages
+            .iter()
+            .filter(|m| m["params"]["topic"] == "ui.automation.runs")
+            .collect();
+        assert!(!snapshots.is_empty());
+        assert!(snapshots.len() < 1000);
+        let runs = &snapshots.last().unwrap()["params"]["data"]["runs"];
+        assert_eq!(runs.as_array().unwrap().len(), 60);
+        assert_eq!(runs[0]["id"], last["id"]);
+        assert_eq!(runs, &serde_json::json!(core.automation_runs()));
+    }
+    core.shutdown().await;
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[test]
+fn delayed_page_requests_cannot_execute_in_a_new_generation() {
+    use super::ipc::page_generation_matches;
+    assert!(page_generation_matches(
+        &serde_json::json!({"method":"points.adjust"}),
+        2
+    ));
+    assert!(page_generation_matches(
+        &serde_json::json!({"pageGeneration":2}),
+        2
+    ));
+    assert!(!page_generation_matches(
+        &serde_json::json!({"pageGeneration":1}),
+        2
+    ));
+    assert!(!page_generation_matches(
+        &serde_json::json!({"pageGeneration":"2"}),
+        2
+    ));
 }

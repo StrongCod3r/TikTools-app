@@ -115,6 +115,7 @@ export function useAppController() {
   // events and speaks them. The main frontend renders chat only.
   const live = useLive(control, {
     systemAuthor: () => translate('system'),
+    discontinuityText: () => translate('feedResumed'),
   });
 
   // Reliable-gap resync: the host skipped authoritative events this client
@@ -174,13 +175,48 @@ export function useAppController() {
     if (!exists) activeTab.value = 'plugins';
   });
 
+  const pageVisible = ref(document.visibilityState !== 'hidden');
+  const hostVisible = ref(true);
+  const offHostVisibility = control.onTopic<{ visible: boolean }>('ui.host.visibility', (data) => {
+    if (typeof data.visible === 'boolean') hostVisible.value = data.visible;
+  });
+  let presentationMounted = false;
+  const updatePresentation = (): void => {
+    const visible = pageVisible.value && hostVisible.value;
+    const feed = activeTab.value === 'feed';
+    live.setPresentationActive(visible && feed);
+    points.setPresentationActive(visible && (feed || activeTab.value === 'points'));
+    automation.setPresentationActive(visible && activeTab.value === 'behavior');
+    if (!presentationMounted || disposed) return;
+    void control.setPresentation?.({ visible, feed,
+      points: feed || activeTab.value === 'points', behavior: activeTab.value === 'behavior',
+    }).catch((failure: unknown) => {
+      if (!disposed && !(failure instanceof Error && 'code' in failure && failure.code === 'stale')) {
+        console.warn(`presentation handshake failed: ${errorMessage(failure)}`);
+      }
+    });
+    // Snapshots on return cover inactive presentation without retaining a
+    // replay backlog. Native trailing snapshots subsequently converge.
+    if (visible && (feed || activeTab.value === 'points')) void points.refresh();
+    if (visible && activeTab.value === 'behavior') void automation.refresh();
+  };
+  const onVisibilityChange = (): void => { pageVisible.value = document.visibilityState !== 'hidden'; };
+  watch([activeTab, pageVisible, hostVisible], updatePresentation, { flush: 'sync' });
+  live.setPresentationActive(pageVisible.value && activeTab.value === 'feed');
+  points.setPresentationActive(pageVisible.value && (activeTab.value === 'feed' || activeTab.value === 'points'));
+  automation.setPresentationActive(pageVisible.value && activeTab.value === 'behavior');
+
   onMounted(() => {
     control.attach();
+    presentationMounted = true;
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    updatePresentation();
     // Same initial state the legacy mount sequence fetched, now as
     // JSON-RPC reads. Each refresh reports its own failures.
-    void points.refresh();
+    void connection.refreshStatus();
+    if (activeTab.value !== 'feed' && activeTab.value !== 'points') void points.refresh();
     void creators.refresh();
-    void automation.refresh();
+    if (activeTab.value !== 'behavior') void automation.refresh();
     void live.refresh();
     void processors.refresh();
     void globals.loadGlobals();
@@ -190,23 +226,71 @@ export function useAppController() {
     // user action before starting network work on a cold launch.
   });
 
+  const diagnosticsEnabled = import.meta.env?.DEV || import.meta.env?.VITE_TIKTOOLS_DIAGNOSTICS === '1';
+  let diagnosticFrame = 0;
+  let lastDiagnosticFrame: number | null = null;
+  let measuredFrames = 0;
+  const frameIntervals: number[] = [];
+  const measureFrame = (at: number): void => {
+    if (disposed) return;
+    if (lastDiagnosticFrame !== null) {
+      frameIntervals.push(at - lastDiagnosticFrame);
+      if (frameIntervals.length > 240) frameIntervals.shift();
+    }
+    lastDiagnosticFrame = at;
+    measuredFrames += 1;
+    diagnosticFrame = requestAnimationFrame(measureFrame);
+  };
+  watch([pageVisible, hostVisible], () => {
+    if (!diagnosticsEnabled || typeof requestAnimationFrame !== 'function') return;
+    cancelAnimationFrame(diagnosticFrame);
+    diagnosticFrame = 0;
+    lastDiagnosticFrame = null;
+    if (pageVisible.value && hostVisible.value) diagnosticFrame = requestAnimationFrame(measureFrame);
+  }, { immediate: true });
+
   const developmentDiagnostics = (): Record<string, unknown> => {
     const memory = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory;
-    return { control: control.diagnostics?.(), live: live.diagnostics(),
-      ownedTimers: plugins.diagnostics().timers + automation.diagnostics().timers,
+    const images = Array.from(document.images);
+    const intervals = [...frameIntervals].sort((a, b) => a - b);
+    const percentile = (q: number): number | null => intervals.length > 0 ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * q))] ?? null : null;
+    return { renderedFeedRows: document.querySelectorAll('.tiktok-chat-row').length, frameCallbacks: measuredFrames, frameIntervalSamples: intervals.length,
+      frameIntervalP95Ms: percentile(.95), frameIntervalP99Ms: percentile(.99),
+      pageVisibility: document.visibilityState, domNodes: document.querySelectorAll('*').length,
+      imageCount: images.length, loadedImages: images.filter((image) => image.complete && image.naturalWidth > 0).length,
+      imagePixelBytesEstimate: images.reduce((sum, image) => sum + image.naturalWidth * image.naturalHeight * 4, 0),
+      control: control.diagnostics?.(), live: live.diagnostics(),
+      ownedTimers: plugins.diagnostics().timers + automation.diagnostics().timers + live.diagnostics().timers,
       pluginHosts: pluginHostDiagnostics(), iframeCount: document.querySelectorAll('iframe').length,
       jsHeapBytes: memory?.usedJSHeapSize ?? null,
     };
   };
-  if (import.meta.env?.DEV) (window as unknown as Record<string, unknown>)['__tiktools_frontend_diagnostics__'] = developmentDiagnostics;
+  const benchmarkControls = {
+    setTab: (tab: AppTab) => { activeTab.value = tab; },
+    setImagesEnabled: (enabled: boolean) => { live.imagesEnabled.value = enabled; },
+    setRenderLimit: (limit: number) => { live.renderLimit.value = Math.max(50, Math.min(300, Math.floor(limit))); },
+  };
+  if (diagnosticsEnabled) {
+    const scope = window as unknown as Record<string, unknown>;
+    scope['__tiktools_frontend_diagnostics__'] = developmentDiagnostics;
+    scope['__tiktools_benchmark_controls__'] = benchmarkControls;
+  }
 
   onUnmounted(() => {
     // Release frame callbacks, scroll listeners, and topic subscriptions
     // so repeated mount/unmount cycles (rapid tab navigation, HMR) cannot
     // accumulate pending frames or duplicated listeners.
+    presentationMounted = false;
+    offHostVisibility();
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    void control.setPresentation?.({ visible: false, feed: false, points: false, behavior: false }).catch(() => {});
     disposed = true;
+    if (diagnosticFrame !== 0) cancelAnimationFrame(diagnosticFrame);
+    diagnosticFrame = 0;
+    frameIntervals.length = 0;
     const scope = window as unknown as Record<string, unknown>;
     if (scope['__tiktools_frontend_diagnostics__'] === developmentDiagnostics) delete scope['__tiktools_frontend_diagnostics__'];
+    if (scope['__tiktools_benchmark_controls__'] === benchmarkControls) delete scope['__tiktools_benchmark_controls__'];
     plugins.dispose();
     automation.dispose();
     connection.dispose();
@@ -415,6 +499,8 @@ export function useAppController() {
     status: connection.status,
     error: connection.error,
     events: live.events,
+    imagesEnabled: live.imagesEnabled,
+    renderLimit: live.renderLimit,
     filter: live.filter,
     searchQuery: live.searchQuery,
     pointsConfig: points.pointsConfig,

@@ -96,6 +96,8 @@ const activePluginBackend = computed(() => {
         v-if="app.activeTab === 'feed'"
         :locale="app.locale"
         :events="app.events"
+        :images-enabled="app.imagesEnabled"
+        :render-limit="app.renderLimit"
         :leaderboard="app.leaderboard"
         :top-viewers="app.topViewers"
         :live-viewers="app.liveViewers"

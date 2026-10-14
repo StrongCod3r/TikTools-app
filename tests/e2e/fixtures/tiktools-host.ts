@@ -129,6 +129,7 @@ const INIT_SCRIPT = `
   const handlers = {
     'automation.snapshot': () => state.automationSnapshot,
     'automation.runs': () => ({ runs: state.automationRuns }),
+    'ui.projection': (params) => ({ version: 1, generation: 0, revision: params.revision }),
     'points.config.get': () => state.pointsConfig,
     'points.config.set': (params) => {
       state.pointsConfig = { ...state.pointsConfig, ...(params || {}) };

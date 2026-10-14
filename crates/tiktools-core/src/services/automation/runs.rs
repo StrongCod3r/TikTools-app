@@ -19,6 +19,12 @@ impl AutomationService {
         runs.clone()
     }
 
+    pub fn record_run_only(&self, run: Value) {
+        let mut runs = recover_mutex(&self.runs, "automation runs");
+        runs.insert(0, run);
+        runs.truncate(60);
+    }
+
     pub fn recent_runs(&self) -> Vec<Value> {
         recover_mutex(&self.runs, "automation runs").clone()
     }

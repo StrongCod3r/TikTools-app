@@ -43,8 +43,8 @@ pub(crate) async fn run_observer(
                 reconcile_workers(&core, &core.plugins.list(), &mut workers);
                 workers.retain(|_, handle| !handle.sender.is_closed());
             },
-            received = subscription.recv() => match received {
-                Ok(event) => dispatch_event(&core, event, &mut workers, &mut tasks, &shutdown),
+            received = subscription.recv_shared() => match received {
+                Ok(event) => dispatch_event(&core, event.as_ref(), &mut workers, &mut tasks, &shutdown),
                 Err(DomainRecvError::ReliableLagged(lost)) => {
                     // The observer itself missed authoritative events. Keep
                     // the host health signal consistent with IPC/WebView and
@@ -91,11 +91,20 @@ pub(crate) async fn run_observer(
 
 fn dispatch_event(
     core: &Arc<AppCore>,
-    event: DomainEvent,
+    event: &DomainEvent,
     workers: &mut BTreeMap<String, WorkerHandle>,
     tasks: &mut tokio::task::JoinSet<()>,
     shutdown: &CancellationToken,
 ) {
+    // Most high-volume topics have no interested plugin. Consult the
+    // existing revision-cached subscription index before cloning JSON.
+    // Domain bus delivery and declared plugin subscriptions are unchanged.
+    if FanoutCache::current(core)
+        .matching(event.topic(), false)
+        .is_empty()
+    {
+        return;
+    }
     let lossy = event.is_lossy();
     let envelope = match event.to_envelope() {
         Ok(envelope) => envelope,

@@ -59,7 +59,7 @@ impl AppCore {
             "logs": logs.into_iter().take(40).collect::<Vec<_>>(),
             "error": error
         });
-        let runs = self.automation.record_run(run.clone());
+        self.automation.record_run_only(run.clone());
         let action_name = run
             .get("actionName")
             .and_then(|name| name.as_str())
@@ -81,11 +81,26 @@ impl AppCore {
             .publish_domain(crate::events::DomainEvent::AutomationRunCompleted {
                 run: run.clone(),
             });
-        self.events
-            .publish_domain(crate::events::DomainEvent::AutomationRunsChanged {
-                runs: runs.clone(),
-            });
-        self.emit(HostMessage::BehaviorRuns { runs });
+        let legacy = self.emitter.wants_automation_history();
+        let domain = self.events.history_requested()
+            || !crate::plugin_events::fanout::FanoutCache::current(self)
+                .matching("automation.runs.changed", false)
+                .is_empty();
+        if legacy || domain {
+            let runs = self.automation.recent_runs();
+            match (legacy, domain) {
+                (true, true) => {
+                    self.emit(HostMessage::BehaviorRuns { runs: runs.clone() });
+                    self.events
+                        .publish_domain(crate::events::DomainEvent::AutomationRunsChanged { runs });
+                }
+                (true, false) => self.emit(HostMessage::BehaviorRuns { runs }),
+                (false, true) => self
+                    .events
+                    .publish_domain(crate::events::DomainEvent::AutomationRunsChanged { runs }),
+                (false, false) => unreachable!(),
+            }
+        }
         run
     }
 

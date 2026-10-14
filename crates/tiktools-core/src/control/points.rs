@@ -68,5 +68,7 @@ impl AppCore {
             .map(|value| value.trim().trim_start_matches('@').to_owned())
             .filter(|value| !value.is_empty());
         self.points.reset(cleaned.as_deref());
+        self.events
+            .publish_domain(DomainEvent::PointsReset { unique_id: cleaned });
     }
 }

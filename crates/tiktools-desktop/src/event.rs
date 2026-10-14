@@ -8,6 +8,10 @@ use winit::event_loop::EventLoopProxy;
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum DesktopCommand {
+    #[cfg(all(test, feature = "live-benchmark"))]
+    BenchmarkSample {
+        data: serde_json::Value,
+    },
     AdmittedCommand {
         command: Box<DesktopCommand>,
         admission: Arc<tokio::sync::OwnedSemaphorePermit>,
@@ -107,6 +111,7 @@ pub enum DesktopEvent {
 pub struct EventLoopEmitter {
     proxy: EventLoopProxy<DesktopEvent>,
     pub(crate) generation: AtomicU64,
+    pub(crate) projection: Arc<crate::window::projection::MainPageProjection>,
     pub(crate) batch_sequence: AtomicU64,
     batch_acknowledged: AtomicBool,
     batch_ack_wake_pending: AtomicBool,
@@ -120,6 +125,9 @@ pub struct EventLoopEmitter {
     pub(crate) evaluations: AtomicU64,
     pub(crate) evaluation_bytes: AtomicU64,
     pub(crate) evaluation_errors: AtomicU64,
+    pub(crate) ack_latency_us: AtomicU64,
+    pub(crate) ack_latency_max_us: AtomicU64,
+    pub(crate) ack_latency_total_us: AtomicU64,
     pub(crate) ipc_slots: Arc<tokio::sync::Semaphore>,
     pub(crate) ui_snapshot: Mutex<serde_json::Value>,
     pub(crate) mailbox: Arc<Mutex<ForwardMailbox>>,
@@ -130,6 +138,7 @@ impl EventLoopEmitter {
         Self {
             proxy,
             generation: AtomicU64::new(0),
+            projection: Arc::new(crate::window::projection::MainPageProjection::default()),
             batch_sequence: AtomicU64::new(0),
             batch_acknowledged: AtomicBool::new(false),
             batch_ack_wake_pending: AtomicBool::new(false),
@@ -143,6 +152,9 @@ impl EventLoopEmitter {
             evaluations: AtomicU64::new(0),
             evaluation_bytes: AtomicU64::new(0),
             evaluation_errors: AtomicU64::new(0),
+            ack_latency_us: AtomicU64::new(0),
+            ack_latency_max_us: AtomicU64::new(0),
+            ack_latency_total_us: AtomicU64::new(0),
             ipc_slots: Arc::new(tokio::sync::Semaphore::new(128)),
             ui_snapshot: Mutex::new(serde_json::Value::Null),
             mailbox: Arc::new(Mutex::new(ForwardMailbox::default())),
@@ -208,7 +220,8 @@ impl EventLoopEmitter {
 
     pub(crate) fn advance_generation(&self) {
         let mut mailbox = self.mailbox.lock().unwrap_or_else(|e| e.into_inner());
-        self.generation.fetch_add(1, Ordering::AcqRel);
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        self.projection.retire(generation);
         self.clear_batch();
         mailbox.retire_page();
     }
@@ -226,6 +239,17 @@ impl EventLoopEmitter {
                 return;
             }
             mailbox.push(payload)
+        };
+        self.wake(wake);
+    }
+
+    pub(crate) fn send_value_generation(&self, value: &serde_json::Value, generation: u64) {
+        let wake = {
+            let mut mailbox = self.mailbox.lock().unwrap_or_else(|e| e.into_inner());
+            if generation != self.generation.load(Ordering::Acquire) {
+                return;
+            }
+            mailbox.push_value(value)
         };
         self.wake(wake);
     }
@@ -255,6 +279,15 @@ impl EventLoopEmitter {
 }
 
 impl HostEmitter for EventLoopEmitter {
+    fn wants_automation_context_updates(&self) -> bool {
+        false
+    }
+    fn wants_automation_history(&self) -> bool {
+        false
+    }
+    fn wants_leaderboard_snapshots(&self) -> bool {
+        false
+    }
     fn diagnostics(&self) -> serde_json::Value {
         serde_json::json!({
             "mailbox": self.mailbox.lock().unwrap_or_else(|e| e.into_inner()).diagnostics(),
@@ -268,12 +301,18 @@ impl HostEmitter for EventLoopEmitter {
             "batchInFlightBytes": self.batch_bytes.load(Ordering::Relaxed),
             "evaluateCalls": self.evaluations.load(Ordering::Relaxed),
             "evaluateBytes": self.evaluation_bytes.load(Ordering::Relaxed),
+            "ackLatencyUs": self.ack_latency_us.load(Ordering::Relaxed),
+            "ackLatencyMaxUs": self.ack_latency_max_us.load(Ordering::Relaxed),
+            "ackLatencyTotalUs": self.ack_latency_total_us.load(Ordering::Relaxed),
             "evaluateErrors": self.evaluation_errors.load(Ordering::Relaxed),
+            "projection": self.projection.diagnostics(),
             "ui": self.ui_snapshot.lock().unwrap_or_else(|e| e.into_inner()).clone(),
         })
     }
 
     fn emit(&self, message: HostMessage) {
+        // High-rate compatibility pushes opt out at their producers.
+        // Explicit legacy requests still receive their historical response.
         match crate::window::outbox::encode_bounded(&message) {
             Ok(payload) => self.send(payload),
             Err(error) => {

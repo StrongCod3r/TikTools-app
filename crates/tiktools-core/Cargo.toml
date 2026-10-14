@@ -21,6 +21,8 @@ persistence = ["dep:rusqlite"]
 http = ["dep:reqwest"]
 tiktok-network = ["dep:tokio-tungstenite"]
 native-tiktok = ["dep:tiktools-tiktok"]
+# Explicit synthetic harness only; excluded from normal release artifacts.
+live-benchmark = ["native-tiktok"]
 
 [dependencies]
 tiktools-plugin-api = { path = "../tiktools-plugin-api" }

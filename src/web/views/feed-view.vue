@@ -16,6 +16,8 @@ import { TopViewersRibbon } from '../components/top-viewers.vue';
 type FeedViewProps = {
   locale: Locale;
   events: DisplayEvent[];
+  imagesEnabled?: boolean;
+  renderLimit?: number;
   leaderboard?: ViewerRecord[];
   topViewers?: TopViewerPayload[];
   liveViewers?: number;
@@ -54,6 +56,8 @@ function readViewersCollapsed(): boolean {
 function renderFeedView({
   locale,
   events,
+  imagesEnabled = true,
+  renderLimit = 100,
   leaderboard = [],
   topViewers = [],
   liveViewers = 0,
@@ -91,7 +95,8 @@ function renderFeedView({
   // leaderboard, connection) reuse the last scan instead of re-filtering
   // up to 300 events. Keyed weakly on the events array, which the batched
   // feed replaces at most once per frame.
-  const filterCacheKey = `${filter}::${searchQuery.toLowerCase()}`;
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filterCacheKey = `${filter}::${normalizedQuery}`;
   let filteredEvents: typeof events;
   const cached = filterCache.get(events);
   if (cached && cached.key === filterCacheKey) {
@@ -104,14 +109,19 @@ function renderFeedView({
         if (filter === 'like' && ev.kind !== 'like') return false;
         if (filter === 'social' && ev.kind !== 'social' && ev.kind !== 'member') return false;
       }
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
+      if (normalizedQuery) {
+        const q = normalizedQuery;
         return ev.author.toLowerCase().includes(q) || ev.text.toLowerCase().includes(q);
       }
       return true;
     });
     filterCache.set(events, { key: filterCacheKey, result: filteredEvents });
   }
+
+  // Keep the complete bounded buffer available for paused reading, search,
+  // and filtering. The pinned stream paints only the newest cards.
+  const windowed = autoScroll && filter === 'all' && !normalizedQuery && filteredEvents.length > renderLimit;
+  const renderedEvents = windowed ? filteredEvents.slice(-renderLimit) : filteredEvents;
 
   const viewersTotal = liveViewers > 0
     ? liveViewers
@@ -152,8 +162,8 @@ function renderFeedView({
                 <p>{t(locale, 'messagesEmpty')}</p>
               </div>
             ) : (
-              filteredEvents.map((ev) => (
-                <EventCard key={ev.id} event={ev} locale={locale} onAuthorClick={onOpenUser} />
+              renderedEvents.map((ev) => (
+                <EventCard key={ev.id} event={ev} locale={locale} imagesEnabled={imagesEnabled} onAuthorClick={onOpenUser} />
               ))
             )}
           </div>
@@ -163,6 +173,11 @@ function renderFeedView({
               {t(locale, filteredEvents.length === 1 ? 'messageCountOne' : 'messageCountMany', {
                 count: filteredEvents.length,
               })}
+              {windowed ? (
+                <span class="feed-window-hint" title={t(locale, 'feedWindowedHint')}>
+                  {' '}({t(locale, 'feedWindowed', { count: renderedEvents.length })})
+                </span>
+              ) : null}
               {(droppedUiEvents ?? 0) > 0 ? (
                 <span
                   class="feed-dropped-hint"
@@ -225,6 +240,7 @@ function renderFeedView({
             <div class="feed-side__body">
               <TopViewersRibbon
                 locale={locale}
+                imagesEnabled={imagesEnabled}
                 topViewers={topViewers}
                 leaderboard={leaderboard}
                 liveViewers={liveViewers}
@@ -256,6 +272,8 @@ export const FeedView = defineVueComponent<FeedViewProps>(
   [
     'locale',
     'events',
+    'imagesEnabled',
+    'renderLimit',
     'leaderboard',
     'topViewers',
     'liveViewers',

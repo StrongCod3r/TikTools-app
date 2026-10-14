@@ -56,7 +56,8 @@ impl AppCore {
             .automation_state
             .last_context_emit_at
             .load(std::sync::atomic::Ordering::Acquire);
-        if (last == 0 || now.saturating_sub(last) >= 100)
+        if self.emitter.wants_automation_context_updates()
+            && (last == 0 || now.saturating_sub(last) >= 100)
             && self
                 .automation_state
                 .last_context_emit_at

@@ -5,6 +5,7 @@ import { UserAvatar } from './user-avatar.vue';
 
 type Props = {
   locale: Locale;
+  imagesEnabled?: boolean;
   // Native TikTok ranking (Contributor 0-5) — preferred
   topViewers?: TopViewerPayload[];
   // Fallback local points leaderboard
@@ -22,7 +23,7 @@ type Props = {
  * toggle) lives in FeedView so this component stays a pure list that can
  * also render inline without chrome.
  */
-export function TopViewersRibbon({ locale, topViewers = [], leaderboard = [], liveViewers = 0, onSelect }: Props) {
+export function TopViewersRibbon({ locale, topViewers = [], leaderboard = [], liveViewers = 0, imagesEnabled = true, onSelect }: Props) {
   const hasNative = topViewers.length > 0;
   // Native top 0-5, fallback to points top 3
   const ribbonItems: Array<{
@@ -76,7 +77,7 @@ export function TopViewersRibbon({ locale, topViewers = [], leaderboard = [], li
             <UserAvatar
               uniqueId={viewer.uniqueId}
               nickname={viewer.nickname}
-              avatarUrl={viewer.avatarUrl}
+              avatarUrl={imagesEnabled ? viewer.avatarUrl : undefined}
               imgClass="tt-chip-avatar"
               fallbackClass="tt-chip-avatar fallback"
             />

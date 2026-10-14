@@ -1,5 +1,9 @@
 # LIVE resource ownership and memory diagnostics
 
+Current main-page projection and frame-scheduling work is described in
+[LIVE_WEBVIEW_PROJECTION.md](LIVE_WEBVIEW_PROJECTION.md), including explicit
+remaining real-LIVE and platform validation gates.
+
 Historical audit baseline: `2f8f088c0817b1f5648ebc8222cc67d4e8fc3520` (`remake`).
 Current draft refactor baseline: `79dd1ab193cf7e8e251575d44e0a6270f7814010`.
 The full refactor remains incomplete; see [progress](PERFORMANCE_REFACTOR_PROGRESS.md)

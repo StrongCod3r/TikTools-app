@@ -251,3 +251,22 @@ describe('useAutomation hotkey access request', () => {
     expect(calls.filter((method) => method === 'system.requestInputAccess')).toHaveLength(1);
   });
 });
+
+test('10k run completions commit one bounded recent-run patch', async () => {
+  const { client, topics } = fakeControl();
+  const automation = useAutomation(client);
+  const before = automation.behaviorRuns.value;
+  for (let i = 0; i < 10_000; i += 1) {
+    emit(topics.get('automation.run.completed'), { run: { id: `run-${i}`, at: i, status: 'ok', summary: 'done' } });
+  }
+  expect(automation.behaviorRuns.value).toBe(before);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  expect(automation.behaviorRuns.value).toHaveLength(60);
+  expect(automation.behaviorRuns.value[0]?.id).toBe('run-9999');
+  automation.setPresentationActive(false);
+  const hidden = automation.behaviorRuns.value;
+  emit(topics.get('automation.run.completed'), { run: { id: 'hidden', at: 10_000 } });
+  expect(automation.behaviorRuns.value).toBe(hidden);
+  automation.dispose();
+  expect(automation.diagnostics().timers).toBe(0);
+});

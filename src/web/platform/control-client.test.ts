@@ -236,7 +236,7 @@ test('pending RPC admission is bounded and detach releases every slot', async ()
   const outcomes = Array.from({ length: 128 }, () => control.call('system.ping').catch((error: unknown) => error));
   await expect(control.call('system.ping')).rejects.toMatchObject({ code: 'overloaded' });
   expect(ipc.sent).toHaveLength(128);
-  expect(control.diagnostics?.()).toEqual({ pending: 128, capacity: 128, overloaded: 1, topicCount: 0, topicSubscriptions: 0, pushSubscriptions: 0 });
+  expect(control.diagnostics?.()).toMatchObject({ pending: 128, capacity: 128, overloaded: 1, topicCount: 0, topicSubscriptions: 0, pushSubscriptions: 0 });
   control.detach();
   expect(await Promise.all(outcomes)).toHaveLength(128);
   expect(control.diagnostics?.()?.pending).toBe(0);
@@ -274,4 +274,65 @@ test('owner cancellation removes pending RPC admission and ignores a late reply'
   await expect(control.call('system.ping', {}, { signal: owner.signal })).rejects.toMatchObject({ code: 'cancelled' });
   expect(mock.sent).toHaveLength(1);
   control.detach(); delete (globalThis as Record<string, unknown>)['window'];
+});
+
+
+test('presentation revisions reject messages from a previous view', async () => {
+  const ipc = installMockIpc();
+  const control = createControlClient();
+  control.attach();
+  const seen: unknown[] = [];
+  control.onTopic('live.ui-event', (data) => seen.push(data));
+  const configuring = control.setPresentation?.({ feed: true, points: true, behavior: false, visible: true });
+  const first = JSON.parse(ipc.sent.at(-1)!) as { id: string; params: { revision: number } };
+  hostMessage()(JSON.stringify({ type: 'rpc-response', response: { id: first.id, result: { version: 1, revision: 1 } } }));
+  await configuring;
+  const hidden = control.setPresentation?.({ feed: false, points: false, behavior: false, visible: true });
+  const second = JSON.parse(ipc.sent.at(-1)!) as { id: string };
+  hostMessage()(JSON.stringify({ method: 'event', params: { topic: 'live.ui-event', revision: first.params.revision, data: 'stale' } }));
+  expect(seen).toEqual([]);
+  hostMessage()(JSON.stringify({ type: 'rpc-response', response: { id: second.id, result: {} } }));
+  await hidden;
+  control.detach();
+});
+
+test('retired-page batches cannot deliver events or legacy pushes to a new generation', async () => {
+  const ipc = installMockIpc();
+  const control = createControlClient();
+  control.attach();
+  const events: unknown[] = [];
+  const pushes: unknown[] = [];
+  control.onTopic('live.ui-event', (data) => events.push(data));
+  control.onPush('leaderboard', (data) => pushes.push(data));
+  const configuring = control.setPresentation?.({ feed: true, points: true, behavior: false, visible: true });
+  hostMessage()(JSON.stringify({ type: 'rpc-response', response: { id: sentId(), result: { generation: 2, revision: 1 } } }));
+  await configuring;
+  const receive = ((globalThis as Record<string, unknown>)['window'] as Window).__tiktools_receive_batch__!;
+  const old = JSON.stringify({ method: 'event', params: { topic: 'live.ui-event', generation: 1, revision: 1, data: 'stale' } });
+  receive([old, JSON.stringify({ type: 'leaderboard', viewers: [] })], 1);
+  expect(events).toEqual([]);
+  expect(pushes).toEqual([]);
+  receive([JSON.stringify({ method: 'event', params: { topic: 'live.ui-event', generation: 2, revision: 1, data: 'current' } })], 2);
+  expect(events).toEqual(['current']);
+  expect(ipc.sent).toHaveLength(1);
+  control.detach();
+});
+
+test('a fresh page negotiates above a racing old bootstrap revision once', async () => {
+  const ipc = installMockIpc();
+  const control = createControlClient();
+  control.attach();
+  const configuring = control.setPresentation?.({ feed: true, points: true, behavior: false, visible: true });
+  hostMessage()(JSON.stringify({ type: 'rpc-response', response: { id: sentId(), error: { code: 'stale', message: 'old bootstrap raced', data: { revision: 10, generation: 2 } } } }));
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(ipc.sent).toHaveLength(2);
+  expect(JSON.parse(ipc.sent[1]!)).toMatchObject({ params: { revision: 11 } });
+  hostMessage()(JSON.stringify({ type: 'rpc-response', response: { id: sentId(), result: { generation: 2, revision: 11 } } }));
+  await configuring;
+  const ping = control.call('system.ping');
+  expect(JSON.parse(ipc.sent.at(-1)!)).toMatchObject({ pageGeneration: 2 });
+  hostMessage()(JSON.stringify({ type: 'rpc-response', response: { id: sentId(), result: {} } }));
+  await ping;
+  control.detach();
 });

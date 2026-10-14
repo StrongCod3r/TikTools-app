@@ -5,6 +5,8 @@
 //! implementation. The desktop crate supplies a `HostEmitter` and forwards
 //! UI work to this crate from its Tokio runtime.
 
+#[cfg(feature = "live-benchmark")]
+pub mod benchmark;
 pub mod contracts;
 pub mod control;
 pub mod db;
@@ -84,6 +86,17 @@ pub use services::{
 
 pub trait HostEmitter: Send + Sync {
     fn emit(&self, message: HostMessage);
+    /// Hosts can opt out of compatibility visualization pushes. Defaults
+    /// preserve existing emitters; accounting/run recording never depends on it.
+    fn wants_automation_history(&self) -> bool {
+        true
+    }
+    fn wants_leaderboard_snapshots(&self) -> bool {
+        true
+    }
+    fn wants_automation_context_updates(&self) -> bool {
+        true
+    }
     /// Optional aggregate-only host transport diagnostics; headless hosts
     /// retain the default null value and need no GUI dependency.
     fn diagnostics(&self) -> serde_json::Value {
@@ -328,6 +341,9 @@ impl AppCore {
     /// an immediate snapshot (for example an explicit UI request) still emit
     /// directly; high-rate live events use this coalescing boundary.
     pub(crate) fn emit_leaderboard_if_due(&self) {
+        if !self.emitter.wants_leaderboard_snapshots() {
+            return;
+        }
         const MIN_INTERVAL_MS: u64 = 250;
         let now = now_millis();
         let last = self.last_leaderboard_emit_at.load(Ordering::Acquire);

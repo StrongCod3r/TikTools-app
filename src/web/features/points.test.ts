@@ -77,7 +77,7 @@ describe('usePoints new viewers', () => {
 
     const handler = control.topics.get('points.changed');
     handler?.({ uniqueId: 'alice', delta: 2, totalPoints: 12, level: 1 } as never);
-    await flushPromises();
+    await new Promise((resolve) => setTimeout(resolve, 120));
 
     expect(control.calls).toHaveLength(callsBefore);
     expect(points.leaderboard.value[0]?.points).toBe(12);
@@ -97,4 +97,75 @@ describe('usePoints new viewers', () => {
     expect(control.calls.filter((method) => method === 'points.leaderboard')).toHaveLength(1);
     expect(points.leaderboard.value).toHaveLength(2);
   });
+});
+
+
+test('10k absolute awards produce one board replacement and current lookups', async () => {
+  const control = stubControl([viewer('alice', 10), viewer('bob', 20)]);
+  const points = usePoints(control);
+  await points.refresh();
+  const before = points.leaderboard.value;
+  const handler = control.topics.get('points.changed');
+  for (let i = 0; i < 10_000; i += 1) {
+    handler?.({ uniqueId: 'alice', delta: 1, totalPoints: i, level: 2 } as never);
+  }
+  expect(points.leaderboard.value).toBe(before);
+  expect(points.leaderboardPointsFor('@ALICE')).toBe(9_999);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  expect(points.leaderboard.value).not.toBe(before);
+  expect(points.leaderboard.value[0]?.points).toBe(9_999);
+  expect(control.calls.filter((method) => method === 'points.leaderboard')).toHaveLength(1);
+  points.dispose();
+});
+
+test('dispose cancels pending award commits', async () => {
+  const control = stubControl([viewer('alice', 10)]);
+  const points = usePoints(control);
+  await points.refresh();
+  const before = points.leaderboard.value;
+  control.topics.get('points.changed')?.({ uniqueId: 'alice', totalPoints: 12, level: 1 } as never);
+  points.dispose();
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  expect(points.leaderboard.value).toBe(before);
+});
+
+test('an in-flight snapshot preserves awards committed after the request began', async () => {
+  const control = stubControl([viewer('alice', 10)]);
+  const points = usePoints(control);
+  await points.refresh();
+  const originalCall = control.call;
+  let resolveBoard!: (value: unknown) => void;
+  control.call = <T,>(method: string, params?: RpcParams): Promise<T> => {
+    if (method === 'points.leaderboard') {
+      return new Promise((resolve) => { resolveBoard = resolve as (value: unknown) => void; });
+    }
+    return originalCall<T>(method, params);
+  };
+  const refreshing = points.refresh();
+  control.topics.get('points.changed')?.({ uniqueId: 'alice', totalPoints: 25, level: 2 } as never);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  resolveBoard({ viewers: [viewer('alice', 10)] });
+  await refreshing;
+  expect(points.leaderboard.value[0]?.points).toBe(25);
+  expect(points.leaderboardPointsFor('alice')).toBe(25);
+  points.dispose();
+});
+
+test('native board snapshots supersede slow board RPCs while config refresh still completes', async () => {
+  const control = stubControl([viewer('alice', 10)]);
+  const original = control.call;
+  let resolveBoard!: (value: unknown) => void;
+  control.call = <T,>(method: string, params?: RpcParams): Promise<T> => {
+    if (method === 'points.config.get') return Promise.resolve({ ...defaultPointsConfig, currencyName: 'Coins' } as T);
+    if (method === 'points.leaderboard') return new Promise((resolve) => { resolveBoard = resolve as (value: unknown) => void; });
+    return original<T>(method, params);
+  };
+  const points = usePoints(control);
+  const refreshing = points.refresh();
+  control.topics.get('ui.points.snapshot')?.({ viewers: [viewer('alice', 25)] } as never);
+  resolveBoard({ viewers: [viewer('alice', 10)] });
+  await refreshing;
+  expect(points.leaderboard.value[0]?.points).toBe(25);
+  expect(points.pointsConfig.value.currencyName).toBe('Coins');
+  points.dispose();
 });

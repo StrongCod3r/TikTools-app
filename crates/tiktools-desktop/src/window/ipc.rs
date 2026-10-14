@@ -125,6 +125,25 @@ pub(crate) async fn handle_webview_ipc_message(
         return;
     }
     match classify_inbound_message(&raw) {
+        InboundRoute::Control(value) if !page_generation_matches(&value, generation) => {
+            emit_rpc_response_for_generation(
+                emitter,
+                generation,
+                &tiktools_control_api::RpcResponse::error(
+                    tiktools_control_api::RpcId::extract(&value),
+                    tiktools_control_api::ApiError::new(
+                        "stale",
+                        "request belongs to a retired main page",
+                    ),
+                ),
+            );
+        }
+        InboundRoute::Control(value)
+            if value.get("method").and_then(serde_json::Value::as_str) == Some("ui.projection") =>
+        {
+            let response = configure_projection(&value, emitter, generation);
+            emit_rpc_response_for_generation(emitter, generation, &response);
+        }
         InboundRoute::Control(value) => {
             // A deadline reports uncertain completion; it never cancels an
             // irreversible operation or releases its permit early. The owned
@@ -152,6 +171,17 @@ pub(crate) async fn handle_webview_ipc_message(
                 }
             }
         }
+        #[cfg(all(test, feature = "live-benchmark"))]
+        InboundRoute::Legacy(value)
+            if value["type"] == "benchmark-sample" && raw.len() <= 16 * 1024 =>
+        {
+            let _ = proxy.send_event(DesktopEvent::Command(DesktopCommand::AdmittedCommand {
+                command: Box::new(DesktopCommand::BenchmarkSample {
+                    data: value["data"].clone(),
+                }),
+                admission,
+            }));
+        }
         InboundRoute::Legacy(value)
             if try_plugin_ui_command(&value, proxy, admission.clone()).is_some() => {}
         InboundRoute::Legacy(value) => {
@@ -173,6 +203,57 @@ pub(crate) async fn handle_webview_ipc_message(
             tracing::warn!("invalid legacy WebView message");
         }
     }
+}
+
+pub(crate) fn page_generation_matches(value: &serde_json::Value, generation: u64) -> bool {
+    match value.get("pageGeneration") {
+        None => true, // Bootstrap and existing clients retain their contract.
+        Some(declared) => declared.as_u64() == Some(generation),
+    }
+}
+
+/// This capability is main-WebView-only; CLI and native plugin RPC keep
+/// the complete shared API/stream. Request revisions fence task reordering.
+fn configure_projection(
+    value: &serde_json::Value,
+    emitter: &crate::event::EventLoopEmitter,
+    generation: u64,
+) -> tiktools_control_api::RpcResponse {
+    let id = tiktools_control_api::RpcId::extract(value);
+    let params = &value["params"];
+    let parsed = (
+        params["version"].as_u64(),
+        params["revision"].as_u64(),
+        params["feed"].as_bool(),
+        params["behavior"].as_bool(),
+        params["points"].as_bool(),
+        params["visible"].as_bool(),
+    );
+    let (Some(1), Some(revision), Some(feed), Some(behavior), Some(points), Some(visible)) = parsed
+    else {
+        return tiktools_control_api::RpcResponse::error(id,
+            tiktools_control_api::ApiError::invalid_params("ui.projection requires version 1, revision and boolean feed/behavior/points/visible"));
+    };
+    if !emitter
+        .projection
+        .update(generation, revision, feed, behavior, points, visible)
+    {
+        let current = emitter.projection.view();
+        return tiktools_control_api::RpcResponse::error(
+            id,
+            tiktools_control_api::ApiError {
+                code: "stale".to_owned(),
+                message: "presentation request belongs to a retired page or revision".to_owned(),
+                data: Some(
+                    serde_json::json!({"generation": current.generation, "revision": current.revision}),
+                ),
+            },
+        );
+    }
+    tiktools_control_api::RpcResponse::success(
+        id,
+        serde_json::json!({"version": 1, "generation": generation, "revision": revision, "stats": emitter.projection.diagnostics()}),
+    )
 }
 
 /// Desktop-level plugin UI commands from the main frontend
@@ -382,7 +463,7 @@ impl DesktopApp {
         let generation = self.emitter.generation.load(Ordering::Acquire);
         let sequence = self.emitter.batch_sequence.fetch_add(1, Ordering::AcqRel) + 1;
         let script = format!(
-            "(() => {{ const batch = {argument}; if (typeof window.__tiktools_receive_batch__ === 'function') {{ window.__tiktools_receive_batch__(batch); }} else if (typeof window.__webview_on_message__ === 'function') {{ for (const item of batch) window.__webview_on_message__(item); }} else {{ return; }} window.ipc.postMessage('tiktools-batch-ack:{generation}:{sequence}'); }})();"
+            "(() => {{ const batch = {argument}; if (typeof window.__tiktools_receive_batch__ === 'function') {{ window.__tiktools_receive_batch__(batch, {generation}); }} else if (typeof window.__webview_on_message__ === 'function') {{ for (const item of batch) window.__webview_on_message__(item); }} else {{ return; }} window.ipc.postMessage('tiktools-batch-ack:{generation}:{sequence}'); }})();"
         );
         self.emitter
             .batch_messages

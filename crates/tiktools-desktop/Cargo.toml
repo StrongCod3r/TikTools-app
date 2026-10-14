@@ -9,6 +9,7 @@ description = "Thin Winit/Wry desktop host for TikTools"
 [features]
 default = ["persistence", "plugin-install", "http"]
 devtools = ["wry/devtools"]
+live-benchmark = ["tiktools-core/live-benchmark"]
 plugin-install = ["tiktools-core/plugin-install"]
 persistence = ["tiktools-core/persistence"]
 http = ["tiktools-core/http"]

@@ -45,44 +45,108 @@ export function usePoints(control: ControlClient) {
   // unsubscribers are collected so dispose() can release them.
   // Memoized identity lookup: chat-rate calls resolve against a cached
   // map rebuilt only when the board array itself is replaced.
-  let lookupCache: { board: ViewerRecord[]; map: Map<string, number> } | null = null;
+  let lookupCache: { board: ViewerRecord[]; map: Map<string, number>; owners: Map<string, string> } | null = null;
 
-  const applyAward = (uniqueId: string, totalPoints: number, level: number): boolean => {
-    const index = leaderboard.value.findIndex((viewer) => viewer.uniqueId === uniqueId);
-    if (index < 0) return false;
+  let disposed = false;
+  let presentationActive = true;
+  let hiddenMiss = false;
+  let revision = 0;
+  let refreshGeneration = 0;
+  let boardSnapshotRevision = 0;
+  let configRevision = 0;
+  let awardTimer: ReturnType<typeof setTimeout> | null = null;
+  // Only loaded viewers are retained: bounded by the top-100 board, rather
+  // than the number of distinct chatters. Totals are absolute, never summed.
+  const pendingAwards = new Map<string, PointsChangedData & { revision: number }>();
+  const refreshAwards = new Map<string, PointsChangedData>();
+  let snapshotInFlight = false;
+  let viewerIndex = new Map<string, number>();
+  const replaceBoard = (board: ViewerRecord[]): void => {
+    leaderboard.value = board;
+    viewerIndex = new Map(board.map((viewer, index) => [viewer.uniqueId, index]));
+  };
+  const commitAwards = (): void => {
+    awardTimer = null;
+    if (disposed || !presentationActive || pendingAwards.size === 0) return;
     const updated = [...leaderboard.value];
-    const current = updated[index];
-    if (current) {
-      updated[index] = {
-        ...current,
-        points: totalPoints,
-        level,
-        lastSeen: Date.now(),
-      };
+    for (const award of pendingAwards.values()) {
+      const index = viewerIndex.get(award.uniqueId);
+      const current = index === undefined ? undefined : updated[index];
+      if (current && index !== undefined) {
+        updated[index] = { ...current, points: award.totalPoints, level: award.level, lastSeen: Date.now() };
+      }
     }
-    leaderboard.value = updated.sort((left, right) => right.points - left.points);
+    pendingAwards.clear();
+    replaceBoard(updated.sort((left, right) => right.points - left.points));
+  };
+  const applyAward = (data: PointsChangedData): boolean => {
+    revision += 1;
+    if (!viewerIndex.has(data.uniqueId)) return false;
+    if (snapshotInFlight) refreshAwards.set(data.uniqueId, data);
+    pendingAwards.set(data.uniqueId, { ...data, revision });
+    if (lookupCache?.board === leaderboard.value) {
+      const key = data.uniqueId.trim().replace(/^@/, '').toLowerCase();
+      if (lookupCache.owners.get(key) === data.uniqueId) lookupCache.map.set(key, data.totalPoints);
+    }
+    if (presentationActive && awardTimer === null) awardTimer = setTimeout(commitAwards, 100);
     return true;
   };
 
   unsubscribers.push(control.onPush('points-config', (message) => {
     if (message.type !== 'points-config') return;
+    configRevision += 1;
     pointsConfig.value = message.config;
   }));
   unsubscribers.push(control.onPush('leaderboard', (message) => {
     if (message.type !== 'leaderboard') return;
-    leaderboard.value = message.viewers;
+    boardSnapshotRevision += 1;
+    pendingAwards.clear();
+    replaceBoard(message.viewers);
+  }));
+
+  unsubscribers.push(control.onTopic<LeaderboardResult>('ui.points.snapshot', (data) => {
+    if (disposed || !Array.isArray(data.viewers)) return;
+    // The native projection is an absolute authoritative top-K snapshot.
+    boardSnapshotRevision += 1;
+    snapshotInFlight = false;
+    refreshAwards.clear();
+    pendingAwards.clear();
+    replaceBoard(data.viewers);
   }));
 
   const refresh = async (): Promise<void> => {
+    const generation = ++refreshGeneration;
+    const startedAt = revision;
+    const snapshotAtStart = boardSnapshotRevision;
+    const configAtStart = configRevision;
+    snapshotInFlight = true;
+    refreshAwards.clear();
     try {
       const [config, board] = await Promise.all([
         control.call<PointsConfig>('points.config.get', {}),
         control.call<LeaderboardResult>('points.leaderboard', { limit: 100 }),
       ]);
-      pointsConfig.value = config;
-      leaderboard.value = board.viewers;
+      if (disposed || generation !== refreshGeneration) return;
+      if (configAtStart === configRevision) pointsConfig.value = config;
+      if (snapshotAtStart !== boardSnapshotRevision) return;
+      // Discard patches covered by the snapshot; keep awards received while
+      // the request was in flight, including ones already visually committed.
+      for (const [id, award] of pendingAwards) {
+        if (award.revision <= startedAt || !board.viewers.some((viewer) => viewer.uniqueId === id)) {
+          pendingAwards.delete(id);
+        }
+      }
+      replaceBoard(board.viewers.map((viewer) => {
+        const award = refreshAwards.get(viewer.uniqueId);
+        return award ? { ...viewer, points: award.totalPoints, level: award.level } : viewer;
+      }).sort((left, right) => right.points - left.points));
     } catch (failure) {
-      console.warn(`points refresh failed: ${errorMessage(failure)}`);
+      if (!disposed && generation === refreshGeneration) console.warn(`points refresh failed: ${errorMessage(failure)}`);
+    } finally {
+      if (generation === refreshGeneration) {
+        snapshotInFlight = false;
+        refreshAwards.clear();
+      }
     }
   };
 
@@ -97,6 +161,7 @@ export function usePoints(control: ControlClient) {
   let missingViewerWindowStart = 0;
   let missingViewerTimer: ReturnType<typeof setTimeout> | null = null;
   const startMissingViewerRefresh = (): void => {
+    if (disposed) return;
     missingViewerRefreshInFlight = true;
     missingViewerWindowStart = Date.now();
     void refresh().finally(() => {
@@ -104,6 +169,7 @@ export function usePoints(control: ControlClient) {
     });
   };
   const refreshMissingViewer = (): void => {
+    if (!presentationActive) { hiddenMiss = true; return; }
     const now = Date.now();
     if (
       missingViewerRefreshInFlight ||
@@ -127,15 +193,41 @@ export function usePoints(control: ControlClient) {
   };
 
   unsubscribers.push(control.onTopic<PointsChangedData>('points.changed', (data) => {
-    if (!applyAward(data.uniqueId, data.totalPoints, data.level)) {
+    if (!applyAward(data)) {
       refreshMissingViewer();
     }
   }));
+
+  unsubscribers.push(control.onTopic('points.reset', () => {
+    ++refreshGeneration;
+    snapshotInFlight = false;
+    pendingAwards.clear();
+    refreshAwards.clear();
+    lookupCache = null;
+    refreshMissingViewer();
+  }));
+
+  const setPresentationActive = (active: boolean): void => {
+    presentationActive = active;
+    if (!active) {
+      if (awardTimer !== null) clearTimeout(awardTimer);
+      awardTimer = null;
+      if (missingViewerTimer !== null) clearTimeout(missingViewerTimer);
+      missingViewerTimer = null;
+    } else if (hiddenMiss) {
+      hiddenMiss = false;
+      refreshMissingViewer();
+    } else if (pendingAwards.size > 0 && awardTimer === null) {
+      awardTimer = setTimeout(commitAwards, 100);
+    }
+  };
 
   const handleUpdatePointsConfig = (config: Partial<PointsConfig>): void => {
     void control
       .call<PointsConfig>('points.config.set', { ...config })
       .then((next) => {
+        if (disposed) return;
+        configRevision += 1;
         pointsConfig.value = next;
       })
       .catch((failure: unknown) => {
@@ -147,10 +239,7 @@ export function usePoints(control: ControlClient) {
     void (async () => {
       try {
         await control.call('points.reset', uniqueId === undefined ? {} : { uniqueId });
-        const board = await control.call<LeaderboardResult>('points.leaderboard', {
-          limit: 100,
-        });
-        leaderboard.value = board.viewers;
+        if (!disposed) await refresh();
       } catch (failure) {
         console.warn(`points.reset failed: ${errorMessage(failure)}`);
       }
@@ -173,16 +262,27 @@ export function usePoints(control: ControlClient) {
     const board = leaderboard.value;
     if (lookupCache?.board !== board) {
       const map = new Map<string, number>();
+      const owners = new Map<string, string>();
       for (const entry of board) {
         const key = entry.uniqueId.trim().replace(/^@/, '').toLowerCase();
-        if (key && !map.has(key)) map.set(key, entry.points);
+        if (key && !map.has(key)) { map.set(key, entry.points); owners.set(key, entry.uniqueId); }
       }
-      lookupCache = { board, map };
+      for (const award of pendingAwards.values()) {
+        const key = award.uniqueId.trim().replace(/^@/, '').toLowerCase();
+        if (owners.get(key) === award.uniqueId) map.set(key, award.totalPoints);
+      }
+      lookupCache = { board, map, owners };
     }
     return lookupCache.map.get(clean);
   };
 
   const dispose = (): void => {
+    disposed = true;
+    refreshGeneration += 1;
+    if (awardTimer !== null) clearTimeout(awardTimer);
+    awardTimer = null;
+    pendingAwards.clear();
+    refreshAwards.clear();
     while (unsubscribers.length > 0) unsubscribers.pop()?.();
     if (missingViewerTimer !== null) {
       clearTimeout(missingViewerTimer);
@@ -193,6 +293,7 @@ export function usePoints(control: ControlClient) {
 
   return {
     pointsConfig,
+    setPresentationActive,
     leaderboard,
     leaderboardPointsFor,
     handleUpdatePointsConfig,

@@ -15,6 +15,7 @@ export interface LiveCallbacks {
     isSubscriber: boolean | undefined,
   ) => void;
   systemAuthor: () => string;
+  discontinuityText?: () => string;
 }
 
 export interface GiftCatalogResult {
@@ -83,6 +84,8 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   // raw so retained cards preserve identity and avoid deep proxy tracking.
   const events = shallowRef<DisplayEvent[]>([]);
   const filter = ref<EventFilter>(savedFeed?.filter ?? 'all');
+  const imagesEnabled = ref(true);
+  const renderLimit = ref(100);
   const searchQuery = ref(savedFeed?.searchQuery ?? '');
   const topViewers = shallowRef<TopViewerPayload[]>([]);
   const liveViewers = ref(0);
@@ -97,6 +100,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   let restoreScrollTop = savedFeed?.scrollTop;
   let scrollSaveHandler: DebouncedCallback | null = null;
   let restoreFrame = 0;
+  let restoreTimer: ReturnType<typeof setTimeout> | null = null;
   let refreshRevision = 0;
   const unsubscribers: Array<() => void> = [];
   // Topic handlers keep their exact control-client overload types; only
@@ -111,8 +115,18 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   let staged: DisplayEvent[] = [];
   let flushQueued = false;
   let flushFrame = 0;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let scrollTimer: ReturnType<typeof setTimeout> | null = null;
   let scrollFrame = 0;
   let disposed = false;
+  let presentationActive = true;
+  let hasPresented = false;
+  let commits = 0;
+  let received = 0;
+  let suspendedAt = 0;
+  let lastHostSuspended: number | null = null;
+  let lastHostBusDropped: number | null = null;
+  let lastDeliverySequence: number | null = null;
 
   // Frame scheduler with a synchronous fallback: unit tests and
   // non-browser hosts have no `requestAnimationFrame`, and the feed must
@@ -127,6 +141,9 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   };
 
   const stageEvent = (event: DisplayEvent): void => {
+    if (disposed) return;
+    if (!presentationActive) { droppedUiEvents.value += 1; return; }
+    hasPresented = true;
     staged.push(event);
     if (staged.length > MAX_STAGED_EVENTS) {
       // Shed the oldest staged events first: the feed shows the latest
@@ -138,18 +155,26 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     }
     if (!flushQueued && !disposed) {
       flushQueued = true;
+      // Native WebKit may stop frame callbacks even when visibilityState
+      // remains visible. One trailing timeout bounds presentation latency.
+      // Whichever scheduler fires first cancels its sibling.
+      if (typeof requestAnimationFrame === 'function') flushTimer = setTimeout(flushStaged, 100);
       flushFrame = scheduleFrame(flushStaged);
     }
   };
 
   const flushStaged = (): void => {
+    if (flushTimer !== null) clearTimeout(flushTimer);
+    flushTimer = null;
+    cancelFrame(flushFrame);
     flushQueued = false;
     flushFrame = 0;
-    if (disposed || staged.length === 0) return;
+    if (disposed || !presentationActive || staged.length === 0) return;
     const batch = staged;
     staged = [];
     const now = Date.now();
     for (const stagedEvent of batch) stagedEvent.receivedAt = now;
+    commits += 1;
     events.value = [...events.value, ...batch].slice(-MAX_VISIBLE_FEED);
     if (!autoScroll.value) unreadCount.value += batch.length;
     for (const stagedEvent of batch) {
@@ -176,16 +201,20 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   };
 
   const applyScroll = (): void => {
+    if (scrollTimer !== null) clearTimeout(scrollTimer);
+    scrollTimer = null;
+    cancelFrame(scrollFrame);
     scrollFrame = 0;
     // Never mutate scroll while paused: one coalesced write per frame,
     // only when pinned to the bottom.
-    if (disposed || !autoScroll.value) return;
+    if (disposed || !presentationActive || !autoScroll.value) return;
     const container = streamContainerRef.value;
     if (container) container.scrollTop = container.scrollHeight;
   };
 
   const queueScroll = (): void => {
-    if (scrollFrame !== 0 || disposed) return;
+    if (scrollFrame !== 0 || scrollTimer !== null || disposed || !presentationActive) return;
+    if (typeof requestAnimationFrame === 'function') scrollTimer = setTimeout(applyScroll, 100);
     scrollFrame = scheduleFrame(applyScroll);
   };
 
@@ -198,6 +227,11 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     cancelFrame(flushFrame);
     cancelFrame(scrollFrame);
     cancelFrame(restoreFrame);
+    if (restoreTimer !== null) clearTimeout(restoreTimer);
+    restoreTimer = null;
+    if (flushTimer !== null) clearTimeout(flushTimer);
+    if (scrollTimer !== null) clearTimeout(scrollTimer);
+    flushTimer = scrollTimer = null;
     refreshRevision += 1;
     saveFeedStateDebounced.cancel();
     scrollSaveHandler?.cancel();
@@ -219,9 +253,56 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     // Drop replays before they reach the feed: a reconnect
     // replay must not re-render, count as unread, or re-fire
     // the chat observer.
-    if (disposed || isDuplicateEvent(event, Date.now(), seenMsgIds, seenChecksums)) return;
+    if (disposed) return;
+    received += 1;
+    if (!presentationActive) { droppedUiEvents.value += 1; return; }
+    if (isDuplicateEvent(event, Date.now(), seenMsgIds, seenChecksums)) return;
     stageEvent({ ...event, id: nextEventId++, receivedAt: Date.now() });
   };
+
+  const setPresentationActive = (active: boolean): void => {
+    if (disposed || active === presentationActive) return;
+    presentationActive = active;
+    if (!active) {
+      if (!autoScroll.value && streamContainerRef.value) {
+        restoreScrollTop = streamContainerRef.value.scrollTop;
+        saveFeedState();
+      }
+      suspendedAt = droppedUiEvents.value;
+      droppedUiEvents.value += staged.length;
+      staged = [];
+      cancelFrame(flushFrame);
+      cancelFrame(scrollFrame);
+      cancelFrame(restoreFrame);
+      if (restoreTimer !== null) clearTimeout(restoreTimer);
+      restoreTimer = null;
+      restoreFrame = 0;
+      if (flushTimer !== null) clearTimeout(flushTimer);
+      if (scrollTimer !== null) clearTimeout(scrollTimer);
+      flushTimer = scrollTimer = null;
+      flushFrame = scrollFrame = 0;
+      flushQueued = false;
+    } else if (hasPresented || droppedUiEvents.value > suspendedAt) {
+      stageEvent({ kind: 'member', author: callbacks.systemAuthor(),
+        text: callbacks.discontinuityText?.() ?? 'Feed resumed. Events received while hidden were skipped.',
+        id: nextEventId++, receivedAt: Date.now() });
+    }
+  };
+
+  unsubscribers.push(control.onTopic<{ feedSuspended: number; feedBusDropped?: number; feedForwarded?: number }>('ui.projection.stats', (data) => {
+    if (!Number.isFinite(data.feedSuspended)) return;
+    if (lastDeliverySequence === null && typeof data.feedForwarded === 'number') lastDeliverySequence = data.feedForwarded;
+    // First snapshot establishes the page baseline, including events shed
+    // since its initial handshake. Later snapshots count only the delta.
+    const previous = lastHostSuspended ?? data.feedSuspended;
+    droppedUiEvents.value += Math.max(0, data.feedSuspended - previous);
+    lastHostSuspended = data.feedSuspended;
+    if (typeof data.feedBusDropped === 'number' && Number.isFinite(data.feedBusDropped)) {
+      const previousDropped = lastHostBusDropped ?? data.feedBusDropped;
+      droppedUiEvents.value += Math.max(0, data.feedBusDropped - previousDropped);
+      lastHostBusDropped = data.feedBusDropped;
+    }
+  }));
 
   // Live feed state arrives only via authoritative domain topics; the
   // legacy `live-event` / `room-stats` / `gift-catalog` pushes are no
@@ -234,7 +315,11 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
       sessionScope = scope;
     }
   }));
-  unsubscribers.push(control.onTopic<{ event: UiEvent }>('live.ui-event', (data) => {
+  unsubscribers.push(control.onTopic<{ event: UiEvent; sequence?: number }>('live.ui-event', (data) => {
+    if (typeof data.sequence === 'number' && Number.isSafeInteger(data.sequence)) {
+      if (lastDeliverySequence !== null) droppedUiEvents.value += Math.max(0, data.sequence - lastDeliverySequence - 1);
+      lastDeliverySequence = Math.max(lastDeliverySequence ?? 0, data.sequence);
+    }
     pushFeedEvent(data.event);
   }));
   unsubscribers.push(control.onTopic<{ viewers: number; totalUsers: number; topViewers: TopViewerPayload[] }>(
@@ -271,6 +356,12 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   const handleToggleAutoScroll = (): void => {
     const nextState = !autoScroll.value;
     autoScroll.value = nextState;
+    if (!nextState) {
+      cancelFrame(scrollFrame);
+      scrollFrame = 0;
+      if (scrollTimer !== null) clearTimeout(scrollTimer);
+      scrollTimer = null;
+    }
     if (nextState) {
       unreadCount.value = 0;
       scrollToBottom();
@@ -320,14 +411,25 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     // off; with auto-scroll on, the controller's watcher keeps
     // the stream pinned to the bottom instead.
     cancelFrame(restoreFrame);
-    restoreFrame = scheduleFrame(() => { restoreFrame = 0; if (!disposed) applySavedScrollTop(); });
+    if (restoreTimer !== null) clearTimeout(restoreTimer);
+    const restore = (): void => {
+      cancelFrame(restoreFrame);
+      restoreFrame = 0;
+      if (restoreTimer !== null) clearTimeout(restoreTimer);
+      restoreTimer = null;
+      if (!disposed) applySavedScrollTop();
+    };
+    if (!autoScroll.value && restoreScrollTop !== undefined && restoreScrollTop > 0) restoreTimer = setTimeout(restore, 100);
+    restoreFrame = scheduleFrame(restore);
     scrollSaveHandler = debounce(saveFeedState);
     container.addEventListener('scroll', scrollSaveHandler);
   };
 
   return {
-    diagnostics: () => ({ visible: events.value.length, staged: staged.length, dropped: droppedUiEvents.value, frames: Number(flushFrame !== 0) + Number(scrollFrame !== 0) + Number(restoreFrame !== 0) }),
+    diagnostics: () => ({ visible: events.value.length, staged: staged.length, dropped: droppedUiEvents.value, presentationActive, commits, received, timers: Number(flushTimer !== null) + Number(scrollTimer !== null) + Number(restoreTimer !== null), frames: Number(flushFrame !== 0) + Number(scrollFrame !== 0) + Number(restoreFrame !== 0) }),
     events,
+    imagesEnabled,
+    renderLimit,
     filter,
     searchQuery,
     topViewers,
@@ -338,6 +440,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     droppedUiEvents,
     streamContainerRef,
     resetEvents,
+    setPresentationActive,
     scrollToBottom,
     handleToggleAutoScroll,
     setFilter,

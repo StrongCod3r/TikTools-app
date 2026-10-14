@@ -27,6 +27,7 @@ function getAvatarColor(username: string): string {
 
 type EventCardProps = {
   event: DisplayEvent;
+  imagesEnabled?: boolean;
   locale?: Locale;
   /** Opens the user card for the event author. */
   onAuthorClick?: (user: {
@@ -72,7 +73,7 @@ const timeFormatters = {
   es: new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }),
 };
 
-function renderEventCard({ event, locale = 'en', onAuthorClick }: EventCardProps) {
+function renderEventCard({ event, locale = 'en', imagesEnabled = true, onAuthorClick }: EventCardProps) {
   const cleanHandle = event.author.replace(/^@+/, '');
   const level = event.level ?? 1;
   const openAuthor = (): void => {
@@ -102,7 +103,7 @@ function renderEventCard({ event, locale = 'en', onAuthorClick }: EventCardProps
         <UserAvatar
           uniqueId={cleanHandle}
           nickname={event.nickname}
-          avatarUrl={event.avatarUrl}
+          avatarUrl={imagesEnabled ? event.avatarUrl : undefined}
           fallbackStyle={{ background: getAvatarColor(cleanHandle) }}
         />
       </button>
@@ -133,7 +134,7 @@ function renderEventCard({ event, locale = 'en', onAuthorClick }: EventCardProps
             <span class="tt-chat-text">{text}</span>
           ) : event.kind === 'gift' ? (
             <span class="tt-gift-text">
-              {event.giftDetails?.imageUrl ? (
+              {imagesEnabled && event.giftDetails?.imageUrl ? (
                 <img
                   class="tt-gift-img"
                   src={event.giftDetails.imageUrl}
@@ -148,15 +149,11 @@ function renderEventCard({ event, locale = 'en', onAuthorClick }: EventCardProps
                     const fallback = img.nextElementSibling as HTMLElement | null;
                     if (fallback) fallback.style.display = 'inline-flex';
                   }}
-                  onLoad={() => {
-                    // debug: image loaded successfully
-                    // console.log('[gift-img-loaded]', event.giftDetails?.name);
-                  }}
                 />
               ) : null}
               <span
                 class="tt-gift-icon"
-                style={{ display: event.giftDetails?.imageUrl ? 'none' : 'inline-flex' }}
+                style={{ display: imagesEnabled && event.giftDetails?.imageUrl ? 'none' : 'inline-flex' }}
                 title={event.giftDetails?.name || 'Gift'}
               >
                 <IconGift />
@@ -191,7 +188,7 @@ function renderEventCard({ event, locale = 'en', onAuthorClick }: EventCardProps
 // Stateful components skip updates when their immutable event and other
 // props are unchanged, even as the parent appends new feed entries.
 export const EventCard = defineVueComponent<EventCardProps>(
-  ['event', 'locale', 'onAuthorClick'],
+  ['event', 'locale', 'imagesEnabled', 'onAuthorClick'],
   (props) => () => renderEventCard(props),
 );
 

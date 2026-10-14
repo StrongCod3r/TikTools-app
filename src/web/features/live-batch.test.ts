@@ -209,3 +209,61 @@ test('message IDs expire after the replay age limit', () => {
     uninstallFrameControl();
   }
 });
+
+test('hidden feed cancels staged commits and returns with a bounded discontinuity', () => {
+  installFrameControl();
+  const control = createControl();
+  const live = useLive(control.control, { systemAuthor: () => 'System' });
+  const send = (id: number) => control.handlers.get('live.ui-event')?.forEach((handler) =>
+    handler({ event: { kind: 'chat', author: 'alice', text: String(id), msgId: String(id) } } as never));
+  send(0);
+  live.setPresentationActive(false);
+  const before = live.events.value;
+  for (let i = 1; i <= 10_000; i += 1) send(i);
+  runFrames();
+  expect(live.events.value).toBe(before);
+  expect(live.diagnostics().staged).toBe(0);
+  expect(live.diagnostics().commits).toBe(0);
+  expect(live.droppedUiEvents.value).toBe(10_001);
+  live.setPresentationActive(true);
+  send(10_001);
+  runFrames();
+  expect(live.events.value).toHaveLength(2);
+  expect(live.events.value[0]?.text).toContain('Feed resumed');
+  live.dispose();
+  uninstallFrameControl();
+});
+
+test('a stalled native frame clock commits via one bounded timeout and disposal cancels it', async () => {
+  installFrameControl();
+  const control = createControl();
+  const live = useLive(control.control, { systemAuthor: () => 'System' });
+  control.emit('live.ui-event', chatEvent('stalled-clock', 'alice', 1) as never);
+  expect(live.events.value).toHaveLength(0);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  expect(live.events.value).toHaveLength(1);
+  expect(live.diagnostics().commits).toBe(1);
+  runFrames();
+  expect(live.diagnostics().commits).toBe(1);
+  control.emit('live.ui-event', chatEvent('stalled-clock', 'alice', 2) as never);
+  live.dispose();
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  expect(live.diagnostics().commits).toBe(1);
+  expect(live.diagnostics().timers).toBe(0);
+  uninstallFrameControl();
+});
+
+test('feed counts source-bus and transport shedding separately without counting suspension twice', () => {
+  installFrameControl();
+  const control = createControl();
+  const live = useLive(control.control, { systemAuthor: () => 'System' });
+  control.emit('ui.projection.stats', { feedSuspended: 0, feedBusDropped: 0, feedForwarded: 0 } as never);
+  control.emit('live.ui-event', { ...chatEvent('sequence', 'alice', 1), sequence: 1 } as never);
+  control.emit('live.ui-event', { ...chatEvent('sequence', 'alice', 2), sequence: 4 } as never);
+  control.emit('ui.projection.stats', { feedSuspended: 5, feedBusDropped: 3, feedForwarded: 4 } as never);
+  expect(live.droppedUiEvents.value).toBe(10);
+  control.emit('ui.projection.stats', { feedSuspended: 5, feedBusDropped: 3, feedForwarded: 4 } as never);
+  expect(live.droppedUiEvents.value).toBe(10);
+  live.dispose();
+  uninstallFrameControl();
+});
