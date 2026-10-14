@@ -1,4 +1,5 @@
 <script lang="tsx">
+import { defineVueComponent } from '../vue/component.ts';
 import type { DisplayEvent } from '../types.ts';
 import { t, type Locale } from '../i18n.ts';
 import { IconBolt, IconGift, IconHeart } from './icons.vue';
@@ -66,7 +67,12 @@ function localizedText(event: DisplayEvent, locale: Locale): string {
   }
 }
 
-export function EventCard({ event, locale = 'en', onAuthorClick }: EventCardProps) {
+const timeFormatters = {
+  en: new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit' }),
+  es: new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }),
+};
+
+function renderEventCard({ event, locale = 'en', onAuthorClick }: EventCardProps) {
   const cleanHandle = event.author.replace(/^@+/, '');
   const level = event.level ?? 1;
   const openAuthor = (): void => {
@@ -82,10 +88,7 @@ export function EventCard({ event, locale = 'en', onAuthorClick }: EventCardProp
 
   const text = localizedText(event, locale);
 
-  const timeLabel = new Date(event.receivedAt).toLocaleTimeString(locale === 'es' ? 'es-ES' : 'en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-  });
+  const timeLabel = timeFormatters[locale].format(event.receivedAt);
 
   return (
     <div class={`tiktok-chat-row ${event.kind}`}>
@@ -184,6 +187,13 @@ export function EventCard({ event, locale = 'en', onAuthorClick }: EventCardProp
     </div>
   );
 }
+
+// Stateful components skip updates when their immutable event and other
+// props are unchanged, even as the parent appends new feed entries.
+export const EventCard = defineVueComponent<EventCardProps>(
+  ['event', 'locale', 'onAuthorClick'],
+  (props) => () => renderEventCard(props),
+);
 
 export default EventCard;
 </script>

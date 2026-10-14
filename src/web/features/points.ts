@@ -1,4 +1,4 @@
-import { ref } from 'vue';
+import { ref, shallowRef } from 'vue';
 
 import type { ControlClient } from '../platform/control-client.ts';
 import { errorMessage } from '../platform/control-client.ts';
@@ -37,7 +37,9 @@ export interface PointsChangedData {
  * `points.changed` domain event; the legacy push is no longer subscribed. */
 export function usePoints(control: ControlClient) {
   const pointsConfig = ref<PointsConfig>(defaultPointsConfig);
-  const leaderboard = ref<ViewerRecord[]>([]);
+  // Award patches and host snapshots replace the board; unchanged viewers
+  // keep their identity without deep reactive proxies.
+  const leaderboard = shallowRef<ViewerRecord[]>([]);
   const unsubscribers: Array<() => void> = [];
   // Handlers keep their exact control-client overload types; only the
   // unsubscribers are collected so dispose() can release them.

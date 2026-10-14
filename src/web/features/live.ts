@@ -1,4 +1,4 @@
-import { ref, watch } from 'vue';
+import { ref, shallowRef, watch } from 'vue';
 
 import type { GiftCatalogEntry, UiEvent } from '../../shared/messages.ts';
 import type { ControlClient } from '../platform/control-client.ts';
@@ -79,18 +79,20 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   // blob; the scroll position restores once the stream has
   // content tall enough to hold it.
   const savedFeed = loadViewState().feed;
-  const events = ref<DisplayEvent[]>([]);
+  // Snapshots are replaced, never mutated after publication. Keep entries
+  // raw so retained cards preserve identity and avoid deep proxy tracking.
+  const events = shallowRef<DisplayEvent[]>([]);
   const filter = ref<EventFilter>(savedFeed?.filter ?? 'all');
   const searchQuery = ref(savedFeed?.searchQuery ?? '');
-  const topViewers = ref<TopViewerPayload[]>([]);
+  const topViewers = shallowRef<TopViewerPayload[]>([]);
   const liveViewers = ref(0);
-  const giftCatalog = ref<GiftCatalogEntry[]>([]);
+  const giftCatalog = shallowRef<GiftCatalogEntry[]>([]);
   const autoScroll = ref(savedFeed?.autoScroll ?? true);
   const unreadCount = ref(0);
   /** UI-side shed counter: staged events dropped while the tab is
    *  backgrounded or frames stall. Backend delivery is unaffected. */
   const droppedUiEvents = ref(0);
-  const nextEventId = ref(0);
+  let nextEventId = 0;
   const streamContainerRef = ref<HTMLDivElement | null>(null);
   let restoreScrollTop = savedFeed?.scrollTop;
   let scrollSaveHandler: DebouncedCallback | null = null;
@@ -164,7 +166,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   };
 
   const resetEvents = (): void => {
-    nextEventId.value = 0;
+    nextEventId = 0;
     staged = [];
     events.value = [];
     unreadCount.value = 0;
@@ -218,7 +220,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     // replay must not re-render, count as unread, or re-fire
     // the chat observer.
     if (disposed || isDuplicateEvent(event, Date.now(), seenMsgIds, seenChecksums)) return;
-    stageEvent({ ...event, id: nextEventId.value++, receivedAt: Date.now() });
+    stageEvent({ ...event, id: nextEventId++, receivedAt: Date.now() });
   };
 
   // Live feed state arrives only via authoritative domain topics; the
@@ -251,7 +253,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
       kind: 'member' as const,
       author: callbacks.systemAuthor(),
       text: data.message,
-      id: nextEventId.value++,
+      id: nextEventId++,
       receivedAt: Date.now(),
     });
   }));
@@ -303,13 +305,15 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   };
   unsubscribers.push(watch(events, applySavedScrollTop));
   const setStreamContainerRef = (element: Element | null): void => {
+    const next = element instanceof HTMLDivElement ? element : null;
+    if (streamContainerRef.value === next) return;
     const previous = streamContainerRef.value;
     if (previous && scrollSaveHandler) {
       previous.removeEventListener('scroll', scrollSaveHandler);
       scrollSaveHandler.cancel();
       scrollSaveHandler = null;
     }
-    streamContainerRef.value = element instanceof HTMLDivElement ? element : null;
+    streamContainerRef.value = next;
     const container = streamContainerRef.value;
     if (!container) return;
     // Restore the position the user left when auto-scroll is

@@ -1,6 +1,6 @@
 <script lang="tsx">
 import { ref } from 'vue';
-import type { VNode } from 'vue';
+import type { VNode, VNodeRef } from 'vue';
 
 import { EventCard } from '../components/event-card.vue';
 import { IconArrowDown, IconBolt, IconChat, IconChevronLeft, IconChevronRight, IconDot, IconGift, IconHeart, IconPause, IconRadio, IconTrash, IconUsers } from '../components/icons.vue';
@@ -143,7 +143,7 @@ function renderFeedView({
 
       <div class="feed-layout">
         <section class="feed-main">
-          <div class="feed-stream" ref={(element) => streamContainerRef(element as Element | null)}>
+          <div class="feed-stream" ref={streamContainerRef as VNodeRef}>
             {filteredEvents.length === 0 ? (
               <div class="feed-empty">
                 <div class="empty-icon empty-icon--illustration">
