@@ -1359,14 +1359,17 @@ impl PluginInstance for FakeInstance {
             .map_err(|error| PluginLoaderError::Runtime(error.to_string()))?;
         let response = match request.get("type").and_then(Value::as_str) {
             Some("poll") => {
-                if let Some(gate) = self
+                // Drop the shared gate-map lock before waiting. In Rust
+                // 2021 an if-let scrutinee's temporaries live through its
+                // body, which would block sibling polls on this mutex.
+                let gate = self
                     .state
                     .poll_gates
                     .lock()
                     .expect("fake gates poisoned")
                     .get(&self.id)
-                    .cloned()
-                {
+                    .cloned();
+                if let Some(gate) = gate {
                     // Rendezvous for ordering tests: block until the test
                     // opens the gate (a fail-safe timeout keeps a forgotten
                     // gate from hanging the suite).
