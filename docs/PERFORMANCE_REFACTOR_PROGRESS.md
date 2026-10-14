@@ -383,3 +383,17 @@ Phase 3 commit: `pending` (this batch).
 - `ed3e042`: loss-aware graceful LIVE ingress shutdown (phase 1 of this refactor).
 - `961eb26`: durable points FIFO ordering and SQLite correctness (phase 2).
 - This batch: plugin worker lifecycle and isolation (phase 3).
+
+
+### October 2026 desktop transport follow-up
+
+Shared pre-Winit admission now enforces count/byte budgets, main inbound RPC has
+128 permits, and prepared outbound batches carry generation/sequence acknowledgments.
+Native plugin output is bounded and batched; Linux terminal teardown disconnects
+the private IPC signal without changing native destroy ordering or the external
+`mem::forget` workaround. Frontend feature and iframe owners dispose owned work.
+
+See [measurements and remaining gates](benchmarks/2026-10-13/REPORT.md). The user
+requested ending the task and skipping remaining complicated tests. Windows,
+controlled LIVE matrices and repeated final-source release measurements remain
+unvalidated; earlier prototype results must not be relabeled as final builds.
