@@ -98,3 +98,89 @@ Native WebView open/close smoke testing was explicitly enabled on the configured
 display and passed. The main Playwright suite had 3 passed and 36 failed. The
 navigation `globals.list` fake-host failure was reproduced on the exact `79dd1ab`
 baseline; other failures are untriaged and are not called pre-existing or passed.
+
+## 2026-10-13 desktop transport and native retention follow-up
+
+The new process-attributed native reproducer, measurements, validation and remaining
+work are recorded in [the benchmark report](benchmarks/2026-10-13/REPORT.md).
+This does not close the full Windows/real-LIVE acceptance matrix.
+
+The Linux sampler preserves its existing columns and appends build identity, host
+PID, process/thread counts, a process-tree RSS sum and aggregate desktop diagnostics.
+A process-tree RSS sum **includes shared pages multiple times**; it is not private
+memory or a unique physical-memory total. Compare the separate host/renderer
+columns; do not interpret their sum as PSS. A missing or reused host remains unknown,
+not zero RSS. Process arguments and environment variables are never collected.
+Health data is accepted only for the requested host PID. Missing health does not
+prevent OS sampling (use `--cli /nonexistent` for an isolated native test harness).
+Health polling can extend the requested interval; use the actual elapsed column.
+
+```sh
+python3 scripts/profile-live-memory.py --pid HOST_PID --samples 300 --interval 1 \
+  --commit VERIFIED_EXECUTABLE_SHA --label release-baseline --phase idle > idle.csv
+# Windows, with optional dependency installed explicitly:
+py -m pip install psutil
+py scripts/profile-live-memory-windows.py --pid HOST_PID --samples 300 --interval 1 \
+  --cli target/release/tiktools.exe --commit VERIFIED_EXECUTABLE_SHA \
+  --label release-baseline --phase idle > idle-windows.csv
+```
+
+Windows association uses parent PID and creation time, including WebView2 children;
+unrelated WebView2 instances are excluded. Windows sampling itself remains untested
+on a Windows runner. If `health` says `pid_mismatch`, check which host the CLI
+endpoint reaches; the sampler deliberately refuses to combine two hosts.
+`host_exited_or_reused` means the original process identity is gone. A truncated
+tree has reached the 256-process sampler bound; it is not a complete tree total.
+
+`system.health.desktop` contains bounded mailbox/outbox counts, bytes, high-water
+marks and drops; inbound capacity/in-flight/rejections/deadlines; page generation;
+evaluation calls/bytes/errors; plugin window/backlog/in-flight counters; and native
+IPC disconnections/external retained handles. UI-owned snapshots update every ten
+seconds. `TIKTOOLS_DIAGNOSTICS=1` enables aggregate-only desktop logging at the same
+cadence; normal runs emit no periodic diagnostic log. No payloads are included.
+
+Main outbound admission is shared by legacy pushes, domain forwarding and RPC
+responses before Winit. Reliable capacity remains 4,096 / 16 MiB; lossy capacity is
+512 / 8 MiB, with a 1 MiB serialized item limit. A batch is at most 128 / 4 MiB.
+Overflow fails the reliable transport rather than retaining an overflowing item.
+Lossy shedding records `event.gap`/resync. Plugin progress is reliable. Bounded
+serialization stops before allocating an oversized JSON output. One producer-owned
+source value and a serialized candidate may still exist during admission.
+
+Main inbound capacity is 128 requests, each subject to the existing request byte
+limit. The 30-second deadline reports uncertain completion; it **does not cancel an
+irreversible operation**. Admission remains held until that operation settles and
+no second response is sent. Refresh authoritative state before retrying. Uncooperative
+operations can therefore exhaust these finite slots; process isolation/cooperative
+cancellation is still a separate concern. Responses are fenced by page generation.
+
+Native broker permits cover execution **and** queued response/subscription commands:
+at most 128 calls / 256 commands per window, responses limited to 1 MiB. There are
+at most 32 open plugin windows. Per-window output uses the reliable 4,096 / 16 MiB
+policy; arbitrary plugin events have no general resync contract and stay reliable.
+At most four windows get one capped batch each per tick, in round-robin order.
+A failed plugin output transport closes its owner instead of retrying side effects.
+
+Native stress and event-delivery exercises require a real display:
+
+```sh
+TIKTOOLS_TEST_NATIVE_WINDOWS=1 TIKTOOLS_NATIVE_SMOKE_CYCLES=100 \
+  TIKTOOLS_NATIVE_SMOKE_CLEANUP_SECONDS=30 \
+  node scripts/cargo-with-linker.mjs test -p tiktools-desktop --release --locked smoke -- --nocapture
+TIKTOOLS_TEST_NATIVE_WINDOWS=1 TIKTOOLS_NATIVE_SMOKE_CYCLES=1 \
+  TIKTOOLS_NATIVE_SMOKE_MESSAGES=100000 \
+  node scripts/cargo-with-linker.mjs test -p tiktools-desktop --release --locked smoke -- --nocapture
+```
+
+Cycles accept 1..500; event exercises accept up to 100,000 messages and acknowledge
+ordered receipt from actual page JavaScript. For an isolated teardown A/B,
+`TIKTOOLS_NATIVE_SMOKE_RETAIN_IPC=1` is a **test-binary-only** switch preserving the
+old GTK signal ownership. It is unavailable in application builds. Always sample
+from process start and keep the host alive during post-close cleanup.
+
+GTK teardown unregisters the IPC message name and disconnects only
+`script-message-received` handlers on the private content manager before dropping
+Wry. The native child/display-sync/parent destroy ordering and external-destroy
+`mem::forget` workarounds are preserved. External forgotten handles are counted;
+repeated external destruction still represents retained application handles and
+has not been proven safe to replace with unconditional drop.
