@@ -229,14 +229,19 @@ impl DatabaseManager {
         Ok(())
     }
 
-    /// Applies one op outside a batch (synchronous saturation fallback and
-    /// per-op retry after a failed batch).
+    /// Applies one op on its own transaction. The writer uses this for the
+    /// per-op fallback after a failed batch: an op that cannot be applied
+    /// as a whole is retried as a whole and never half-applied, so a retry
+    /// can never re-insert the award row it already wrote.
     pub(crate) fn apply_points_op(
         &self,
         connection: &mut Connection,
         op: &PointsWriteOp,
     ) -> Result<(), DatabaseError> {
-        apply_points_op_on(connection, op)
+        let transaction = connection.transaction()?;
+        apply_points_op_on(&transaction, op)?;
+        transaction.commit()?;
+        Ok(())
     }
 }
 
@@ -269,10 +274,7 @@ fn row_to_viewer_value(row: &rusqlite::Row<'_>) -> Result<Value, rusqlite::Error
 /// nonzero award; resets and adjustments keep their exact historical
 /// semantics (adjust touches points/level only, full reset clears the
 /// transaction history, single reset appends a zero-amount marker row).
-fn apply_points_op_on(
-    connection: &mut Connection,
-    op: &PointsWriteOp,
-) -> Result<(), DatabaseError> {
+fn apply_points_op_on(connection: &Connection, op: &PointsWriteOp) -> Result<(), DatabaseError> {
     match op {
         PointsWriteOp::Save {
             viewer,
@@ -324,10 +326,7 @@ fn apply_points_op_on(
     }
 }
 
-fn upsert_viewer_state(
-    connection: &mut Connection,
-    viewer: &ViewerState,
-) -> Result<(), DatabaseError> {
+fn upsert_viewer_state(connection: &Connection, viewer: &ViewerState) -> Result<(), DatabaseError> {
     connection.prepare(UPSERT_VIEWER_SQL)?.execute(params![
         viewer.unique_id.as_str(),
         viewer.user_id.as_deref(),

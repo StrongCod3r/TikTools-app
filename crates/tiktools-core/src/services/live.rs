@@ -1,3 +1,4 @@
+#[cfg(not(feature = "native-tiktok"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "native-tiktok")]
@@ -10,6 +11,7 @@ use tiktools_tiktok::{
 
 /// Owns the live transport without exposing a desktop or WebView type.
 pub struct LiveService {
+    #[cfg(not(feature = "native-tiktok"))]
     connected: AtomicBool,
     #[cfg(feature = "native-tiktok")]
     client: Arc<NativeTikTokClient>,
@@ -29,7 +31,6 @@ impl LiveService {
     #[cfg(feature = "native-tiktok")]
     pub fn with_native_config(config: NativeTikTokConfig) -> Self {
         Self {
-            connected: AtomicBool::new(false),
             client: Arc::new(NativeTikTokClient::new(config)),
         }
     }
@@ -42,7 +43,14 @@ impl LiveService {
     }
 
     pub fn is_connected(&self) -> bool {
-        self.connected.load(Ordering::Acquire)
+        #[cfg(feature = "native-tiktok")]
+        {
+            self.client.connection_snapshot().state == tiktools_tiktok::ConnectionState::Connected
+        }
+        #[cfg(not(feature = "native-tiktok"))]
+        {
+            self.connected.load(Ordering::Acquire)
+        }
     }
 
     #[cfg(feature = "native-tiktok")]
@@ -51,12 +59,35 @@ impl LiveService {
     }
 
     #[cfg(feature = "native-tiktok")]
+    pub(crate) fn subscribe_stamped(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<tiktools_tiktok::StampedClientEvent> {
+        self.client.subscribe_stamped()
+    }
+
+    #[cfg(feature = "native-tiktok")]
+    pub fn connection_snapshot(&self) -> tiktools_tiktok::ConnectionSnapshot {
+        self.client.connection_snapshot()
+    }
+
+    #[cfg(feature = "native-tiktok")]
     pub async fn connect(&self, request: ConnectRequest) -> Result<ConnectionInfo, TikTokError> {
-        let result = self.client.connect_native(request).await;
-        if result.is_ok() {
-            self.connected.store(true, Ordering::Release);
-        }
-        result
+        self.client.connect_native(request).await
+    }
+
+    #[cfg(feature = "native-tiktok")]
+    pub(crate) async fn connect_generation(
+        &self,
+        request: ConnectRequest,
+    ) -> Result<(u64, ConnectionInfo), TikTokError> {
+        self.client.connect_generation(request).await
+    }
+    #[cfg(feature = "native-tiktok")]
+    pub(crate) async fn pick_generation(
+        &self,
+        session_cookie: String,
+    ) -> Result<(u64, ConnectionInfo), TikTokError> {
+        self.client.pick_generation(session_cookie).await
     }
 
     #[cfg(feature = "native-tiktok")]
@@ -72,6 +103,7 @@ impl LiveService {
         if let Err(error) = self.client.disconnect_native().await {
             tracing::debug!(%error, "native TikTok client disconnect failed");
         }
+        #[cfg(not(feature = "native-tiktok"))]
         self.connected.store(false, Ordering::Release);
     }
 }

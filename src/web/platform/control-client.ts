@@ -48,6 +48,7 @@ type RpcResponseWire = {
 };
 
 const DEFAULT_TIMEOUT_MS = 150_000;
+const MAX_PENDING_CALLS = 128;
 
 /**
  * Byte limit for one serialized WebView RPC request. Must match
@@ -65,6 +66,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export interface ControlClient {
+  diagnostics?(): { pending: number; capacity: number; overloaded: number };
   attach(): void;
   detach(): void;
   call<T = unknown>(method: string, params?: RpcParams): Promise<T>;
@@ -85,6 +87,8 @@ export interface ControlClient {
 export function createControlClient(options?: { timeoutMs?: number }): ControlClient {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let nextId = 0;
+  let overloaded = 0;
+  let detached = false;
   const pending = new Map<number | string, PendingCall>();
   const topics = new Map<string, Set<TopicHandler<unknown>>>();
   const pushes = new Map<string, Set<PushHandler>>();
@@ -178,7 +182,9 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
   };
 
   return {
+    diagnostics: () => ({ pending: pending.size, capacity: MAX_PENDING_CALLS, overloaded }),
     attach(): void {
+      detached = false;
       attachedReceive = receive;
       window.__webview_on_message__ = receive;
       window.__tiktools_receive_batch__ = receiveBatch;
@@ -188,6 +194,7 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
     },
 
     detach(): void {
+      detached = true;
       if (window.__webview_on_message__ === attachedReceive) {
         window.__webview_on_message__ = undefined;
       }
@@ -208,6 +215,17 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
 
     call<T = unknown>(method: string, params?: RpcParams): Promise<T> {
       return new Promise<T>((resolve, reject) => {
+        if (detached) {
+          reject(new ControlCallError('transport', 'control client detached'));
+          return;
+        }
+        if (pending.size >= MAX_PENDING_CALLS) {
+          overloaded += 1;
+          const error = new ControlCallError('overloaded', 'control client pending request limit reached');
+          reportTransportError(error.message);
+          reject(error);
+          return;
+        }
         if (!window.ipc) {
           reject(new ControlCallError('transport', 'native host is unavailable'));
           return;
@@ -264,6 +282,7 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
       handlers.add(erased);
       return () => {
         handlers.delete(erased);
+        if (handlers.size === 0 && topics.get(topic) === handlers) topics.delete(topic);
       };
     },
 
@@ -276,6 +295,7 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
       handlers.add(handler);
       return () => {
         handlers.delete(handler);
+        if (handlers.size === 0 && pushes.get(type) === handlers) pushes.delete(type);
       };
     },
 

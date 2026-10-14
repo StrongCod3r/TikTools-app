@@ -70,4 +70,8 @@ pub(crate) async fn run_plugin_queue(
         )
         .await;
     }
+    receiver.close();
+    while receiver.try_recv().is_ok() {
+        core.record_plugin_taken(&plugin_id);
+    }
 }

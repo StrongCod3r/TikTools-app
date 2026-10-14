@@ -96,24 +96,181 @@ impl AppCore {
         let task = runtime.spawn(async move {
             let mut ticker = tokio::time::interval(PLUGIN_POLL_INTERVAL);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut emit_rx = core.plugins.subscribe_emitted_events();
             loop {
                 tokio::select! {
+                    biased;
                     _ = shutdown.notified() => break,
                     _ = ticker.tick() => core.poll_plugin_events().await,
+                }
+            }
+        });
+        *recover_mutex(&self.plugin_state.poll_task, "plugin poll task") = Some(task);
+        // Subscribe before spawning so the first push cannot race startup.
+        // One independently owned receiver; no polling future can starve it.
+        let mut emit_rx = self.plugins.subscribe_emitted_events();
+        let core = Arc::clone(self);
+        let shutdown = self.plugin_state.observer_shutdown.clone();
+        let task = runtime.spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => break,
                     emitted = emit_rx.recv() => match emitted {
                         Ok(emitted) => core.handle_pushed_event(emitted).await,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            tracing::warn!(
-                                skipped,
-                                "push bus lagged; dropped pushed events"
-                            );
+                            core.record_event_gap();
+                            tracing::warn!(skipped, "push bus lagged; event gap recorded");
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     },
                 }
             }
         });
-        *recover_mutex(&self.plugin_state.poll_task, "plugin poll task") = Some(task);
+        *recover_mutex(&self.plugin_state.push_task, "plugin push task") = Some(task);
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    use std::{path::Path, sync::atomic::AtomicBool, time::Duration};
+    use tiktools_plugin_api::{PluginManifest, PluginRuntimeKind};
+    use tiktools_plugin_loader::{
+        ManagedWorker, PluginInstance, PluginLoaderError, PluginRoot, PluginRuntime, PluginSource,
+        RuntimeRegistry, WorkerContext,
+    };
+
+    struct SlowRuntime {
+        polling: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+        sender: Arc<
+            Mutex<Option<tokio::sync::broadcast::Sender<tiktools_plugin_loader::EmittedEvent>>>,
+        >,
+    }
+    struct SlowInstance {
+        polling: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    }
+    impl PluginInstance for SlowInstance {
+        fn id(&self) -> &str {
+            "isolation"
+        }
+        fn handle_message(&mut self, _: &[u8]) -> Result<Vec<u8>, PluginLoaderError> {
+            self.polling.store(true, Ordering::Release);
+            while !self.release.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(br#"{"events":[]}"#.to_vec())
+        }
+        fn shutdown(&mut self) -> Result<(), PluginLoaderError> {
+            Ok(())
+        }
+    }
+    impl PluginRuntime for SlowRuntime {
+        fn kind(&self) -> PluginRuntimeKind {
+            PluginRuntimeKind::Process
+        }
+        fn load(
+            &self,
+            _: &PluginManifest,
+            _: &Path,
+        ) -> Result<Box<dyn PluginInstance>, PluginLoaderError> {
+            Ok(Box::new(SlowInstance {
+                polling: Arc::clone(&self.polling),
+                release: Arc::clone(&self.release),
+            }))
+        }
+        fn spawn_worker(
+            &self,
+            _: &PluginManifest,
+            _: &Path,
+            ctx: &WorkerContext,
+        ) -> Option<Result<ManagedWorker, PluginLoaderError>> {
+            *self.sender.lock().unwrap() = Some(ctx.emit_sender());
+            None
+        }
+    }
+    struct NoopEmitter;
+    impl HostEmitter for NoopEmitter {
+        fn emit(&self, _: HostMessage) {}
+    }
+
+    #[tokio::test]
+    async fn slow_poll_does_not_starve_push_and_both_owners_join() {
+        let root =
+            std::env::temp_dir().join(format!("tiktools-poll-isolation-{}", fastrand::u128(..)));
+        let directory = root.join("isolation");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("entry.bin"), b"fixture").unwrap();
+        std::fs::write(
+            directory.join("plugin.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 3, "id": "isolation", "name": "Isolation", "version": "1.0.0",
+                "runtime": "process", "entry": "entry.bin", "capabilities": ["events.publish"],
+                "eventTypes": [{"type": "isolation.tick", "title": {"default": "Tick"}}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let polling = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let sender = Arc::new(Mutex::new(None));
+        let mut runtimes = RuntimeRegistry::default();
+        runtimes.register(Arc::new(SlowRuntime {
+            polling: Arc::clone(&polling),
+            release: Arc::clone(&release),
+            sender: Arc::clone(&sender),
+        }));
+        let manager = Arc::new(PluginManager::with_runtimes(
+            vec![PluginRoot {
+                path: root.clone(),
+                source: PluginSource::Development,
+            }],
+            runtimes,
+        ));
+        manager.scan().unwrap();
+        manager.start("isolation").unwrap();
+        let mut app = AppCore::new(Arc::new(NoopEmitter));
+        app.plugins = manager;
+        let core = Arc::new(app);
+        let mut events = core.events.subscribe_domain();
+        core.spawn_plugin_event_poll(&tokio::runtime::Handle::current());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !polling.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        sender
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(tiktools_plugin_loader::EmittedEvent {
+                plugin_id: "isolation".into(),
+                event_type: "isolation.tick".into(),
+                data: json!({"value": 1}),
+            })
+            .unwrap();
+        let outcome = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                if matches!(
+                    events.recv().await.unwrap(),
+                    crate::events::DomainEvent::PluginEvent { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await;
+        // Release before asserting so a failed regression cannot retain a
+        // blocked fixture thread or make cleanup hang.
+        release.store(true, Ordering::Release);
+        core.shutdown().await;
+        assert!(outcome.is_ok(), "push was starved by the outstanding poll");
+        assert!(recover_mutex(&core.plugin_state.poll_task, "poll").is_none());
+        assert!(recover_mutex(&core.plugin_state.push_task, "push").is_none());
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

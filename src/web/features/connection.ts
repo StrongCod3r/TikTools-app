@@ -37,6 +37,14 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
   const recents = ref<string[]>(getRecentUsernames());
   const status = ref<ConnectionStatus>('idle');
   const error = ref('');
+  let revision = 0;
+  let statusRefresh = 0;
+  const unsubscribers: Array<() => void> = [];
+  const subscribe: ControlClient['onTopic'] = (topic, handler) => {
+    const unsubscribe = control.onTopic(topic, handler);
+    unsubscribers.push(unsubscribe);
+    return unsubscribe;
+  };
 
   const noteCreatorSeen = (clean: string, persist: boolean): void => {
     activeCreator.value = clean;
@@ -55,29 +63,34 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     }
   };
 
-  control.onTopic<{ attempt: number; delayMs: number }>('live.reconnecting', () => {
+  subscribe<{ attempt: number; delayMs: number }>('live.reconnecting', () => {
+    revision += 1;
     status.value = 'retrying';
   });
-  control.onTopic<{ phase: string; message: string }>('live.error', (data) => {
+  subscribe<{ phase: string; message: string }>('live.error', (data) => {
     status.value = 'error';
     error.value = data.message;
   });
-  control.onTopic<{ uniqueId?: string | null }>('live.connected', (data) => {
+  subscribe<{ uniqueId?: string | null }>('live.connected', (data) => {
+    revision += 1;
     status.value = 'connected';
     if (data.uniqueId) noteCreatorSeen(normalizeUsername(data.uniqueId), false);
   });
-  control.onTopic('live.disconnected', () => {
+  subscribe('live.disconnected', () => {
+    revision += 1;
     status.value = 'disconnected';
   });
 
   const requestConnect = async (target: string, sessionCookie: string): Promise<void> => {
+    const requestRevision = ++revision;
     try {
       const result = await control.call<LiveStatusResult>('live.connect', {
         uniqueId: target,
         sessionCookie,
       });
-      if (!result.connected) status.value = 'disconnected';
+      if (requestRevision === revision && !result.connected) status.value = 'disconnected';
     } catch (failure) {
+      if (requestRevision !== revision) return;
       status.value = 'error';
       error.value = errorMessage(failure);
     }
@@ -104,6 +117,7 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
   };
 
   const handlePickLive = (): void => {
+    const requestRevision = ++revision;
     error.value = '';
     callbacks.resetFeed();
     status.value = 'connecting';
@@ -113,6 +127,7 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     void control
       .call<LiveStatusResult>('live.pick', { sessionCookie: cookie.value.trim() })
       .then((result) => {
+        if (requestRevision !== revision) return;
         if (!result.connected) {
           status.value = 'disconnected';
           activeCreator.value = previousCreator;
@@ -123,6 +138,7 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
         }
       })
       .catch((failure: unknown) => {
+        if (requestRevision !== revision) return;
         status.value = 'error';
         error.value = errorMessage(failure);
         activeCreator.value = previousCreator;
@@ -130,7 +146,9 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
   };
 
   const handleDisconnect = (): void => {
+    const requestRevision = ++revision;
     void control.call('live.disconnect', {}).catch((failure: unknown) => {
+      if (requestRevision !== revision) return;
       error.value = errorMessage(failure);
     });
     status.value = 'disconnected';
@@ -156,8 +174,11 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
   // skipped connect/disconnect/error transitions, so the status pill is
   // rebuilt from the host instead of reconstructed from guesses.
   const refreshStatus = async (): Promise<void> => {
+    const requestRevision = revision;
+    const refresh = ++statusRefresh;
     try {
       const result = await control.call<LiveStatusResult>('live.status', {});
+      if (requestRevision !== revision || refresh !== statusRefresh) return;
       if (result.connected) {
         status.value = 'connected';
         if (result.uniqueId) noteCreatorSeen(normalizeUsername(result.uniqueId), false);
@@ -186,5 +207,6 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     setUniqueId,
     setCookie,
     refreshStatus,
+    dispose: () => { revision += 1; while (unsubscribers.length > 0) unsubscribers.pop()?.(); },
   };
 }

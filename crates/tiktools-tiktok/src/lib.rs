@@ -14,17 +14,17 @@
 
 use std::{
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
+    sync::Arc,
     time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::broadcast;
+
+mod lifecycle;
+pub use lifecycle::{ConnectionSnapshot, ConnectionState, StampedClientEvent};
 
 pub mod discovery;
 pub mod events;
@@ -155,24 +155,18 @@ pub trait TikTokClient: Send + Sync {
 /// task; the public object is a cheap, thread-safe control handle.
 pub struct NativeTikTokClient {
     config: NativeTikTokConfig,
-    events: broadcast::Sender<ClientEvent>,
-    active: Mutex<Option<ActiveConnection>>,
-    generation: Arc<AtomicU64>,
-}
-
-struct ActiveConnection {
-    stop: oneshot::Sender<()>,
+    events: lifecycle::EventSender,
+    owner: lifecycle::ConnectionOwner,
 }
 
 impl NativeTikTokClient {
     pub fn new(config: NativeTikTokConfig) -> Self {
         ensure_tls_provider();
-        let (events, _) = broadcast::channel(512);
+        let events = lifecycle::EventSender::new();
         Self {
             config,
             events,
-            active: Mutex::new(None),
-            generation: Arc::new(AtomicU64::new(0)),
+            owner: lifecycle::ConnectionOwner::new(),
         }
     }
 
@@ -184,160 +178,126 @@ impl NativeTikTokClient {
         &self,
         request: ConnectRequest,
     ) -> Result<ConnectionInfo, TikTokError> {
-        self.disconnect_native().await?;
+        self.connect_generation(request).await.map(|(_, info)| info)
+    }
 
-        let unique_id = clean_unique_id(&request.unique_id).ok_or(TikTokError::InvalidCreator)?;
-        tracing::info!(creator = %unique_id, requested_room = ?request.room_id, "starting native TikTok connection");
-        let cookies = resolve_session(&request.session_cookie).await?;
-        tracing::debug!(creator = %unique_id, "TikTok session resolved");
-        let preset = default_preset();
-        let discovery = ttl_live_discovery::DiscoveryClient::new(&preset)
-            .map_err(|error| TikTokError::Discovery(error.to_string()))?
-            .with_session(cookies.to_cookie_string());
+    pub async fn connect_generation(
+        &self,
+        request: ConnectRequest,
+    ) -> Result<(u64, ConnectionInfo), TikTokError> {
+        self.connect_selected(async move { Ok(request) }).await
+    }
 
-        let lookup = match request
-            .room_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-        {
-            Some(room_id) => {
-                if !ttl_sign_core::room::is_usable_room_id(room_id) {
-                    return Err(TikTokError::Discovery("room id is invalid".to_owned()));
-                }
-                None
-            }
-            None => Some(
-                discovery
-                    .room_lookup(&unique_id)
-                    .await
-                    .map_err(|error| TikTokError::Discovery(error.to_string()))?,
-            ),
-        };
-        if let Some(lookup) = lookup.as_ref() {
-            if !lookup.is_live() {
-                return Err(TikTokError::Discovery(format!(
-                    "@{} is not live (status {})",
-                    unique_id, lookup.status
-                )));
-            }
-        }
-        let room_id = request
-            .room_id
-            .as_deref()
-            .map(str::trim)
-            .filter(|id| !id.is_empty())
-            .map(ToOwned::to_owned)
-            .or_else(|| lookup.as_ref().map(|room| room.room_id.clone()))
-            .ok_or_else(|| TikTokError::Discovery("TikTok did not return a room id".to_owned()))?;
-        tracing::info!(creator = %unique_id, room_id = %room_id, "TikTok room resolved");
-
-        // Metadata and gifts are useful but should not make a valid socket
-        // unavailable when one of TikTok's JSON endpoints is temporarily
-        // refused. The stream itself remains the source of live events.
-        let room_info = discovery.room_info(&room_id).await.ok();
-        let gifts = discovery.gift_list(&room_id).await.unwrap_or_default();
-        tracing::debug!(room_id = %room_id, gifts = gifts.len(), "TikTok room metadata loaded");
-        let bundle = load_signing_bundle(&self.config).await?;
-        tracing::debug!(room_id = %room_id, "TikTok signing bundle loaded");
-        let profile = ttl_sign_embedded::Profile {
-            user_agent: Some(preset.user_agent()),
-            cookie: Some(cookies.to_cookie_string()),
-            ..ttl_sign_embedded::Profile::default()
-        };
-        let signer = tokio::task::spawn_blocking(move || {
-            ttl_sign_embedded::EmbeddedSigner::new(bundle, profile)
-                .map_err(|error| TikTokError::Signer(error.to_string()))
+    pub async fn pick_generation(
+        &self,
+        session_cookie: String,
+    ) -> Result<(u64, ConnectionInfo), TikTokError> {
+        self.connect_selected(async move {
+            let cookies = resolve_session(&session_cookie).await?;
+            let client = ttl_live_discovery::DiscoveryClient::new(&default_preset())
+                .map_err(|error| TikTokError::Discovery(error.to_string()))?
+                .with_session(cookies.to_cookie_string());
+            let rooms = client
+                .live_channels("live")
+                .await
+                .map_err(|error| TikTokError::Discovery(error.to_string()))?;
+            let room = rooms
+                .into_iter()
+                .next()
+                .ok_or_else(|| TikTokError::Discovery("TikTok returned no live rooms".into()))?;
+            Ok(ConnectRequest {
+                unique_id: room.unique_id,
+                session_cookie,
+                room_id: Some(room.room_id),
+            })
         })
         .await
-        .map_err(|error| TikTokError::Task(error.to_string()))??;
-        let backend = ttl_sign_headless::HeadlessBackend::new(
-            ttl_sign_headless::HeadlessConfig::new(preset.clone(), cookies.clone()),
-            Box::new(signer),
-        )
-        .map_err(|error| TikTokError::Signer(error.to_string()))?;
-        let connection = ttl_live_ws::ReconnectingConnection::open(
-            Arc::new(backend),
-            &room_id,
-            ttl_live_ws::ConnectConfig::default(),
-            self.config.reconnect.clone(),
-        )
-        .await
-        .map_err(|error| TikTokError::Transport(error.to_string()))?;
-        tracing::info!(room_id = %room_id, "TikTok live WebSocket connected");
+    }
 
-        let info = ConnectionInfo {
-            unique_id: room_info
-                .as_ref()
-                .and_then(|info| {
-                    (!info.owner.unique_id.is_empty()).then(|| info.owner.unique_id.clone())
-                })
-                .or_else(|| lookup.as_ref().map(|room| room.unique_id.clone()))
-                .unwrap_or_else(|| unique_id.clone()),
-            room_id: room_id.clone(),
-            title: room_info
-                .as_ref()
-                .map(|info| info.title.clone())
-                .filter(|title| !title.is_empty())
-                .or_else(|| lookup.as_ref().map(|room| room.title.clone()))
-                .unwrap_or_default(),
-            nickname: room_info
-                .as_ref()
-                .map(|info| info.owner.nickname.clone())
-                .filter(|nickname| !nickname.is_empty())
-                .or_else(|| lookup.as_ref().map(|room| room.nickname.clone()))
-                .unwrap_or_else(|| unique_id.clone()),
-            avatar_url: room_info
-                .as_ref()
-                .map(|info| info.owner.avatar_url.clone())
-                .filter(|url| !url.is_empty()),
-            viewers: room_info
-                .as_ref()
-                .map(|info| info.viewer_count)
-                .unwrap_or_default(),
-            total_users: room_info
-                .as_ref()
-                .map(|info| info.total_viewers)
-                .unwrap_or_default(),
-            gifts: gifts.into_iter().map(gift_info).collect(),
-        };
+    async fn connect_selected(
+        &self,
+        selection: impl std::future::Future<Output = Result<ConnectRequest, TikTokError>>
+            + Send
+            + 'static,
+    ) -> Result<(u64, ConnectionInfo), TikTokError> {
+        let config = self.config.clone();
+        let events = self.events.clone();
+        self.owner
+            .connect(move |generation, stop, state, ready| async move {
+                let initialized = match lifecycle::interruptible(&stop, selection).await {
+                    Ok(request) => initialize_connection(config, request, &stop).await,
+                    Err(error) => Err(error),
+                };
+                match initialized {
+                    Ok((connection, info)) => {
+                        if stop.is_cancelled() {
+                            let _ =
+                                ready.send(Err(TikTokError::Task("connection superseded".into())));
+                            return;
+                        }
+                        state.transition(generation, ConnectionState::Connected);
+                        events.send(generation, ClientEvent::Connected(info.clone()));
+                        let gifts = info.gifts.clone();
+                        let _ = ready.send(Ok(info));
+                        run_connection(
+                            connection,
+                            stop.clone(),
+                            events,
+                            state.clone(),
+                            generation,
+                            gifts,
+                        )
+                        .await;
+                        state.transition(
+                            generation,
+                            if stop.is_cancelled() {
+                                ConnectionState::Idle
+                            } else {
+                                ConnectionState::Failed
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        state.transition(
+                            generation,
+                            if stop.is_cancelled() {
+                                ConnectionState::Idle
+                            } else {
+                                ConnectionState::Failed
+                            },
+                        );
+                        if !stop.is_cancelled() {
+                            events.send(
+                                generation,
+                                ClientEvent::Error {
+                                    phase: ErrorPhase::Connect,
+                                    message: error.to_string(),
+                                },
+                            );
+                        }
+                        let _ = ready.send(Err(error));
+                    }
+                }
+            })
+            .await
+    }
 
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        let (stop, stop_receiver) = oneshot::channel();
-        {
-            let mut active = self.active.lock().await;
-            *active = Some(ActiveConnection { stop });
-        }
-        if self
-            .events
-            .send(ClientEvent::Connected(info.clone()))
-            .is_err()
-        {
-            tracing::warn!("native TikTok connection has no event consumers");
-        }
-        let event_sender = self.events.clone();
-        let gifts = info.gifts.clone();
-        let generation_counter = Arc::clone(&self.generation);
-        tokio::spawn(async move {
-            run_connection(
-                connection,
-                stop_receiver,
-                event_sender,
-                generation_counter,
-                generation,
-                gifts,
-            )
-            .await;
-        });
-        Ok(info)
+    pub fn subscribe_stamped(&self) -> broadcast::Receiver<StampedClientEvent> {
+        self.events.subscribe_stamped()
+    }
+
+    pub fn connection_snapshot(&self) -> ConnectionSnapshot {
+        self.owner.snapshot()
     }
 
     pub async fn disconnect_native(&self) -> Result<(), TikTokError> {
-        self.generation.fetch_add(1, Ordering::AcqRel);
-        let active = self.active.lock().await.take();
-        if let Some(active) = active {
-            let _ = active.stop.send(());
-        }
+        let generation = self.owner.disconnect().await?;
+        self.events.send(
+            generation,
+            ClientEvent::Disconnected {
+                reason: "disconnect requested".into(),
+            },
+        );
         Ok(())
     }
 
@@ -426,11 +386,142 @@ impl TikTokClient for NativeTikTokClient {
     }
 }
 
+async fn initialize_connection(
+    config: NativeTikTokConfig,
+    request: ConnectRequest,
+    stop: &tokio_util::sync::CancellationToken,
+) -> Result<(ttl_live_ws::ReconnectingConnection, ConnectionInfo), TikTokError> {
+    let (unique_id, cookies, preset, lookup, room_id, room_info, gifts, bundle, profile) =
+        lifecycle::interruptible(stop, async {
+        let unique_id = clean_unique_id(&request.unique_id).ok_or(TikTokError::InvalidCreator)?;
+        tracing::info!(creator = %unique_id, requested_room = ?request.room_id, "starting native TikTok connection");
+        let cookies = resolve_session(&request.session_cookie).await?;
+        tracing::debug!(creator = %unique_id, "TikTok session resolved");
+        let preset = default_preset();
+        let discovery = ttl_live_discovery::DiscoveryClient::new(&preset)
+            .map_err(|error| TikTokError::Discovery(error.to_string()))?
+            .with_session(cookies.to_cookie_string());
+
+        let lookup = match request
+            .room_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            Some(room_id) => {
+                if !ttl_sign_core::room::is_usable_room_id(room_id) {
+                    return Err(TikTokError::Discovery("room id is invalid".to_owned()));
+                }
+                None
+            }
+            None => Some(
+                discovery
+                    .room_lookup(&unique_id)
+                    .await
+                    .map_err(|error| TikTokError::Discovery(error.to_string()))?,
+            ),
+        };
+        if let Some(lookup) = lookup.as_ref() {
+            if !lookup.is_live() {
+                return Err(TikTokError::Discovery(format!(
+                    "@{} is not live (status {})",
+                    unique_id, lookup.status
+                )));
+            }
+        }
+        let room_id = request
+            .room_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| lookup.as_ref().map(|room| room.room_id.clone()))
+            .ok_or_else(|| TikTokError::Discovery("TikTok did not return a room id".to_owned()))?;
+        tracing::info!(creator = %unique_id, room_id = %room_id, "TikTok room resolved");
+
+        // Metadata and gifts are useful but should not make a valid socket
+        // unavailable when one of TikTok's JSON endpoints is temporarily
+        // refused. The stream itself remains the source of live events.
+        let room_info = discovery.room_info(&room_id).await.ok();
+        let gifts = discovery.gift_list(&room_id).await.unwrap_or_default();
+        tracing::debug!(room_id = %room_id, gifts = gifts.len(), "TikTok room metadata loaded");
+        let bundle = load_signing_bundle(&config).await?;
+        tracing::debug!(room_id = %room_id, "TikTok signing bundle loaded");
+        let profile = ttl_sign_embedded::Profile {
+            user_agent: Some(preset.user_agent()),
+            cookie: Some(cookies.to_cookie_string()),
+            ..ttl_sign_embedded::Profile::default()
+        };
+        Ok::<_, TikTokError>((unique_id, cookies, preset, lookup, room_id, room_info, gifts, bundle, profile))
+        }).await?;
+    let signer = tokio::task::spawn_blocking(move || {
+        ttl_sign_embedded::EmbeddedSigner::new(bundle, profile)
+            .map_err(|error| TikTokError::Signer(error.to_string()))
+    })
+    .await
+    .map_err(|error| TikTokError::Task(error.to_string()))??;
+    let backend = ttl_sign_headless::HeadlessBackend::new(
+        ttl_sign_headless::HeadlessConfig::new(preset.clone(), cookies.clone()),
+        Box::new(signer),
+    )
+    .map_err(|error| TikTokError::Signer(error.to_string()))?;
+    let connection = lifecycle::interruptible(stop, async {
+        ttl_live_ws::ReconnectingConnection::open(
+            Arc::new(backend),
+            &room_id,
+            ttl_live_ws::ConnectConfig::default(),
+            config.reconnect.clone(),
+        )
+        .await
+        .map_err(|error| TikTokError::Transport(error.to_string()))
+    })
+    .await?;
+    tracing::info!(room_id = %room_id, "TikTok live WebSocket connected");
+
+    let info = ConnectionInfo {
+        unique_id: room_info
+            .as_ref()
+            .and_then(|info| {
+                (!info.owner.unique_id.is_empty()).then(|| info.owner.unique_id.clone())
+            })
+            .or_else(|| lookup.as_ref().map(|room| room.unique_id.clone()))
+            .unwrap_or_else(|| unique_id.clone()),
+        room_id: room_id.clone(),
+        title: room_info
+            .as_ref()
+            .map(|info| info.title.clone())
+            .filter(|title| !title.is_empty())
+            .or_else(|| lookup.as_ref().map(|room| room.title.clone()))
+            .unwrap_or_default(),
+        nickname: room_info
+            .as_ref()
+            .map(|info| info.owner.nickname.clone())
+            .filter(|nickname| !nickname.is_empty())
+            .or_else(|| lookup.as_ref().map(|room| room.nickname.clone()))
+            .unwrap_or_else(|| unique_id.clone()),
+        avatar_url: room_info
+            .as_ref()
+            .map(|info| info.owner.avatar_url.clone())
+            .filter(|url| !url.is_empty()),
+        viewers: room_info
+            .as_ref()
+            .map(|info| info.viewer_count)
+            .unwrap_or_default(),
+        total_users: room_info
+            .as_ref()
+            .map(|info| info.total_viewers)
+            .unwrap_or_default(),
+        gifts: gifts.into_iter().map(gift_info).collect(),
+    };
+
+    Ok((connection, info))
+}
+
 async fn run_connection(
     mut connection: ttl_live_ws::ReconnectingConnection,
-    mut stop: oneshot::Receiver<()>,
-    event_sender: broadcast::Sender<ClientEvent>,
-    generation: Arc<AtomicU64>,
+    stop: tokio_util::sync::CancellationToken,
+    event_sender: lifecycle::EventSender,
+    state: lifecycle::LifecycleState,
     connection_generation: u64,
     gifts: Vec<GiftInfo>,
 ) {
@@ -441,8 +532,11 @@ async fn run_connection(
         .collect::<std::collections::HashMap<_, _>>();
     loop {
         tokio::select! {
-            _ = &mut stop => {
-                connection.close().await;
+            _ = stop.cancelled() => {
+                if tokio::time::timeout(Duration::from_secs(3), connection.close()).await.is_err() {
+                    event_sender.send(connection_generation, ClientEvent::Error { phase: ErrorPhase::Live, message: "transport close deadline exceeded; socket released".into() });
+                    tracing::warn!(connection_generation, "transport close deadline exceeded");
+                }
                 tracing::debug!(connection_generation, "TikTok live event task stopped");
                 return;
             }
@@ -457,20 +551,18 @@ async fn run_connection(
                     Ok(batch) => {
                         tracing::debug!(events = batch.events.len(), "TikTok live frame decoded");
                         for decoded in batch.events {
-                            if generation.load(Ordering::Acquire) != connection_generation {
+                            if state.snapshot().generation != connection_generation {
                                 let _ = connection.close().await;
                                 tracing::debug!(connection_generation, "discarding stale TikTok live connection");
                                 return;
                             }
                             tracing::debug!(method = %decoded.raw.method, "TikTok live event decoded");
                             let event = events::TikToolsEvent::from_decoded(decoded, &gifts);
-                            if event_sender.send(ClientEvent::Event(event)).is_err() {
-                                tracing::debug!("TikTok live event has no consumers");
-                            }
+                            event_sender.send(connection_generation, ClientEvent::Event(event));
                         }
                     }
                     Err(error) => {
-                        let _ = event_sender.send(ClientEvent::Error {
+                        event_sender.send(connection_generation, ClientEvent::Error {
                             phase: ErrorPhase::Live,
                             message: format!("could not decode TikTok event batch: {error}"),
                         });
@@ -478,16 +570,16 @@ async fn run_connection(
                     }
                 }
                 Some(Err(error)) => {
-                    let _ = event_sender.send(ClientEvent::Error {
+                    event_sender.send(connection_generation, ClientEvent::Error {
                         phase: ErrorPhase::Live,
                         message: error.to_string(),
                     });
-                    let _ = event_sender.send(ClientEvent::Disconnected { reason: error.to_string() });
+                    event_sender.send(connection_generation, ClientEvent::Disconnected { reason: error.to_string() });
                     tracing::warn!(%error, connection_generation, "TikTok live event task ended after a transport error");
                     return;
                 }
                 None => {
-                    let _ = event_sender.send(ClientEvent::Disconnected { reason: "TikTok closed the live stream".to_owned() });
+                    event_sender.send(connection_generation, ClientEvent::Disconnected { reason: "TikTok closed the live stream".to_owned() });
                     tracing::info!(connection_generation, "TikTok live event task ended because the stream closed");
                     return;
                 }

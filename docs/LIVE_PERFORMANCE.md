@@ -1,7 +1,9 @@
 # TikTools LIVE Performance
 
-How the LIVE runtime behaves under load after the high-performance
-refactor, how to reproduce every number, and where the honest limits are.
+The reliability refactor against `79dd1ab` is **incomplete**. See
+[progress and unresolved P0 defects](PERFORMANCE_REFACTOR_PROGRESS.md).
+Historical measurements below describe earlier work; the dated section records
+this branch's observations without claiming full LIVE performance or memory stability.
 
 Related docs:
 
@@ -87,8 +89,8 @@ in memory, and shutdown drains it.
 
 | Stage | Capacity | Overload behavior |
 | --- | --- | --- |
-| Hot viewer cache | 10,000 (env `TIKTOOLS_POINTS_CACHE_CAPACITY`) + 64 amortized slack | LRU-ish eviction of committed rows only; reload via indexed SQLite |
-| Points writer queue | 4,096 ops | Synchronous fallback write (backpressure) + overload counter; never silently dropped |
+| Hot viewer cache | 10,000 + 64 slack for clean rows; dirty rows can exceed this (open P0) | Dirty-cache admission and reliable committed progress still need correction |
+| Points writer queue | 4,096 ops | Existing synchronous fallback can overtake queued writes; ordering/failure handling remains an open P0 |
 | LIVE ingress queue | 2,048 ordered items | Lifecycle: backpressure. Gift/follow/share: 1 s backpressure then gap-reported drop. Chat/likes/stats: shed with counters |
 | Plugin queues | 64 per plugin, 128-call admission | Shed with per-plugin counters; slow plugins isolated; gap protocol for reliable loss |
 | Automation slots | 32 tasks | Rejected work counted; domain event already delivered |
@@ -137,3 +139,33 @@ in memory, and shutdown drains it.
   real-LIVE stability requires real-LIVE evidence (§Definition of Done
   in the refactor brief). The harness proves bounded behavior under
   synthetic load on real application paths.
+
+
+## 2026-10-13 reliability branch observations
+
+The ongoing refactor against `79dd1ab` is incomplete. Earlier measurements above
+remain historical; they do not describe this branch's complete LIVE pipeline.
+New raw observations are in [the measurement record](benchmarks/live-refactor-2026-10-13.json).
+The same microbenchmark command was run sequentially on the exact baseline and
+candidate checkout with `--test-threads=1`, in the unoptimized test profile.
+Environment: AMD BC-250, 12 logical CPUs, Linux 7.2.9-2-cachyos, Rust 1.99.0.
+Other host load was not controlled, and each build has only one observation.
+
+| PointsService workload | Baseline events/s | Candidate events/s |
+| --- | ---: | ---: |
+| 20,000 chats | 181,439 | 181,091 |
+| 10,000-event burst | 323,724 | 312,258 |
+| 100,000 distinct viewers | 191,550 | 189,864 |
+| 5,000 persisted awards | 1,695 | 1,674 |
+
+The chat harness RSS delta was 9,564,160 bytes on each checkout. These calls
+exercise PointsService directly, whose implementation remains unchanged. They
+provide no evidence of an optimized full LIVE pipeline or a leak fix. Tail
+latency for chat awards was p99 0.0074 ms baseline and 0.0075 ms candidate.
+
+The owned LIVE points execution service now has 128 queued jobs plus one executing
+job. Executing synchronous awards are awaited; there is no two-second timeout
+that abandons a running award. This is distinct from durable writing, whose
+ordering, saturation fallback and failure/recovery defects remain unresolved.
+The policies in the historical table do not establish those defects are safe.
+End-to-end transport, slow SQLite, plugin load and real-LIVE scenarios remain required.

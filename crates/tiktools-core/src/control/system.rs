@@ -156,7 +156,17 @@ impl AppCore {
         let live_generation_seq = self.connection_sequence.load(Ordering::Acquire);
         #[cfg(not(feature = "native-tiktok"))]
         let live_generation_seq = 0u64;
-        let points = self.points.diagnostics().to_value();
+        let points_diagnostics = self.points.diagnostics();
+        // Rejected or permanently failed writes are user-visible data loss:
+        // memory served the update, SQLite did not receive it. Surface that
+        // as degraded health instead of leaving it buried in counters.
+        if points_diagnostics.write_rejected > 0 || points_diagnostics.write_failed > 0 {
+            degraded.push(format!(
+                "{} points write(s) rejected and {} failed; those updates are memory-only; see points diagnostics",
+                points_diagnostics.write_rejected, points_diagnostics.write_failed
+            ));
+        }
+        let points = points_diagnostics.to_value();
         let plugin_delivery = crate::plugin_events::fanout::delivery_snapshot(&recover_mutex(
             &self.plugin_delivery,
             "plugin delivery",
@@ -177,6 +187,28 @@ impl AppCore {
         );
         #[cfg(not(feature = "native-tiktok"))]
         let (live_pump_alive, live_worker_alive) = (false, false);
+        #[cfg(feature = "native-tiktok")]
+        let live_connection =
+            serde_json::to_value(self.live.connection_snapshot()).expect("connection snapshot");
+        #[cfg(not(feature = "native-tiktok"))]
+        let live_connection = Value::Null;
+        #[cfg(feature = "native-tiktok")]
+        let live_points_work = self.live_points_work.diagnostics();
+        #[cfg(not(feature = "native-tiktok"))]
+        let live_points_work = Value::Null;
+        // An abandoned points worker means awards behind a wedge may never
+        // reach SQLite: report it as degraded health, not a buried counter.
+        #[cfg(feature = "native-tiktok")]
+        if live_points_work
+            .get("abandonedJoins")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            > 0
+        {
+            degraded.push(
+                "LIVE points worker abandoned past its join deadline; queued awards may remain unresolved".to_owned(),
+            );
+        }
         json!({
             "status": if degraded.is_empty() { "ok" } else { "degraded" },
             "reasons": degraded,
@@ -185,8 +217,11 @@ impl AppCore {
                 "reliableGaps": event_gaps,
                 "lastGapAt": last_gap_at,
             },
+            "pid": std::process::id(),
             "liveConnected": self.live.is_connected(),
             "liveGeneration": recover_rwlock_read(&self.connection_context, "connection context").as_ref().map(|context| context.connection_id.clone()),
+            "liveConnection": live_connection,
+            "livePointsWork": live_points_work,
             "liveGenerationSeq": live_generation_seq,
             "liveIngress": live_ingress,
             "liveDedup": live_dedup,

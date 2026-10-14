@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 3,
+  "id": "tiktools.napi-vm-hang",
+  "name": "NapiVmHang",
+  "version": "0.1.0",
+  "description": "Fixture whose onLoad blocks, so the manager's startup handshake deadline can be proven.",
+  "runtime": "napi-vm",
+  "entry": "dist/index.js",
+  "capabilities": [],
+  "apiVersion": 1
+}

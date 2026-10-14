@@ -133,6 +133,10 @@ impl FanoutCache {
                 matched.push(*index);
             }
         }
+        // Exact patterns, namespace patterns and `*` describe one
+        // subscriber set. A plugin must receive one copy per dispatch.
+        matched.sort_unstable();
+        matched.dedup();
         matched
     }
 }
@@ -243,4 +247,45 @@ pub(crate) fn delivery_snapshot(
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod overlap_tests {
+    use super::*;
+    #[test]
+    fn overlapping_and_repeated_patterns_dispatch_each_plugin_once() {
+        let cache = FanoutCache {
+            entries: vec![
+                FanoutEntry {
+                    id: "a".into(),
+                    exact: vec!["live.event".into()],
+                    prefixes: vec!["live".into()],
+                    match_all: true,
+                    static_eligible: true,
+                },
+                FanoutEntry {
+                    id: "b".into(),
+                    exact: vec!["live.event".into()],
+                    prefixes: vec![],
+                    match_all: false,
+                    static_eligible: true,
+                },
+                FanoutEntry {
+                    id: "disabled".into(),
+                    exact: vec![],
+                    prefixes: vec![],
+                    match_all: true,
+                    static_eligible: false,
+                },
+            ],
+            exact_index: HashMap::from([("live.event".into(), vec![0, 0, 1, 1])]),
+            match_all: vec![0, 2],
+            wildcard: vec![0],
+            ..Default::default()
+        };
+        assert_eq!(cache.matching("live.event", false), vec![0, 1]);
+        assert_eq!(cache.matching("live.other", false), vec![0]);
+        assert_eq!(cache.matching("points.changed", false), vec![0]);
+        assert_eq!(cache.matching("event.gap", true), vec![0, 1]);
+    }
 }

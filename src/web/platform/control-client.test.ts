@@ -222,3 +222,18 @@ test('detach rejects pending calls', async () => {
   await expect(pending).rejects.toMatchObject({ code: 'transport' });
   delete (globalThis as Record<string, unknown>)['window'];
 });
+
+test('pending RPC admission is bounded and detach releases every slot', async () => {
+  const ipc = installMockIpc();
+  const control = createControlClient();
+  control.attach();
+  const outcomes = Array.from({ length: 128 }, () => control.call('system.ping').catch((error: unknown) => error));
+  await expect(control.call('system.ping')).rejects.toMatchObject({ code: 'overloaded' });
+  expect(ipc.sent).toHaveLength(128);
+  expect(control.diagnostics?.()).toEqual({ pending: 128, capacity: 128, overloaded: 1 });
+  control.detach();
+  expect(await Promise.all(outcomes)).toHaveLength(128);
+  expect(control.diagnostics?.()?.pending).toBe(0);
+  await expect(control.call('system.ping')).rejects.toMatchObject({ code: 'transport' });
+  delete (globalThis as Record<string, unknown>)['window'];
+});

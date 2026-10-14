@@ -7,7 +7,7 @@ use std::{
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio},
     sync::mpsc,
     thread::JoinHandle,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::Value;
@@ -19,6 +19,50 @@ use tiktools_plugin_api::{
 use crate::{PluginInstance, PluginLoaderError, PluginRuntime};
 
 const PROCESS_CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Bound for joining this instance's helper threads (per-call I/O, stderr
+/// drainer). On the healthy path the thread has already finished its work,
+/// so the join is instantaneous; after a timeout the child kill closes the
+/// pipes and unblocks it. A thread that still will not finish is abandoned
+/// with an explicit report instead of blocking the plugin worker forever —
+/// a grandchild that inherited the stderr pipe is the known case.
+const PROCESS_HELPER_JOIN_DEADLINE: Duration = Duration::from_secs(3);
+
+/// Poll interval while a bounded helper join waits for a thread to exit.
+const PROCESS_HELPER_JOIN_POLL: Duration = Duration::from_millis(5);
+
+/// Joins one of this instance's helper threads within
+/// [`PROCESS_HELPER_JOIN_DEADLINE`]. `thread` is taken first, so a deadline
+/// expiry leaves it `None` and the handle is dropped (detached) *after* the
+/// abandonment has been logged — never silently.
+fn join_helper_thread(id: &str, phase: &str, thread: &mut Option<JoinHandle<()>>) {
+    join_helper_thread_within(id, phase, thread, PROCESS_HELPER_JOIN_DEADLINE);
+}
+
+fn join_helper_thread_within(
+    id: &str,
+    phase: &str,
+    thread: &mut Option<JoinHandle<()>>,
+    deadline: Duration,
+) {
+    let Some(handle) = thread.take() else {
+        return;
+    };
+    let started = Instant::now();
+    while !handle.is_finished() {
+        if started.elapsed() >= deadline {
+            tracing::error!(
+                plugin = %id,
+                phase,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "plugin helper thread did not exit; abandoning it (outcome unknown)"
+            );
+            return;
+        }
+        std::thread::sleep(PROCESS_HELPER_JOIN_POLL);
+    }
+    let _ = handle.join();
+}
 
 #[derive(Default)]
 pub struct ProcessPluginRuntime;
@@ -147,6 +191,7 @@ impl PluginRuntime for ProcessPluginRuntime {
             stdin: Some(BufWriter::new(stdin)),
             stdout: Some(BufReader::new(stdout)),
             stderr_thread,
+            io_thread: None,
             next_request_id: 0,
             terminated: false,
         }))
@@ -223,6 +268,11 @@ struct ProcessPluginInstance {
     stdin: Option<BufWriter<ChildStdin>>,
     stdout: Option<BufReader<ChildStdout>>,
     stderr_thread: Option<JoinHandle<()>>,
+    /// Owner of the thread that performs one call's stdin/stdout frame I/O.
+    /// It is retained (and joined) rather than detached, so the pipes are
+    /// never handed to a new call while the previous thread still holds
+    /// them, and a stuck reader is abandoned explicitly instead of leaking.
+    io_thread: Option<JoinHandle<()>>,
     next_request_id: u64,
     terminated: bool,
 }
@@ -236,6 +286,10 @@ impl ProcessPluginInstance {
         let payload: Value = serde_json::from_slice(request).map_err(|error| {
             PluginLoaderError::Runtime(format!("invalid process request JSON: {error}"))
         })?;
+        // Reap the previous call's I/O thread before starting a new one: it
+        // owns the pipes, so the next call cannot begin until the last one
+        // has finished with them.
+        join_helper_thread(&self.id, "previous call I/O", &mut self.io_thread);
         let request_id = self.next_request_id.to_string();
         self.next_request_id = self.next_request_id.saturating_add(1);
         let message = PluginRequest::new(request_id.clone(), "call", payload);
@@ -246,14 +300,33 @@ impl ProcessPluginInstance {
             PluginLoaderError::Runtime("plugin process stdout is unavailable".to_owned())
         })?;
         let (sender, receiver) = mpsc::sync_channel(1);
-        std::thread::spawn(move || {
-            let result = write_frame(&mut stdin, &message).and_then(|_| read_frame(&mut stdout));
-            let _ = sender.send((result, stdin, stdout));
-        });
+        let thread_id = self.id.clone();
+        let io_thread = match std::thread::Builder::new()
+            .name(format!("tiktools-plugin-io-{thread_id}"))
+            .spawn(move || {
+                let result =
+                    write_frame(&mut stdin, &message).and_then(|_| read_frame(&mut stdout));
+                let _ = sender.send((result, stdin, stdout));
+            }) {
+            Ok(thread) => thread,
+            Err(error) => {
+                // The pipes moved into a thread that never started: this
+                // generation can no longer serve calls.
+                self.terminate_child();
+                return Err(PluginLoaderError::Runtime(format!(
+                    "could not start plugin process I/O thread: {error}"
+                )));
+            }
+        };
+        self.io_thread = Some(io_thread);
         let (result, stdin, stdout) = match wait_for_io(receiver, timeout) {
-            Ok(result) => result,
+            Ok(result) => {
+                join_helper_thread(&self.id, "call I/O", &mut self.io_thread);
+                result
+            }
             Err(ProcessIoWaitError::Timeout) => {
                 self.terminate_child();
+                join_helper_thread(&self.id, "timed-out call I/O", &mut self.io_thread);
                 return Err(PluginLoaderError::Runtime(format!(
                     "plugin process call timed out after {} seconds",
                     timeout.as_secs()
@@ -261,6 +334,7 @@ impl ProcessPluginInstance {
             }
             Err(ProcessIoWaitError::Disconnected) => {
                 self.terminate_child();
+                join_helper_thread(&self.id, "disconnected call I/O", &mut self.io_thread);
                 return Err(PluginLoaderError::Runtime(
                     "plugin process I/O worker stopped unexpectedly".to_owned(),
                 ));
@@ -278,9 +352,7 @@ impl ProcessPluginInstance {
         self.terminated = true;
         let _ = self.child.kill();
         let _ = self.child.wait();
-        if let Some(thread) = self.stderr_thread.take() {
-            let _ = thread.join();
-        }
+        join_helper_thread(&self.id, "stderr drainer", &mut self.stderr_thread);
     }
 }
 
@@ -557,10 +629,93 @@ mod tests {
             stdin: None,
             stdout: None,
             stderr_thread: None,
+            io_thread: None,
             next_request_id: 0,
             terminated: false,
         };
         instance.terminate_child();
+        assert!(instance.child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    fn bounded_helper_join_abandons_a_wedged_thread_explicitly() {
+        let never = std::thread::spawn(|| loop {
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        let mut slot = Some(never);
+        let started = Instant::now();
+        join_helper_thread_within(
+            "test",
+            "wedged helper",
+            &mut slot,
+            Duration::from_millis(100),
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the join must give up at the deadline (took {elapsed:?})"
+        );
+        assert!(
+            slot.is_none(),
+            "the abandoned handle must be taken so nothing joins it later"
+        );
+    }
+
+    #[test]
+    fn bounded_helper_join_finishes_immediately_for_a_dead_thread() {
+        let finished = std::thread::spawn(|| ());
+        let mut slot = Some(finished);
+        let started = Instant::now();
+        join_helper_thread_within("test", "dead helper", &mut slot, Duration::from_millis(100));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn timed_out_call_kills_the_child_and_reaps_its_io_thread() {
+        let mut child = if cfg!(windows) {
+            Command::new("cmd")
+                .args(["/C", "ping -n 30 127.0.0.1 > NUL"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        } else {
+            // Reads stdin forever and never writes stdout: the call's frame
+            // I/O thread blocks on the read until the timeout kills the
+            // child and closes the pipe.
+            Command::new("sh")
+                .args(["-c", "cat > /dev/null"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap()
+        };
+        let stdin = child.stdin.take().expect("piped plugin stdin");
+        let stdout = child.stdout.take().expect("piped plugin stdout");
+        let mut instance = ProcessPluginInstance {
+            id: "test".to_owned(),
+            child,
+            stdin: Some(BufWriter::new(stdin)),
+            stdout: Some(BufReader::new(stdout)),
+            stderr_thread: None,
+            io_thread: None,
+            next_request_id: 0,
+            terminated: false,
+        };
+        let request = serde_json::to_vec(&serde_json::json!({"type": "poll"})).unwrap();
+        let result = instance.handle_message_with_deadline(&request, Duration::from_millis(150));
+        assert!(
+            matches!(result, Err(PluginLoaderError::Runtime(_))),
+            "a child that never answers must time out, got {result:?}"
+        );
+        assert!(instance.terminated, "a timed-out call must kill the child");
+        assert!(
+            instance.io_thread.is_none(),
+            "the timed-out call's I/O thread must be joined (or abandoned), not left owned"
+        );
         assert!(instance.child.try_wait().unwrap().is_some());
     }
 

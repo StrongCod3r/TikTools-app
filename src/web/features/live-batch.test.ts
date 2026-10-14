@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from 'bun:test';
+import { beforeEach, describe, expect, spyOn, test } from 'bun:test';
 import { useLive } from './live';
 import type { ControlClient } from '../platform/control-client';
 
@@ -157,4 +157,55 @@ describe('live feed batching', () => {
     expect(live.events.value).toHaveLength(1);
     live.dispose();
   });
+});
+
+test('feed identity caches belong to an instance and preserve only the same room', () => {
+  installFrameControl();
+  const harness = createControl();
+  const live = useLive(harness.control, { systemAuthor: () => 'system' });
+  const event = { event: { kind: 'chat', author: 'viewer', text: 'hello', msgId: 'stable' } };
+  harness.emit('live.connected', { uniqueId: 'a', roomId: '1' } as never);
+  harness.emit('live.ui-event', event as never);
+  runFrames();
+  live.resetEvents();
+  harness.emit('live.connected', { uniqueId: 'a', roomId: '1' } as never);
+  harness.emit('live.ui-event', event as never);
+  runFrames();
+  expect(live.events.value).toHaveLength(0);
+  harness.emit('live.connected', { uniqueId: 'b', roomId: '2' } as never);
+  harness.emit('live.ui-event', event as never);
+  runFrames();
+  expect(live.events.value).toHaveLength(1);
+  live.dispose();
+  const next = useLive(harness.control, { systemAuthor: () => 'system' });
+  harness.emit('live.ui-event', event as never);
+  runFrames();
+  expect(next.events.value).toHaveLength(1);
+  next.dispose();
+  uninstallFrameControl();
+});
+
+
+test('message IDs expire after the replay age limit', () => {
+  installFrameControl();
+  const clock = spyOn(Date, 'now').mockReturnValue(0);
+  const harness = createControl();
+  const live = useLive(harness.control, { systemAuthor: () => 'system' });
+  try {
+    const event = { event: { kind: 'chat', author: 'viewer', text: 'hello', msgId: 'aged' } };
+    harness.emit('live.ui-event', event as never);
+    runFrames();
+    live.resetEvents();
+    harness.emit('live.ui-event', event as never);
+    runFrames();
+    expect(live.events.value).toHaveLength(0);
+    clock.mockReturnValue(10 * 60_000 + 1);
+    harness.emit('live.ui-event', event as never);
+    runFrames();
+    expect(live.events.value).toHaveLength(1);
+  } finally {
+    live.dispose();
+    clock.mockRestore();
+    uninstallFrameControl();
+  }
 });

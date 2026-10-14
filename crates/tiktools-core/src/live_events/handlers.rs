@@ -1,12 +1,18 @@
 use crate::*;
-#[cfg(feature = "native-tiktok")]
+#[cfg(all(feature = "native-tiktok", feature = "persistence"))]
 use std::time::Duration;
 
 impl AppCore {
     #[cfg(feature = "native-tiktok")]
     pub(crate) async fn handle_native_event(self: &Arc<Self>, event: ClientEvent) {
         match event {
-            ClientEvent::Connected(info) => self.handle_connected(info).await,
+            ClientEvent::Connected(info) => {
+                let generation = self.connection_sequence.load(Ordering::Acquire);
+                self.publish_disconnected_event().await;
+                if self.live.connection_snapshot().generation == generation {
+                    self.handle_connected(info).await;
+                }
+            }
             ClientEvent::Event(event) => self.handle_live_event(event).await,
             ClientEvent::Reconnecting { attempt, delay_ms } => {
                 // Domain topic only: the legacy push was removed once the
@@ -18,8 +24,11 @@ impl AppCore {
                     });
             }
             ClientEvent::Disconnected { reason } => {
-                self.live.disconnect().await;
+                let generation = self.live.connection_snapshot().generation;
                 self.publish_disconnected_event().await;
+                if self.live.connection_snapshot().generation != generation {
+                    return;
+                }
                 // Native drops publish the same domain events as an explicit
                 // RPC disconnect so every origin converges on one topic.
                 self.events
@@ -43,7 +52,7 @@ impl AppCore {
     }
     #[cfg(feature = "native-tiktok")]
     pub(crate) async fn handle_connected(self: &Arc<Self>, info: tiktools_tiktok::ConnectionInfo) {
-        let sequence = self.connection_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        let sequence = self.connection_sequence.load(Ordering::Acquire);
         let context = LiveContext {
             unique_id: info.unique_id.clone(),
             room_id: info.room_id.clone(),
@@ -127,6 +136,19 @@ impl AppCore {
         #[cfg(not(feature = "persistence"))]
         let app_state = std::collections::BTreeMap::new();
 
+        if self.live.connection_snapshot().generation != sequence {
+            return;
+        }
+        self.events
+            .publish_domain(crate::events::DomainEvent::LiveConnected {
+                unique_id: Some(info.unique_id.clone()),
+                room_id: Some(info.room_id.clone()),
+            });
+        self.events
+            .publish_domain(crate::events::DomainEvent::CreatorChanged {
+                unique_id: Some(info.unique_id.clone()),
+            });
+
         // Connection/creator state travels on `live.connected` plus
         // `creator.changed` now; their legacy pushes were removed with the
         // rest of the migrated duplicates.
@@ -204,24 +226,15 @@ impl AppCore {
         );
         let point_award = if should_award {
             let unique_id = ui_event["author"].as_str().unwrap_or("viewer").to_owned();
-            let points = Arc::clone(&self.points);
-            match tokio::time::timeout(
-                Duration::from_secs(2),
-                tokio::task::spawn_blocking(move || {
-                    points.award_points(&unique_id, action, options)
-                }),
-            )
-            .await
+            match self
+                .live_points_work
+                .award(unique_id, action, options)
+                .await
             {
-                Ok(Ok(award)) => award,
-                Ok(Err(error)) => {
-                    tracing::error!(%error, "points worker failed while handling TikTok event");
-                    None
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        "points persistence exceeded 2 seconds; continuing live event delivery"
-                    );
+                Ok(award) => award,
+                Err(error) => {
+                    tracing::error!(%error, "LIVE points work was not completed");
+                    self.record_event_gap();
                     None
                 }
             }

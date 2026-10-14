@@ -89,7 +89,15 @@ impl PluginRuntime for NapiVmPluginRuntime {
         // vanishing, so embedders learn push needs the managed path.
         let (orphan_tx, orphan_rx) = broadcast::channel(1);
         drop(orphan_rx);
-        let (tx, worker) = spawn_owner(manifest, directory, orphan_tx)?;
+        // Direct loads carry no manager context, so they use the default
+        // startup bound; the managed path passes its own through
+        // `WorkerContext`.
+        let (tx, worker) = spawn_owner(
+            manifest,
+            directory,
+            orphan_tx,
+            crate::manager::PLUGIN_START_DEADLINE,
+        )?;
         Ok(Box::new(NapiVmPluginInstance {
             id: manifest.id.clone(),
             tx: Some(tx),
@@ -106,7 +114,7 @@ impl PluginRuntime for NapiVmPluginRuntime {
         if let Err(error) = check_manifest(manifest) {
             return Some(Err(error));
         }
-        match spawn_owner(manifest, directory, ctx.emit_sender()) {
+        match spawn_owner(manifest, directory, ctx.emit_sender(), ctx.start_deadline()) {
             Ok((tx, worker)) => Some(Ok(ManagedWorker::new(tx, worker))),
             Err(error) => Some(Err(error)),
         }
@@ -434,6 +442,7 @@ fn spawn_owner(
     manifest: &PluginManifest,
     directory: &Path,
     emit_tx: broadcast::Sender<EmittedEvent>,
+    start_deadline: std::time::Duration,
 ) -> Result<
     (
         mpsc::UnboundedSender<WorkerMsg>,
@@ -470,10 +479,32 @@ fn spawn_owner(
         })?;
     // The VM thread always answers the handshake before serving calls: a
     // dropped sender means it died during startup, which is also a load
-    // failure, never a half-alive instance.
-    ready_rx.recv().map_err(|_| {
-        PluginLoaderError::Runtime(format!("napi-vm plugin `{id}` failed during startup"))
-    })??;
+    // failure, never a half-alive instance. The wait is bounded: a guest
+    // wedged in `onLoad` (or a native addon hanging during load) must fail
+    // the start instead of freezing every other plugin's lifecycle behind
+    // the manager's lifecycle lock. A timeout asks the thread to unload
+    // itself and then drops its handle (detach) — reported explicitly, so
+    // the abandonment is on record rather than silent.
+    match ready_rx.recv_timeout(start_deadline) {
+        Ok(result) => result?,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            let _ = tx.send(WorkerMsg::Shutdown);
+            tracing::error!(
+                id = %id,
+                deadline_ms = start_deadline.as_millis() as u64,
+                "napi-vm startup missed its deadline; detaching the worker thread (outcome unknown)"
+            );
+            return Err(PluginLoaderError::Runtime(format!(
+                "napi-vm plugin `{id}` did not finish loading within {}ms",
+                start_deadline.as_millis()
+            )));
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            return Err(PluginLoaderError::Runtime(format!(
+                "napi-vm plugin `{id}` failed during startup"
+            )));
+        }
+    }
     Ok((tx, worker))
 }
 
@@ -925,7 +956,7 @@ mod tests {
         let bytes = std::fs::read(dir.join("plugin.json")).unwrap();
         let manifest = PluginManifest::from_json_str(std::str::from_utf8(&bytes).unwrap()).unwrap();
         let (emit_tx, _emit_rx) = broadcast::channel(8);
-        let ctx = WorkerContext::new(emit_tx);
+        let ctx = WorkerContext::new(emit_tx, std::time::Duration::from_secs(15));
         let owned = NapiVmPluginRuntime
             .spawn_worker(&manifest, &dir, &ctx)
             .expect("napi-vm provides an owned worker")

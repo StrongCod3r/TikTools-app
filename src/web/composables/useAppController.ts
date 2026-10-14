@@ -120,15 +120,23 @@ export function useAppController() {
   // never saw, so every authoritative snapshot is re-read (live status,
   // points config/leaderboard, creators, automation/workflows including
   // plugin state, gifts, globals, profiles). Missing events are never reconstructed.
-  control.onGap(() => {
-    void connection.refreshStatus();
-    void points.refresh();
-    void creators.refresh();
-    void automation.refresh();
-    void live.refresh();
-    void globals.loadGlobals();
-    void ruleProfiles.loadProfiles();
-  });
+  let resyncInFlight = false;
+  let resyncAgain = false;
+  let disposed = false;
+  const resync = (): void => {
+    if (disposed) return;
+    if (resyncInFlight) { resyncAgain = true; return; }
+    resyncInFlight = true;
+    resyncAgain = false;
+    void Promise.allSettled([
+      connection.refreshStatus(), points.refresh(), creators.refresh(),
+      automation.refresh(), live.refresh(), globals.loadGlobals(), ruleProfiles.loadProfiles(),
+    ]).finally(() => {
+      resyncInFlight = false;
+      if (resyncAgain) resync();
+    });
+  };
+  control.onGap(resync);
 
   watch(locale, (value) => {
     document.documentElement.lang = value;
@@ -148,7 +156,7 @@ export function useAppController() {
 
   watch([live.events, live.autoScroll, activeTab], () => {
     if (activeTab.value !== 'feed' || !live.autoScroll.value) return;
-    requestAnimationFrame(() => live.scrollToBottom());
+    live.scrollToBottom();
   });
 
   // A plugin page tab is only valid while its plugin stays installed,
@@ -185,6 +193,8 @@ export function useAppController() {
     // Release frame callbacks, scroll listeners, and topic subscriptions
     // so repeated mount/unmount cycles (rapid tab navigation, HMR) cannot
     // accumulate pending frames or duplicated listeners.
+    disposed = true;
+    connection.dispose();
     live.dispose();
     points.dispose();
     control.detach();

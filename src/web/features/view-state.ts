@@ -284,13 +284,20 @@ export function saveViewState<K extends keyof ViewState>(
 }
 
 /** Coalesces rapid saves (watchers, scroll events). */
-export function debounce(fn: () => void, ms = 150): () => void {
+export type DebouncedCallback = (() => void) & { cancel: () => void };
+
+export function debounce(fn: () => void, ms = 150): DebouncedCallback {
   let timer: ReturnType<typeof setTimeout> | null = null;
-  return () => {
+  const cancel = (): void => {
     if (timer !== null) clearTimeout(timer);
+    timer = null;
+  };
+  const callback = (): void => {
+    cancel();
     timer = setTimeout(() => {
       timer = null;
       fn();
     }, ms);
   };
+  return Object.assign(callback, { cancel });
 }

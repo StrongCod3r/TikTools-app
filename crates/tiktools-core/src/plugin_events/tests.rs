@@ -81,6 +81,7 @@ async fn cancelled_queue_worker_releases_core_and_pending_events() {
     let (sender, receiver) = tokio::sync::mpsc::channel(PLUGIN_EVENT_QUEUE_CAPACITY);
     let token = tokio_util::sync::CancellationToken::new();
     for _ in 0..PLUGIN_EVENT_QUEUE_CAPACITY {
+        core.record_plugin_accepted("removed");
         sender
             .try_send(super::queue::QueuedPluginEvent {
                 envelope: Arc::new(tiktools_plugin_api::DomainEventEnvelope::new(
@@ -107,6 +108,10 @@ async fn cancelled_queue_worker_releases_core_and_pending_events() {
     .expect("cancelled worker must terminate without draining or delivering");
     assert!(sender.is_closed());
     assert_eq!(Arc::strong_count(&core), baseline);
+    assert_eq!(
+        crate::recover_mutex(&core.plugin_delivery, "delivery")["removed"].queued,
+        0
+    );
 }
 
 #[test]

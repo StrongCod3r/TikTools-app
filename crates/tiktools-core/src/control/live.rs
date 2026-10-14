@@ -3,7 +3,6 @@
 #[cfg(feature = "native-tiktok")]
 use super::check_session_cookie_len;
 use super::OperationError;
-use crate::events::DomainEvent;
 use crate::*;
 use serde::Deserialize;
 use serde::Serialize;
@@ -34,6 +33,11 @@ impl AppCore {
         #[cfg(not(feature = "persistence"))]
         let context: Option<LiveContext> =
             recover_rwlock_read(&self.connection_context, "connection context").clone();
+        #[cfg(feature = "native-tiktok")]
+        let context = context.filter(|context| {
+            context.connection_id
+                == format!("connection-{}", self.live.connection_snapshot().generation)
+        });
         LiveStatus {
             connected,
             unique_id: context.as_ref().map(|context| context.unique_id.clone()),
@@ -57,25 +61,29 @@ impl AppCore {
             return Err(OperationError::invalid("roomId is too long (max 64)"));
         }
         self.start_live_event_pump();
-        self.publish_disconnected_event().await;
-        self.live.disconnect().await;
-        let info = self
+        let (generation, info) = self
             .live
-            .connect(ConnectRequest {
+            .connect_generation(ConnectRequest {
                 unique_id,
                 session_cookie,
                 room_id,
             })
             .await
             .map_err(|error| OperationError::unavailable(error.to_string()))?;
-        self.events.publish_domain(DomainEvent::LiveConnected {
-            unique_id: Some(info.unique_id.clone()),
-            room_id: Some(info.room_id.clone()),
-        });
-        self.events.publish_domain(DomainEvent::CreatorChanged {
-            unique_id: Some(info.unique_id.clone()),
-        });
-        Ok(self.live_status())
+        // The ordered transport event worker publishes lifecycle topics.
+        // Return the connection values directly even if persistence/UI
+        // initialization is still queued; it must not duplicate topics.
+        let snapshot = self.live.connection_snapshot();
+        if !self.live.is_connected() || snapshot.generation != generation {
+            return Ok(self.live_status());
+        }
+        Ok(LiveStatus {
+            connected: true,
+            unique_id: Some(info.unique_id),
+            room_id: Some(info.room_id),
+            connection_id: Some(format!("connection-{}", generation)),
+            native: true,
+        })
     }
 
     #[cfg(not(feature = "native-tiktok"))]
@@ -91,11 +99,7 @@ impl AppCore {
     }
 
     pub async fn live_disconnect(self: &Arc<Self>) -> LiveStatus {
-        self.publish_disconnected_event().await;
         self.live.disconnect().await;
-        self.events.publish_domain(DomainEvent::LiveDisconnected);
-        self.events
-            .publish_domain(DomainEvent::CreatorChanged { unique_id: None });
         self.live_status()
     }
 
@@ -108,19 +112,21 @@ impl AppCore {
     ) -> Result<LiveStatus, OperationError> {
         check_session_cookie_len(&session_cookie)?;
         self.start_live_event_pump();
-        let mut rooms = self
+        let (generation, info) = self
             .live
-            .live_channels(&session_cookie)
+            .pick_generation(session_cookie)
             .await
             .map_err(|error| OperationError::unavailable(error.to_string()))?;
-        if rooms.is_empty() {
-            return Err(OperationError::unavailable(
-                "TikTok returned no live rooms.",
-            ));
+        if self.live.connection_snapshot().generation != generation || !self.live.is_connected() {
+            return Ok(self.live_status());
         }
-        let room = rooms.remove(0);
-        self.live_connect(room.unique_id, session_cookie, Some(room.room_id))
-            .await
+        Ok(LiveStatus {
+            connected: true,
+            unique_id: Some(info.unique_id),
+            room_id: Some(info.room_id),
+            connection_id: Some(format!("connection-{generation}")),
+            native: true,
+        })
     }
 
     #[cfg(not(feature = "native-tiktok"))]

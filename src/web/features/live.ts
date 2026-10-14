@@ -4,7 +4,7 @@ import type { GiftCatalogEntry, UiEvent } from '../../shared/messages.ts';
 import type { ControlClient } from '../platform/control-client.ts';
 import { errorMessage } from '../platform/control-client.ts';
 import type { DisplayEvent, EventFilter, TopViewerPayload } from '../types.ts';
-import { debounce, loadViewState, saveViewState } from './view-state.ts';
+import { debounce, loadViewState, saveViewState, type DebouncedCallback } from './view-state.ts';
 
 export interface LiveCallbacks {
   /** Optional chat observer (auto-speech left the main frontend). */
@@ -34,8 +34,7 @@ export interface GiftCatalogResult {
  */
 const DEDUP_WINDOW_MS = 5000;
 const DEDUP_CACHE_LIMIT = 256;
-const seenMsgIds = new Map<string, number>();
-const seenChecksums = new Map<string, number>();
+const MESSAGE_ID_MAX_AGE_MS = 10 * 60_000;
 
 function eventChecksum(event: UiEvent): string {
   const gift = event.giftDetails;
@@ -49,10 +48,11 @@ function eventChecksum(event: UiEvent): string {
 }
 
 /** Records the event identity and reports whether it was already seen. */
-function isDuplicateEvent(event: UiEvent, now: number): boolean {
+function isDuplicateEvent(event: UiEvent, now: number, seenMsgIds: Map<string, number>, seenChecksums: Map<string, number>): boolean {
   const msgId = event.msgId;
   if (msgId !== undefined) {
-    if (seenMsgIds.has(msgId)) return true;
+    const seen = seenMsgIds.get(msgId);
+    if (seen !== undefined && now - seen < MESSAGE_ID_MAX_AGE_MS) return true;
     seenMsgIds.set(msgId, now);
     if (seenMsgIds.size > DEDUP_CACHE_LIMIT) {
       const oldest = seenMsgIds.keys().next().value;
@@ -72,6 +72,9 @@ function isDuplicateEvent(event: UiEvent, now: number): boolean {
 }
 
 export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
+  const seenMsgIds = new Map<string, number>();
+  const seenChecksums = new Map<string, number>();
+  let sessionScope = '';
   // Feed options survive reloads through the window-state
   // blob; the scroll position restores once the stream has
   // content tall enough to hold it.
@@ -90,7 +93,9 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   const nextEventId = ref(0);
   const streamContainerRef = ref<HTMLDivElement | null>(null);
   let restoreScrollTop = savedFeed?.scrollTop;
-  let scrollSaveHandler: (() => void) | null = null;
+  let scrollSaveHandler: DebouncedCallback | null = null;
+  let restoreFrame = 0;
+  let refreshRevision = 0;
   const unsubscribers: Array<() => void> = [];
   // Topic handlers keep their exact control-client overload types; only
   // the unsubscribers are collected so dispose() can release them.
@@ -190,6 +195,12 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     disposed = true;
     cancelFrame(flushFrame);
     cancelFrame(scrollFrame);
+    cancelFrame(restoreFrame);
+    refreshRevision += 1;
+    saveFeedStateDebounced.cancel();
+    scrollSaveHandler?.cancel();
+    seenMsgIds.clear();
+    seenChecksums.clear();
     flushFrame = 0;
     scrollFrame = 0;
     flushQueued = false;
@@ -206,13 +217,21 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     // Drop replays before they reach the feed: a reconnect
     // replay must not re-render, count as unread, or re-fire
     // the chat observer.
-    if (isDuplicateEvent(event, Date.now())) return;
+    if (disposed || isDuplicateEvent(event, Date.now(), seenMsgIds, seenChecksums)) return;
     stageEvent({ ...event, id: nextEventId.value++, receivedAt: Date.now() });
   };
 
   // Live feed state arrives only via authoritative domain topics; the
   // legacy `live-event` / `room-stats` / `gift-catalog` pushes are no
   // longer subscribed (backend keeps them solely for compatibility).
+  unsubscribers.push(control.onTopic<{ uniqueId?: string; roomId?: string }>('live.connected', (data) => {
+    const scope = `${data.uniqueId ?? ''}:${data.roomId ?? ''}`;
+    if (scope !== sessionScope) {
+      seenMsgIds.clear();
+      seenChecksums.clear();
+      sessionScope = scope;
+    }
+  }));
   unsubscribers.push(control.onTopic<{ event: UiEvent }>('live.ui-event', (data) => {
     pushFeedEvent(data.event);
   }));
@@ -224,6 +243,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     },
   ));
   unsubscribers.push(control.onTopic<{ gifts: GiftCatalogEntry[] }>('gifts.catalog', (data) => {
+    refreshRevision += 1;
     giftCatalog.value = data.gifts;
   }));
   unsubscribers.push(control.onTopic<{ phase: string; message: string }>('live.error', (data) => {
@@ -237,9 +257,10 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   }));
 
   const refresh = async (): Promise<void> => {
+    const revision = ++refreshRevision;
     try {
       const result = await control.call<GiftCatalogResult>('gifts.list', {});
-      giftCatalog.value = result.gifts;
+      if (!disposed && revision === refreshRevision) giftCatalog.value = result.gifts;
     } catch (failure) {
       console.warn(`gifts.list failed: ${errorMessage(failure)}`);
     }
@@ -270,7 +291,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     });
   };
   const saveFeedStateDebounced = debounce(saveFeedState);
-  watch([filter, searchQuery, autoScroll], saveFeedStateDebounced);
+  unsubscribers.push(watch([filter, searchQuery, autoScroll], saveFeedStateDebounced));
   /** Applies the restored scroll offset once content is tall enough. */
   const applySavedScrollTop = (): void => {
     const container = streamContainerRef.value;
@@ -280,11 +301,12 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     container.scrollTop = top;
     restoreScrollTop = undefined;
   };
-  watch(events, applySavedScrollTop);
+  unsubscribers.push(watch(events, applySavedScrollTop));
   const setStreamContainerRef = (element: Element | null): void => {
     const previous = streamContainerRef.value;
     if (previous && scrollSaveHandler) {
       previous.removeEventListener('scroll', scrollSaveHandler);
+      scrollSaveHandler.cancel();
       scrollSaveHandler = null;
     }
     streamContainerRef.value = element instanceof HTMLDivElement ? element : null;
@@ -293,7 +315,8 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     // Restore the position the user left when auto-scroll is
     // off; with auto-scroll on, the controller's watcher keeps
     // the stream pinned to the bottom instead.
-    scheduleFrame(applySavedScrollTop);
+    cancelFrame(restoreFrame);
+    restoreFrame = scheduleFrame(() => { restoreFrame = 0; if (!disposed) applySavedScrollTop(); });
     scrollSaveHandler = debounce(saveFeedState);
     container.addEventListener('scroll', scrollSaveHandler);
   };
