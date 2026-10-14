@@ -1,3 +1,4 @@
+import { ownControlSubscriptions } from './control-owner.ts';
 import { ref } from 'vue';
 
 import type { JsonObject } from '../../automation/types.ts';
@@ -61,6 +62,10 @@ export interface PluginsCallbacks {
 
 /** Plugins: settings, options, health, provisioning, and installation. */
 export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) {
+  const owner = ownControlSubscriptions(control);
+  control = owner.client;
+  let disposed = false;
+
   const pluginSettings = ref<Record<string, PluginSettingsState>>({});
   const actionOptions = ref<Record<string, ActionOptionItem[]>>({});
   const actionOptionErrors = ref<Record<string, string>>({});
@@ -75,6 +80,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
   let pluginProgressTimer: ReturnType<typeof setTimeout> | undefined;
 
   const applySettings = (result: PluginSettingsResult): void => {
+    if (disposed) return;
     pluginSettings.value = {
       ...pluginSettings.value,
       [result.pluginId]: {
@@ -86,6 +92,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
   };
 
   const applyOptions = (result: PluginOptionsResult, error?: string): void => {
+    if (disposed) return;
     actionOptions.value = { ...actionOptions.value, [result.source]: result.options };
     if (error) {
       actionOptionErrors.value = { ...actionOptionErrors.value, [result.source]: error };
@@ -142,6 +149,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
     });
   });
   const applyProgress = (message: Extract<HostMessage, { type: 'plugin-progress' }>): void => {
+    if (disposed) return;
     pluginProgress.value = message;
     if (pluginProgressTimer) clearTimeout(pluginProgressTimer);
     if (message.state === 'ready' || message.state === 'failed') {
@@ -197,6 +205,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
       .call<PluginSettingsResult>('plugins.settings.get', { pluginId: id })
       .then(applySettings)
       .catch((failure: unknown) => {
+        if (disposed) return;
         callbacks.reportError(errorMessage(failure));
       });
   };
@@ -206,6 +215,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
       .call<PluginSettingsResult>('plugins.settings.set', { pluginId: id, values })
       .then(applySettings)
       .catch((failure: unknown) => {
+        if (disposed) return;
         callbacks.reportError(errorMessage(failure));
       });
   };
@@ -224,6 +234,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
       .call<PluginOptionsResult>('plugins.options', params)
       .then((result) => applyOptions(result))
       .catch((failure: unknown) => {
+        if (disposed) return;
         applyOptions({ source, options: [], selected: null }, errorMessage(failure));
       });
   };
@@ -232,6 +243,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
     void control
       .call<PluginConnectionResult>('plugins.health', { pluginId: id })
       .then((result) => {
+        if (disposed) return;
         pluginConnections.value = {
           ...pluginConnections.value,
           [result.pluginId]: {
@@ -243,6 +255,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
         };
       })
       .catch((failure: unknown) => {
+        if (disposed) return;
         pluginConnections.value = {
           ...pluginConnections.value,
           [id]: { ok: false, latencyMs: 0, error: errorMessage(failure), at: Date.now() },
@@ -262,6 +275,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
         password,
       })
       .then((result) => {
+        if (disposed) return;
         pluginProvision.value = {
           ...pluginProvision.value,
           [result.pluginId]: {
@@ -280,6 +294,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
         }
       })
       .catch((failure: unknown) => {
+        if (disposed) return;
         pluginProvision.value = {
           ...pluginProvision.value,
           [id]: { working: false, ok: false, message: errorMessage(failure) },
@@ -294,9 +309,10 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
     try {
       await control.call(method, params);
     } catch (failure) {
+      if (disposed) return;
       callbacks.reportError(errorMessage(failure));
     }
-    await callbacks.refreshBehavior();
+    if (!disposed) await callbacks.refreshBehavior();
   };
 
   const handleSetPluginInstalled = (id: string, installed: boolean): void => {
@@ -322,6 +338,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
     void control
       .call('plugins.install', { path, replaceExisting })
       .then(() => {
+        if (disposed) return;
         pluginInstallState.value = {
           installing: false,
           error: '',
@@ -332,6 +349,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
         void callbacks.refreshBehavior();
       })
       .catch((failure: unknown) => {
+        if (disposed) return;
         const message = errorMessage(failure);
         // Mirrors the host install-error classification: an existing
         // package id asks for replace confirmation instead of failing.
@@ -359,6 +377,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
     if (pluginInstallState.value.installing) return;
     pluginInstallState.value = createInitialPluginInstallState();
     callbacks.pickPluginPackage((path, pickerError) => {
+      if (disposed) return;
       if (pickerError) {
         pluginInstallState.value = {
           installing: false,
@@ -385,7 +404,17 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
     pluginInstallState.value = createInitialPluginInstallState();
   };
 
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    owner.dispose();
+    if (pluginProgressTimer !== undefined) clearTimeout(pluginProgressTimer);
+    pluginProgressTimer = undefined;
+  };
+
   return {
+    diagnostics: () => ({ timers: Number(pluginProgressTimer !== undefined), disposed }),
+    dispose,
     pluginSettings,
     actionOptions,
     actionOptionErrors,

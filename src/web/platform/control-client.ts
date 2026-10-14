@@ -39,6 +39,7 @@ type PendingCall = {
   resolve: (result: unknown) => void;
   reject: (error: ControlCallError) => void;
   timer: ReturnType<typeof setTimeout>;
+  cleanupAbort: () => void;
 };
 
 type RpcResponseWire = {
@@ -66,10 +67,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export interface ControlClient {
-  diagnostics?(): { pending: number; capacity: number; overloaded: number };
+  diagnostics?(): { pending: number; capacity: number; overloaded: number; topicCount?: number; topicSubscriptions?: number; pushSubscriptions?: number };
   attach(): void;
   detach(): void;
-  call<T = unknown>(method: string, params?: RpcParams): Promise<T>;
+  call<T = unknown>(method: string, params?: RpcParams, options?: { signal?: AbortSignal }): Promise<T>;
   onTopic<T = unknown>(topic: string, handler: TopicHandler<T>): Unsubscribe;
   onPush(type: HostMessage['type'], handler: PushHandler): Unsubscribe;
   onTransportError(handler: TransportErrorHandler): Unsubscribe;
@@ -87,6 +88,10 @@ export interface ControlClient {
 export function createControlClient(options?: { timeoutMs?: number }): ControlClient {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let nextId = 0;
+  // Every client/page gets its own namespace. Native generation fencing and
+  // unique IDs jointly prevent a queued old-page reply resolving a new call.
+  const requestPrefix = globalThis.crypto?.randomUUID?.() ??
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   let overloaded = 0;
   let detached = false;
   const pending = new Map<number | string, PendingCall>();
@@ -122,6 +127,7 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
       if (!call) return;
       pending.delete(response.id);
       clearTimeout(call.timer);
+      call.cleanupAbort();
       if (response.error !== undefined && response.error !== null) {
         const code = typeof response.error.code === 'string' ? response.error.code : 'error';
         const message =
@@ -182,7 +188,10 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
   };
 
   return {
-    diagnostics: () => ({ pending: pending.size, capacity: MAX_PENDING_CALLS, overloaded }),
+    diagnostics: () => ({ pending: pending.size, capacity: MAX_PENDING_CALLS, overloaded,
+      topicCount: topics.size, topicSubscriptions: [...topics.values()].reduce((total, handlers) => total + handlers.size, 0),
+      pushSubscriptions: [...pushes.values()].reduce((total, handlers) => total + handlers.size, 0),
+    }),
     attach(): void {
       detached = false;
       attachedReceive = receive;
@@ -208,13 +217,16 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
       gaps.clear();
       for (const [, call] of pending) {
         clearTimeout(call.timer);
+      call.cleanupAbort();
         call.reject(new ControlCallError('transport', 'control client detached'));
       }
       pending.clear();
     },
 
-    call<T = unknown>(method: string, params?: RpcParams): Promise<T> {
+    call<T = unknown>(method: string, params?: RpcParams, options?: { signal?: AbortSignal }): Promise<T> {
       return new Promise<T>((resolve, reject) => {
+        const signal = options?.signal;
+        if (signal?.aborted) { reject(new ControlCallError('cancelled', 'control request owner disposed')); return; }
         if (detached) {
           reject(new ControlCallError('transport', 'control client detached'));
           return;
@@ -230,7 +242,7 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
           reject(new ControlCallError('transport', 'native host is unavailable'));
           return;
         }
-        const id = ++nextId;
+        const id = `rpc-${requestPrefix}-${++nextId}`;
         let payload: string;
         try {
           payload = JSON.stringify({ jsonrpc: '2.0', id, method, params: params ?? {} });
@@ -251,8 +263,16 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
           reject(error);
           return;
         }
+        const onAbort = (): void => {
+          if (!pending.delete(id)) return;
+          clearTimeout(timer);
+          cleanupAbort();
+          reject(new ControlCallError('cancelled', 'control request owner disposed; accepted operation may still complete'));
+        };
+        const cleanupAbort = (): void => { signal?.removeEventListener('abort', onAbort); };
         const timer = setTimeout(() => {
           pending.delete(id);
+          cleanupAbort();
           const error = new ControlCallError('timeout', `request ${method} timed out`);
           reportTransportError(error.message);
           reject(error);
@@ -261,12 +281,16 @@ export function createControlClient(options?: { timeoutMs?: number }): ControlCl
           resolve: (result) => resolve(result as T),
           reject,
           timer,
+          cleanupAbort,
         });
+        signal?.addEventListener('abort', onAbort, { once: true });
+        if (signal?.aborted) { onAbort(); return; }
         try {
           window.ipc.postMessage(payload);
         } catch (error) {
           pending.delete(id);
           clearTimeout(timer);
+          cleanupAbort();
           reject(new ControlCallError('transport', `could not send ${method}: ${String(error)}`));
         }
       });

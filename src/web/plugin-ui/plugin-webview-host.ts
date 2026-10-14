@@ -79,10 +79,10 @@ export interface BrokerEvent {
 
 /** Downstream operations the host performs for one bound plugin. */
 export interface BrokerBackend {
-  getSettings(): Promise<Record<string, unknown>>;
-  setSettings(values: Record<string, unknown>): Promise<Record<string, unknown>>;
-  executeAction(action: string, config: Record<string, unknown>): Promise<unknown>;
-  getOptions(source: string, refresh: boolean): Promise<{ options: unknown[]; selected: string | null }>;
+  getSettings(signal?: AbortSignal): Promise<Record<string, unknown>>;
+  setSettings(values: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  executeAction(action: string, config: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
+  getOptions(source: string, refresh: boolean, signal?: AbortSignal): Promise<{ options: unknown[]; selected: string | null }>;
   getLocale(): Promise<string>;
   getTheme(): Promise<string>;
 }
@@ -167,21 +167,21 @@ export function controlBackend(
   theme: () => string,
 ): BrokerBackend {
   return {
-    async getSettings(): Promise<Record<string, unknown>> {
+    async getSettings(signal?: AbortSignal): Promise<Record<string, unknown>> {
       const result = await control.call<{ values?: Record<string, unknown> }>(
         'plugins.settings.get',
-        { pluginId },
+        { pluginId }, { signal },
       );
       return result.values ?? {};
     },
-    async setSettings(values: Record<string, unknown>): Promise<Record<string, unknown>> {
+    async setSettings(values: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
       const result = await control.call<{ values?: Record<string, unknown> }>(
         'plugins.settings.set',
-        { pluginId, values },
+        { pluginId, values }, { signal },
       );
       return result.values ?? {};
     },
-    async executeAction(action: string, config: Record<string, unknown>): Promise<unknown> {
+    async executeAction(action: string, config: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
       // Broker execution is always live: the plugin UI's execute buttons
       // (voice tests, output switches) must take real effect. Ownership
       // scoping still confines the call to the mounted plugin.
@@ -190,15 +190,16 @@ export function controlBackend(
         config,
         live: true,
         pluginId,
-      });
+      }, { signal });
     },
     async getOptions(
       source: string,
       refresh: boolean,
+      signal?: AbortSignal,
     ): Promise<{ options: unknown[]; selected: string | null }> {
       const result = await control.call<{ options?: unknown[]; selected?: string | null }>(
         'plugins.options',
-        { source, refresh, pluginId },
+        { source, refresh, pluginId }, { signal },
       );
       return {
         options: Array.isArray(result.options) ? result.options : [],
@@ -222,6 +223,7 @@ export interface PluginWebviewHostOptions {
   /** Subscribes to host event topics; returns an unsubscribe function. */
   subscribeTopic?: (topic: string, listener: (data: unknown) => void) => () => void;
   onError?: (message: string) => void;
+  requestTimeoutMs?: number;
 }
 
 const MAX_ID_LENGTH = 128;
@@ -235,22 +237,44 @@ const MAX_SOURCE_LENGTH = 512;
  * way to post back and the frame's `contentWindow` to authenticate
  * inbound messages by source.
  */
+const developmentHosts = new Set<PluginWebviewHost>();
+export function pluginHostDiagnostics() {
+  let pending = 0, timers = 0, subscriptions = 0;
+  for (const host of developmentHosts) {
+    const snapshot = host.diagnostics(); pending += snapshot.pending; timers += snapshot.timers; subscriptions += snapshot.subscriptions;
+  }
+  return { hosts: developmentHosts.size, pending, timers, subscriptions };
+}
+
 export class PluginWebviewHost {
   private readonly options: PluginWebviewHostOptions;
   private readonly frameWindow: WindowProxy | null;
   private readonly topics = new Map<string, () => void>();
   private disposed = false;
+  private readonly outstanding = new Set<{ timer: ReturnType<typeof setTimeout> | null; expired: boolean; controller: AbortController }>();
+
+  diagnostics(): { pending: number; timers: number; subscriptions: number } {
+    return { pending: this.outstanding.size, timers: [...this.outstanding].filter((entry) => entry.timer !== null).length, subscriptions: this.topics.size };
+  }
 
   constructor(frameWindow: WindowProxy | null, options: PluginWebviewHostOptions) {
     this.frameWindow = frameWindow;
     this.options = options;
+    if (import.meta.env?.DEV) developmentHosts.add(this);
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    developmentHosts.delete(this);
     for (const unsubscribe of this.topics.values()) unsubscribe();
     this.topics.clear();
+    for (const entry of this.outstanding) {
+      if (entry.timer !== null) clearTimeout(entry.timer);
+      entry.timer = null;
+      entry.controller.abort();
+    }
+    this.outstanding.clear();
   }
 
   /** Pushes one host event to the frame when it subscribed to the topic. */
@@ -295,23 +319,43 @@ export class PluginWebviewHost {
       });
       return;
     }
+    if (this.outstanding.size >= 128) {
+      this.respond({ apiVersion: BROKER_API_VERSION, id, ok: false, error: 'plugin broker admission full' });
+      return;
+    }
+    const entry = { timer: null as ReturnType<typeof setTimeout> | null, expired: false, controller: new AbortController() };
+    this.outstanding.add(entry);
+    entry.timer = setTimeout(() => {
+      entry.timer = null;
+      entry.expired = true;
+      this.respond({ apiVersion: BROKER_API_VERSION, id, ok: false, error: 'plugin broker deadline exceeded; operation may still complete' });
+      entry.controller.abort();
+      // Hold admission until backend settlement: timing out an uncooperative
+      // operation must not admit unlimited replacements.
+    }, this.options.requestTimeoutMs ?? 30_000);
     try {
-      const result = await this.route(method as BrokerMethod, (params ?? {}) as Record<string, unknown>);
-      if (this.disposed) return;
+      const result = await this.route(method as BrokerMethod, (params ?? {}) as Record<string, unknown>, entry.controller.signal);
+      if (this.disposed || entry.expired) return;
+      if (result.effect === 'subscribed' && new Set([...this.topics.keys(), ...result.topics]).size > 32) {
+        throw new Error('plugin broker subscription capacity exhausted');
+      }
       if (result.effect === 'subscribed' || result.effect === 'unsubscribed') {
         this.applySubscription(result.topics, result.effect === 'subscribed');
       }
       this.respond({ apiVersion: BROKER_API_VERSION, id, ok: true, result: result.value });
     } catch (error) {
-      if (this.disposed) return;
+      if (this.disposed || entry.expired) return;
       const message = error instanceof Error ? error.message : String(error);
       this.options.onError?.(message);
       this.respond({ apiVersion: BROKER_API_VERSION, id, ok: false, error: message });
+    } finally {
+      if (entry.timer !== null) clearTimeout(entry.timer);
+      this.outstanding.delete(entry);
     }
   }
 
   private respond(response: BrokerResponse): void {
-    this.options.postToFrame(response);
+    if (!this.disposed) this.options.postToFrame(response);
   }
 
   private applySubscription(topics: string[], subscribe: boolean): void {
@@ -333,17 +377,18 @@ export class PluginWebviewHost {
   private async route(
     method: BrokerMethod,
     params: Record<string, unknown>,
+    signal: AbortSignal,
   ): Promise<{ value: unknown; effect?: 'subscribed' | 'unsubscribed'; topics: string[] }> {
     const backend = this.options.backend;
     switch (method) {
       case 'settings.get':
-        return { value: await backend.getSettings(), topics: [] };
+        return { value: await backend.getSettings(signal), topics: [] };
       case 'settings.set': {
         const values = params.values;
         if (!values || typeof values !== 'object' || Array.isArray(values)) {
           throw new Error('settings.set needs a values object');
         }
-        return { value: await backend.setSettings(values as Record<string, unknown>), topics: [] };
+        return { value: await backend.setSettings(values as Record<string, unknown>, signal), topics: [] };
       }
       case 'actions.execute': {
         const action = params.action;
@@ -355,7 +400,7 @@ export class PluginWebviewHost {
           throw new Error('actions.execute needs a config object');
         }
         return {
-          value: await backend.executeAction(action, (config ?? {}) as Record<string, unknown>),
+          value: await backend.executeAction(action, (config ?? {}) as Record<string, unknown>, signal),
           topics: [],
         };
       }
@@ -365,7 +410,7 @@ export class PluginWebviewHost {
           throw new Error('options.get needs an option source');
         }
         return {
-          value: await backend.getOptions(source, params.refresh === true),
+          value: await backend.getOptions(source, params.refresh === true, signal),
           topics: [],
         };
       }
@@ -379,6 +424,9 @@ export class PluginWebviewHost {
           if (typeof topic !== 'string' || topic.length === 0 || topic.length > MAX_TOPIC_LENGTH || !topic.startsWith('plugin.')) {
             throw new Error('event topics are plugin.* names');
           }
+        }
+        if (method === 'events.subscribe' && new Set([...this.topics.keys(), ...topics as string[]]).size > 32) {
+          throw new Error('plugin broker subscription capacity exhausted');
         }
         return {
           value: true,

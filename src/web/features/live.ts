@@ -326,6 +326,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   };
 
   return {
+    diagnostics: () => ({ visible: events.value.length, staged: staged.length, dropped: droppedUiEvents.value, frames: Number(flushFrame !== 0) + Number(scrollFrame !== 0) + Number(restoreFrame !== 0) }),
     events,
     filter,
     searchQuery,

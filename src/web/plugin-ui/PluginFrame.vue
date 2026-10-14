@@ -95,6 +95,7 @@ export const PluginFrame = defineVueComponent<PluginFrameProps>(
 
     return () => (
       <iframe
+        key={`${props.pluginId}:${props.src}`}
         ref={frameRef}
         class="plg-frame"
         title={props.pluginId}

@@ -1,3 +1,4 @@
+import { pluginHostDiagnostics } from '../plugin-ui/plugin-webview-host.ts';
 import { onMounted, onUnmounted, ref, watch } from 'vue';
 
 import type { PluginPageDescriptor } from '../../automation/behavior/types.ts';
@@ -189,11 +190,25 @@ export function useAppController() {
     // user action before starting network work on a cold launch.
   });
 
+  const developmentDiagnostics = (): Record<string, unknown> => {
+    const memory = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory;
+    return { control: control.diagnostics?.(), live: live.diagnostics(),
+      ownedTimers: plugins.diagnostics().timers + automation.diagnostics().timers,
+      pluginHosts: pluginHostDiagnostics(), iframeCount: document.querySelectorAll('iframe').length,
+      jsHeapBytes: memory?.usedJSHeapSize ?? null,
+    };
+  };
+  if (import.meta.env?.DEV) (window as unknown as Record<string, unknown>)['__tiktools_frontend_diagnostics__'] = developmentDiagnostics;
+
   onUnmounted(() => {
     // Release frame callbacks, scroll listeners, and topic subscriptions
     // so repeated mount/unmount cycles (rapid tab navigation, HMR) cannot
     // accumulate pending frames or duplicated listeners.
     disposed = true;
+    const scope = window as unknown as Record<string, unknown>;
+    if (scope['__tiktools_frontend_diagnostics__'] === developmentDiagnostics) delete scope['__tiktools_frontend_diagnostics__'];
+    plugins.dispose();
+    automation.dispose();
     connection.dispose();
     live.dispose();
     points.dispose();

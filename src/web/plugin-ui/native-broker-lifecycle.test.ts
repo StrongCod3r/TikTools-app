@@ -15,7 +15,8 @@ function harness() {
     addEventListener: (name: string, listener: () => void) => listeners.set(name, listener),
     removeEventListener: (name: string) => listeners.delete(name),
   } as unknown as Window & {
-    tiktools: { settings: { get(): Promise<unknown> } };
+    tiktools: { settings: { get(): Promise<unknown> }; events: { subscribe(topics: string[], listener: () => void): () => void } };
+    __tiktools_broker_diagnostics__: () => { pending: number; topics: number; listeners: number };
     __tiktools_broker_push__: (value: unknown) => void;
     __tiktools_broker_dispose__: () => void;
   };
@@ -52,4 +53,17 @@ test('native broker bounds admission and rejects all pending requests on teardow
   expect(listeners.size).toBe(0);
   window.__tiktools_broker_dispose__();
   expect(await window.tiktools.settings.get().catch((error: Error) => error.message)).toContain('closed');
+});
+
+
+test('native subscriptions bound topic and callback ownership and dispose idempotently', async () => {
+  const { window } = harness();
+  const off = Array.from({ length: 128 }, () => window.tiktools.events.subscribe(['plugin.event'], () => {}));
+  expect(window.__tiktools_broker_diagnostics__().listeners).toBe(128);
+  expect(() => window.tiktools.events.subscribe(['plugin.event'], () => {})).toThrow('limit');
+  for (const unsubscribe of off) { unsubscribe(); unsubscribe(); }
+  expect(window.__tiktools_broker_diagnostics__().listeners).toBe(0);
+  window.__tiktools_broker_dispose__();
+  await Promise.resolve();
+  expect(window.__tiktools_broker_diagnostics__()).toEqual({ pending: 0, topics: 0, listeners: 0 });
 });

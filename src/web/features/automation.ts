@@ -1,3 +1,4 @@
+import { ownControlSubscriptions } from './control-owner.ts';
 import { computed, ref, type ComputedRef } from 'vue';
 
 import type { AutomationEventType, AutomationScriptAnalysis } from '../../automation/types.ts';
@@ -50,6 +51,10 @@ export interface LastHotkeyEvent {
 
 /** Behavior snapshot, records, runs, and the workflow graph editor. */
 export function useAutomation(control: ControlClient) {
+  const owner = ownControlSubscriptions(control);
+  control = owner.client;
+  let disposed = false;
+
   const behavior = ref<BehaviorSnapshot>({
     actions: [],
     events: [],
@@ -77,6 +82,7 @@ export function useAutomation(control: ControlClient) {
   };
 
   const applySnapshot = (snapshot: BehaviorSnapshot): void => {
+    if (disposed) return;
     setPluginTranslations(snapshot.translations);
     setPluginEventTypes(snapshot.eventTypes ?? []);
     // Seed plugin-declared autocomplete contributions (manifest
@@ -146,6 +152,7 @@ export function useAutomation(control: ControlClient) {
     if (message.type !== 'automation-error') return;
     behaviorError.value = message.message;
   });
+  let refreshRevision = 0;
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * Trailing debounce on `workflow.changed`: multi-record
@@ -154,10 +161,12 @@ export function useAutomation(control: ControlClient) {
    * two RPCs. Bursts collapse into one refresh.
    */
   const scheduleRefresh = (): void => {
+    if (disposed) return;
     if (refreshTimer !== null) clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => {
       refreshTimer = null;
       void refresh().catch((failure: unknown) => {
+        if (disposed) return;
         console.warn(`automation refresh failed: ${errorMessage(failure)}`);
       });
     }, 200);
@@ -167,14 +176,18 @@ export function useAutomation(control: ControlClient) {
   });
 
   const refresh = async (): Promise<void> => {
+    if (disposed) return;
+    const revision = ++refreshRevision;
     try {
       const [snapshot, runs] = await Promise.all([
         control.call<BehaviorSnapshot>('automation.snapshot', {}),
         control.call<AutomationRunsResult>('automation.runs', {}),
       ]);
+      if (disposed || revision !== refreshRevision) return;
       applySnapshot(snapshot);
       behaviorRuns.value = runs.runs;
     } catch (failure) {
+      if (disposed || revision !== refreshRevision) return;
       behaviorError.value = errorMessage(failure);
     }
   };
@@ -184,6 +197,7 @@ export function useAutomation(control: ControlClient) {
     try {
       await work();
     } catch (failure) {
+      if (disposed) return;
       behaviorError.value = errorMessage(failure);
       return;
     }
@@ -199,6 +213,7 @@ export function useAutomation(control: ControlClient) {
     const id = (record as { id?: unknown }).id;
     if (typeof id === 'string' && id.trim() !== '') {
       return control.call('automation.update', { id, kind, record }).catch((failure: unknown) => {
+        if (disposed) return;
         if (failure instanceof ControlCallError && failure.code === 'automation_not_found') {
           return control.call('automation.create', { kind, record });
         }
@@ -224,9 +239,11 @@ export function useAutomation(control: ControlClient) {
     void control
       .call<BehaviorRun>('automation.test', { record, kind, trigger })
       .then((run) => {
+        if (disposed) return;
         behaviorTestRuns.value = [run];
       })
       .catch((failure: unknown) => {
+        if (disposed) return;
         behaviorError.value = errorMessage(failure);
       });
   };
@@ -268,6 +285,7 @@ export function useAutomation(control: ControlClient) {
     void control
       .call<AutomationFireResult>('automation.fire', { trigger: event.trigger, record: event })
       .then((result) => {
+        if (disposed) return;
         behaviorTestRuns.value = [
           {
             id: `fire-${Date.now()}`,
@@ -285,6 +303,7 @@ export function useAutomation(control: ControlClient) {
         ];
       })
       .catch((failure: unknown) => {
+        if (disposed) return;
         behaviorError.value = errorMessage(failure);
       });
   };
@@ -301,6 +320,7 @@ export function useAutomation(control: ControlClient) {
     try {
       await saveRecord(kind, record);
     } catch (failure) {
+      if (disposed) return;
       behaviorError.value = errorMessage(failure);
       throw failure;
     }
@@ -346,10 +366,12 @@ export function useAutomation(control: ControlClient) {
     void control
       .call<{ granted: boolean; message: string }>('system.requestInputAccess', {})
       .then((result) => {
+        if (disposed) return;
         if (result.granted) return refresh();
         behaviorError.value = result.message || 'Access was not granted.';
       })
       .catch((failure: unknown) => {
+        if (disposed) return;
         behaviorError.value = errorMessage(failure);
       })
       .finally(() => {
@@ -370,7 +392,18 @@ export function useAutomation(control: ControlClient) {
       eventType,
     });
 
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    owner.dispose();
+    ++refreshRevision;
+    if (refreshTimer !== null) clearTimeout(refreshTimer);
+    refreshTimer = null;
+  };
+
   return {
+    diagnostics: () => ({ timers: Number(refreshTimer !== null), disposed }),
+    dispose,
     behavior,
     behaviorRuns,
     behaviorTestRuns,

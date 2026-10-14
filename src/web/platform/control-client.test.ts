@@ -18,6 +18,12 @@ function installMockIpc(): MockIpc {
   return mock;
 }
 
+function sentId(): string {
+  const target = (globalThis as Record<string, unknown>)['window'] as Record<string, unknown>;
+  const mock = target['ipc'] as MockIpc;
+  return (JSON.parse(mock.sent.at(-1) as string) as { id: string }).id;
+}
+
 function hostMessage(): (raw: string) => void {
   const target = (globalThis as Record<string, unknown>)['window'] as Record<string, unknown>;
   const receive = target['__webview_on_message__'] as (raw: string) => void;
@@ -35,11 +41,11 @@ test('call resolves with the result of the matching rpc-response', async () => {
   ] as MockIpc;
   expect(JSON.parse(mock.sent[0] as string)).toMatchObject({
     jsonrpc: '2.0',
-    id: 1,
+    id: expect.any(String),
     method: 'system.ping',
   });
   const receive = hostMessage();
-  receive(JSON.stringify({ type: 'rpc-response', response: { id: 1, result: { ok: true } } }));
+  receive(JSON.stringify({ type: 'rpc-response', response: { id: sentId(), result: { ok: true } } }));
   await expect(pending).resolves.toEqual({ ok: true });
   control.detach();
   delete (globalThis as Record<string, unknown>)['window'];
@@ -53,7 +59,7 @@ test('call rejects with the host error code and message', async () => {
   hostMessage()(
     JSON.stringify({
       type: 'rpc-response',
-      response: { id: 1, error: { code: 'plugin_not_found', message: 'nope' } },
+      response: { id: sentId(), error: { code: 'plugin_not_found', message: 'nope' } },
     }),
   );
   await expect(pending).rejects.toMatchObject({ code: 'plugin_not_found', message: 'nope' });
@@ -93,7 +99,7 @@ test('host too_large error with an id rejects the pending call', async () => {
   hostMessage()(
     JSON.stringify({
       type: 'rpc-response',
-      response: { id: 1, error: { code: 'too_large', message: 'request too large' } },
+      response: { id: sentId(), error: { code: 'too_large', message: 'request too large' } },
     }),
   );
   await expect(pending).rejects.toMatchObject({ code: 'too_large' });
@@ -230,10 +236,42 @@ test('pending RPC admission is bounded and detach releases every slot', async ()
   const outcomes = Array.from({ length: 128 }, () => control.call('system.ping').catch((error: unknown) => error));
   await expect(control.call('system.ping')).rejects.toMatchObject({ code: 'overloaded' });
   expect(ipc.sent).toHaveLength(128);
-  expect(control.diagnostics?.()).toEqual({ pending: 128, capacity: 128, overloaded: 1 });
+  expect(control.diagnostics?.()).toEqual({ pending: 128, capacity: 128, overloaded: 1, topicCount: 0, topicSubscriptions: 0, pushSubscriptions: 0 });
   control.detach();
   expect(await Promise.all(outcomes)).toHaveLength(128);
   expect(control.diagnostics?.()?.pending).toBe(0);
   await expect(control.call('system.ping')).rejects.toMatchObject({ code: 'transport' });
   delete (globalThis as Record<string, unknown>)['window'];
+});
+
+
+test('a late prior-client response cannot resolve a fresh client request', async () => {
+  installMockIpc();
+  const old = createControlClient(); old.attach();
+  const first = old.call('system.ping').catch(() => undefined);
+  const oldId = sentId(); old.detach(); await first;
+  const fresh = createControlClient(); fresh.attach();
+  const second = fresh.call('system.ping');
+  const newId = sentId();
+  expect(newId).not.toBe(oldId);
+  hostMessage()(JSON.stringify({ type: 'rpc-response', response: { id: oldId, result: 'stale' } }));
+  expect(fresh.diagnostics?.().pending).toBe(1);
+  hostMessage()(JSON.stringify({ type: 'rpc-response', response: { id: newId, result: 'current' } }));
+  await expect(second).resolves.toBe('current');
+  fresh.detach(); delete (globalThis as Record<string, unknown>)['window'];
+});
+
+
+test('owner cancellation removes pending RPC admission and ignores a late reply', async () => {
+  const mock = installMockIpc();
+  const control = createControlClient(); control.attach();
+  const owner = new AbortController();
+  const pending = control.call('system.ping', {}, { signal: owner.signal });
+  const id = sentId(); owner.abort();
+  await expect(pending).rejects.toMatchObject({ code: 'cancelled' });
+  expect(control.diagnostics?.().pending).toBe(0);
+  hostMessage()(JSON.stringify({ type: 'rpc-response', response: { id, result: 'late' } }));
+  await expect(control.call('system.ping', {}, { signal: owner.signal })).rejects.toMatchObject({ code: 'cancelled' });
+  expect(mock.sent).toHaveLength(1);
+  control.detach(); delete (globalThis as Record<string, unknown>)['window'];
 });

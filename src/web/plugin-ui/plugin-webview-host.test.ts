@@ -1,8 +1,10 @@
+import { createControlClient } from '../platform/control-client.ts';
 import { expect, test } from 'bun:test';
 
 import {
   BROKER_API_VERSION,
   PluginWebviewHost,
+  controlBackend,
   pluginUiUrl,
   type BrokerBackend,
   type BrokerEvent,
@@ -245,4 +247,60 @@ test('dispose during a pending backend call prevents responses to the old frame'
   await pending;
   await send('stale', 'events.subscribe', { topics: ['plugin.event'] });
   expect(posted).toHaveLength(0);
+});
+
+test('iframe admission stays bounded after deadlines and disposal clears timers', async () => {
+  const frame = {} as WindowProxy;
+  const posted: Array<BrokerResponse | BrokerEvent> = [];
+  let complete!: (value: Record<string, unknown>) => void;
+  const stalled = new Promise<Record<string, unknown>>((resolve) => { complete = resolve; });
+  const host = new PluginWebviewHost(frame, {
+    pluginId: 'owner.plugin', backend: { ...fakeBackend(), getSettings: () => stalled },
+    postToFrame: (entry) => posted.push(entry), requestTimeoutMs: 5,
+  });
+  const requests = Array.from({ length: 128 }, (_, id) => host.handleFrameMessage({ apiVersion: 1, id: String(id), method: 'settings.get' }, frame));
+  await host.handleFrameMessage({ apiVersion: 1, id: 'overflow', method: 'settings.get' }, frame);
+  expect(host.diagnostics().pending).toBe(128);
+  expect((posted[0] as BrokerResponse).id).toBe('overflow');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(host.diagnostics()).toEqual({ pending: 128, timers: 0, subscriptions: 0 });
+  expect(posted).toHaveLength(129);
+  host.dispose();
+  expect(host.diagnostics()).toEqual({ pending: 0, timers: 0, subscriptions: 0 });
+  complete({});
+  await Promise.all(requests);
+  expect(posted).toHaveLength(129);
+});
+
+test('concurrent subscribe requests cannot exceed the aggregate topic capacity', async () => {
+  const { host, posted, send } = harness();
+  await Promise.all([
+    send('first', 'events.subscribe', { topics: Array.from({ length: 32 }, (_, index) => `plugin.first.${index}`) }),
+    send('second', 'events.subscribe', { topics: Array.from({ length: 32 }, (_, index) => `plugin.second.${index}`) }),
+  ]);
+  expect(host.diagnostics().subscriptions).toBe(32);
+  expect((posted[0] as BrokerResponse).ok).toBe(true);
+  expect((posted[1] as BrokerResponse).ok).toBe(false);
+  host.dispose();
+});
+
+
+test('50 iframe owner disposals cancel client waits without detaching the shared control', async () => {
+  (globalThis as Record<string, unknown>)['window'] = { ipc: { postMessage() {} } };
+  const control = createControlClient(); control.attach();
+  for (let cycle = 0; cycle < 50; ++cycle) {
+    const frame = {} as WindowProxy;
+    const posted: Array<BrokerResponse | BrokerEvent> = [];
+    const host = new PluginWebviewHost(frame, {
+      pluginId: 'owner.plugin', backend: controlBackend('owner.plugin', control, () => 'en', () => 'dark'),
+      postToFrame: (value) => posted.push(value),
+    });
+    const pending = host.handleFrameMessage({ apiVersion: 1, id: 'settings', method: 'settings.get' }, frame);
+    expect(control.diagnostics?.().pending).toBe(1);
+    host.dispose(); await pending;
+    expect(control.diagnostics?.().pending).toBe(0);
+    expect(host.diagnostics()).toEqual({ pending: 0, timers: 0, subscriptions: 0 });
+    expect(posted).toHaveLength(0);
+  }
+  control.detach(); delete (globalThis as Record<string, unknown>)['window'];
 });
