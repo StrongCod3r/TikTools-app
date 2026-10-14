@@ -26,7 +26,7 @@ pub fn run(log_path: std::path::PathBuf) -> Result<(), Box<dyn std::error::Error
     let proxy = event_loop.create_proxy();
     let emitter = crate::event::shared_emitter(proxy.clone());
     let media = Arc::new(crate::media::DesktopMediaHost::default());
-    let core = Arc::new(AppCore::with_media_host(emitter, media));
+    let core = Arc::new(AppCore::with_media_host(emitter.clone(), media));
     let router = Arc::new(IpcRouter::new(core.clone()));
     instance.start_listener(proxy.clone());
     let mut app = DesktopApp::new(
@@ -36,6 +36,7 @@ pub fn run(log_path: std::path::PathBuf) -> Result<(), Box<dyn std::error::Error
         runtime.handle().clone(),
         proxy,
         log_path,
+        emitter,
     );
     event_loop.run_app(&mut app)?;
     Ok(())

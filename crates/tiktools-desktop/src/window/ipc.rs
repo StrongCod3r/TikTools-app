@@ -4,9 +4,27 @@ use super::DesktopApp;
 use crate::event::{DesktopCommand, DesktopEvent};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tiktools_control_api::ControlApi;
 use tiktools_core::ipc::IpcRouter;
 use winit::event_loop::EventLoopProxy;
+
+pub(crate) struct PendingBatch {
+    pub(crate) generation: u64,
+    pub(crate) sequence: u64,
+    pub(crate) messages: Vec<super::outbox::QueuedWebviewMessage>,
+    pub(crate) deadline: Instant,
+}
+
+/// Payload-free acknowledgment admission is handled before the main RPC
+/// semaphore, so a saturated RPC lane cannot prevent transport progress.
+pub(crate) fn parse_batch_ack(raw: &str) -> Option<(u64, u64)> {
+    if raw.len() > 64 {
+        return None;
+    }
+    let (generation, sequence) = raw.strip_prefix("tiktools-batch-ack:")?.split_once(':')?;
+    Some((generation.parse().ok()?, sequence.parse().ok()?))
+}
 
 /// Raw inbound bound shared with local IPC. Checked before any parsing.
 pub(crate) fn webview_request_too_large(raw: &str) -> bool {
@@ -17,7 +35,9 @@ pub(crate) fn webview_request_too_large(raw: &str) -> bool {
 /// errors and malformed input (full parsing happens later, on size-capped
 /// input, off the UI thread).
 pub(crate) fn is_probably_control_rpc(raw: &str) -> bool {
-    raw.contains("\"method\"")
+    raw.as_bytes()[..raw.len().min(4096)]
+        .windows(8)
+        .any(|part| part == b"\"method\"")
 }
 
 /// Allocation-free boot-handshake probe for the Winit thread: exact match
@@ -91,33 +111,63 @@ pub(crate) async fn handle_webview_ipc_message(
     control: &Arc<ControlApi>,
     proxy: &EventLoopProxy<DesktopEvent>,
     transport_failed: &AtomicBool,
+    emitter: &crate::event::EventLoopEmitter,
+    admission: (u64, Arc<tokio::sync::OwnedSemaphorePermit>),
 ) {
+    let (generation, admission) = admission;
+    if emitter.generation.load(Ordering::Acquire) != generation {
+        return;
+    }
     // A failed transport rejects RPC loudly instead of queueing work for
     // a dead page; legacy input is diagnosed and dropped.
     if transport_failed.load(Ordering::SeqCst) {
-        handle_failed_transport_message(&raw, proxy);
+        handle_failed_transport_message(&raw, emitter, generation);
         return;
     }
     match classify_inbound_message(&raw) {
         InboundRoute::Control(value) => {
-            let response = control.execute_value(&value).await;
-            emit_rpc_response(proxy, &response);
+            // A deadline reports uncertain completion; it never cancels an
+            // irreversible operation or releases its permit early. The owned
+            // task reconciles by waiting for completion, suppressing a second
+            // reply. Authoritative reads determine the final state.
+            let execution = control.execute_value(&value);
+            tokio::pin!(execution);
+            let response = tokio::select! {
+                response = &mut execution => Some(response),
+                _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                    emitter.inbound_timeouts.fetch_add(1, Ordering::Relaxed);
+                    if emitter.generation.load(Ordering::Acquire) == generation {
+                        emit_rpc_response_for_generation(emitter, generation, &tiktools_control_api::RpcResponse::error(
+                            tiktools_control_api::RpcId::extract(&value),
+                            tiktools_control_api::ApiError::new("deadline", "RPC deadline exceeded; operation may still complete; refresh authoritative state before retrying"),
+                        ));
+                    }
+                    execution.await;
+                    None
+                }
+            };
+            if emitter.generation.load(Ordering::Acquire) == generation {
+                if let Some(response) = response {
+                    emit_rpc_response_for_generation(emitter, generation, &response);
+                }
+            }
         }
-        InboundRoute::Legacy(value) if try_plugin_ui_command(&value, proxy).is_some() => {}
+        InboundRoute::Legacy(value)
+            if try_plugin_ui_command(&value, proxy, admission.clone()).is_some() => {}
         InboundRoute::Legacy(value) => {
             if let Err(error) = router.dispatch_value(&value).await {
                 tracing::warn!(%error, "invalid WebView IPC message");
             }
         }
         InboundRoute::FrontendReady => {
-            let _ = proxy.send_event(DesktopEvent::Command(DesktopCommand::FrontendReady));
+            emitter.request_ready(generation);
         }
         InboundRoute::MalformedControl(error) => {
             let response = tiktools_control_api::RpcResponse::error(
                 tiktools_control_api::RpcId::extract_from_prefix(&raw),
                 tiktools_control_api::ApiError::invalid_params(format!("invalid JSON: {error}")),
             );
-            emit_rpc_response(proxy, &response);
+            emit_rpc_response_for_generation(emitter, generation, &response);
         }
         InboundRoute::MalformedLegacy => {
             tracing::warn!("invalid legacy WebView message");
@@ -133,6 +183,7 @@ pub(crate) async fn handle_webview_ipc_message(
 fn try_plugin_ui_command(
     value: &serde_json::Value,
     proxy: &EventLoopProxy<DesktopEvent>,
+    admission: Arc<tokio::sync::OwnedSemaphorePermit>,
 ) -> Option<()> {
     let command = value.get("type")?.as_str()?;
     if command != "plugin-ui-open" && command != "plugin-ui-close" {
@@ -155,9 +206,14 @@ fn try_plugin_ui_command(
         DesktopCommand::ClosePluginUi {
             plugin_id: plugin_id.to_owned(),
             page_id: page_id.to_owned(),
+            window_id: None,
+            owner: None,
         }
     };
-    let _ = proxy.send_event(DesktopEvent::Command(command));
+    let _ = proxy.send_event(DesktopEvent::Command(DesktopCommand::AdmittedCommand {
+        command: Box::new(command),
+        admission,
+    }));
     Some(())
 }
 
@@ -165,7 +221,11 @@ fn try_plugin_ui_command(
 /// rejected with a transport failure (the id lets the rebooting frontend
 /// fail the call instead of hanging it), the boot handshake still flows
 /// so recovery can complete, and everything else is diagnosed.
-fn handle_failed_transport_message(raw: &str, proxy: &EventLoopProxy<DesktopEvent>) {
+fn handle_failed_transport_message(
+    raw: &str,
+    emitter: &crate::event::EventLoopEmitter,
+    generation: u64,
+) {
     match classify_inbound_message(raw) {
         InboundRoute::Control(value) => {
             let response = tiktools_control_api::RpcResponse::error(
@@ -175,7 +235,7 @@ fn handle_failed_transport_message(raw: &str, proxy: &EventLoopProxy<DesktopEven
                     "WebView transport failed; the UI is reloading",
                 ),
             );
-            emit_rpc_response(proxy, &response);
+            emit_rpc_response_for_generation(emitter, generation, &response);
         }
         InboundRoute::MalformedControl(error) => {
             let response = tiktools_control_api::RpcResponse::error(
@@ -185,10 +245,10 @@ fn handle_failed_transport_message(raw: &str, proxy: &EventLoopProxy<DesktopEven
                     format!("WebView transport failed; dropping malformed input (invalid JSON: {error})"),
                 ),
             );
-            emit_rpc_response(proxy, &response);
+            emit_rpc_response_for_generation(emitter, generation, &response);
         }
         InboundRoute::FrontendReady => {
-            let _ = proxy.send_event(DesktopEvent::Command(DesktopCommand::FrontendReady));
+            emitter.request_ready(generation);
         }
         InboundRoute::Legacy(_) | InboundRoute::MalformedLegacy => {
             tracing::warn!("dropping WebView IPC while the transport is failed");
@@ -196,19 +256,46 @@ fn handle_failed_transport_message(raw: &str, proxy: &EventLoopProxy<DesktopEven
     }
 }
 
+#[derive(serde::Serialize)]
+struct RpcEnvelope<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    response: &'a tiktools_control_api::RpcResponse,
+}
+
 /// Sends one RPC response to the frontend through the host-message batch
 /// path (reliable lane: never shed).
 pub(crate) fn emit_rpc_response(
-    proxy: &EventLoopProxy<DesktopEvent>,
+    emitter: &crate::event::EventLoopEmitter,
     response: &tiktools_control_api::RpcResponse,
 ) {
-    let payload = serde_json::json!({
-        "type": "rpc-response",
-        "response": response,
-    });
-    let _ = proxy.send_event(DesktopEvent::Command(DesktopCommand::EmitToWebview(
-        payload.to_string(),
-    )));
+    let payload = RpcEnvelope {
+        kind: "rpc-response",
+        response,
+    };
+    match super::outbox::encode_bounded(&payload) {
+        Ok(payload) => emitter.send(payload),
+        Err(error) => {
+            tracing::error!(%error, "RPC response exceeds transport limit");
+            emitter.fail();
+        }
+    }
+}
+
+fn emit_rpc_response_for_generation(
+    emitter: &crate::event::EventLoopEmitter,
+    generation: u64,
+    response: &tiktools_control_api::RpcResponse,
+) {
+    let payload = RpcEnvelope {
+        kind: "rpc-response",
+        response,
+    };
+    match super::outbox::encode_bounded(&payload) {
+        Ok(payload) => emitter.send_generation(payload, Some(generation)),
+        Err(_) if emitter.generation.load(Ordering::Acquire) == generation => emitter.fail(),
+        Err(_) => {}
+    }
 }
 
 impl DesktopApp {
@@ -220,13 +307,13 @@ impl DesktopApp {
     /// the reliable lane (never dropped); snapshots coalesce and feed is
     /// bounded in the lossy lane. A tripped reliable safety policy fails
     /// the transport loudly instead of growing memory without bound.
-    pub(crate) fn emit_to_webview(&mut self, message: String) {
+    pub(crate) fn emit_to_webview(&mut self, message: super::outbox::QueuedWebviewMessage) {
         // Plugin-scoped domain events fan out to subscribed plugin
         // windows; anything else is ignored by the forwarder.
-        self.plugin_ui.forward_host_message(&message);
-        self.pending_host_messages.push(message);
+        self.plugin_ui.forward_prepared(&message);
+        self.pending_host_messages.push_prepared(message);
         if self.pending_host_messages.take_transport_failure() {
-            self.fail_webview_transport();
+            self.fail_webview_transport("reliable admission exhausted");
         }
     }
 
@@ -236,11 +323,15 @@ impl DesktopApp {
     /// WebView reloads. The latch releases when the fresh page completes
     /// its handshake (see `frontend_ready`); without that handshake the
     /// transport stays failed rather than delivering to a dead page.
-    pub(crate) fn fail_webview_transport(&mut self) {
+    pub(crate) fn fail_webview_transport(&mut self, reason: &str) {
+        self.page_ready = false;
+        self.pending_batch = None;
+        self.emitter.clear_batch();
         self.webview_failed.store(true, Ordering::SeqCst);
-        self.core.set_webview_error(Some(
-            "WebView transport failed: reliable backlog overflow; reloading".to_owned(),
-        ));
+        self.emitter.advance_generation();
+        self.core.set_webview_error(Some(format!(
+            "WebView transport failed: {reason}; reloading"
+        )));
         self.pending_host_messages.clear_for_reload();
         match self.webview.as_ref() {
             Some(webview) => match webview.reload() {
@@ -264,31 +355,63 @@ impl DesktopApp {
     /// `evaluate_script` call. The frontend fans the batch out to its
     /// normal per-message dispatch.
     pub(crate) fn flush_webview_batch(&mut self) {
+        if !self.page_ready || self.pending_batch.is_some() || self.shutting_down {
+            return;
+        }
         let Some(webview) = self.webview.as_ref() else {
             return;
         };
         if self.pending_host_messages.is_empty() {
             return;
         }
-        let batch = self.pending_host_messages.take_batch();
-        let argument = match serde_json::to_string(&batch) {
-            Ok(argument) => argument,
-            Err(error) => {
-                tracing::error!(%error, "could not encode host message batch for JavaScript");
-                return;
-            }
+        let batch = self.pending_host_messages.take_prepared_batch();
+        let literals: Option<Vec<&str>> = batch
+            .iter()
+            .map(|message| message.javascript_literal.as_deref())
+            .collect();
+        let Some(literals) = literals else {
+            self.fail_webview_transport("missing prepared batch literal");
+            return;
         };
+        let argument = format!("[{}]", literals.join(","));
         tracing::debug!(
             count = batch.len(),
             bytes = argument.len(),
             "delivering host message batch to WebView"
         );
+        let generation = self.emitter.generation.load(Ordering::Acquire);
+        let sequence = self.emitter.batch_sequence.fetch_add(1, Ordering::AcqRel) + 1;
         let script = format!(
-            "if (typeof window.__tiktools_receive_batch__ === 'function') {{ window.__tiktools_receive_batch__({argument}); }} else {{ const batch = {argument}; for (const item of batch) {{ if (typeof window.__webview_on_message__ === 'function') {{ window.__webview_on_message__(item); }} else {{ const queue = window.__tiktools_host_message_queue__ || (window.__tiktools_host_message_queue__ = []); if (queue.length < 512) queue.push(item); }} }} }}"
+            "(() => {{ const batch = {argument}; if (typeof window.__tiktools_receive_batch__ === 'function') {{ window.__tiktools_receive_batch__(batch); }} else if (typeof window.__webview_on_message__ === 'function') {{ for (const item of batch) window.__webview_on_message__(item); }} else {{ return; }} window.ipc.postMessage('tiktools-batch-ack:{generation}:{sequence}'); }})();"
         );
+        self.emitter
+            .batch_messages
+            .store(batch.len() as u64, Ordering::Relaxed);
+        self.emitter.batch_bytes.store(
+            batch
+                .iter()
+                .map(|message| message.body.len())
+                .sum::<usize>() as u64,
+            Ordering::Relaxed,
+        );
+        self.pending_batch = Some(PendingBatch {
+            generation,
+            sequence,
+            messages: batch,
+            deadline: Instant::now() + Duration::from_secs(5),
+        });
+        self.emitter.evaluations.fetch_add(1, Ordering::Relaxed);
+        self.emitter
+            .evaluation_bytes
+            .fetch_add(script.len() as u64, Ordering::Relaxed);
         if let Err(error) = webview.evaluate_script(&script) {
+            self.emitter
+                .evaluation_errors
+                .fetch_add(1, Ordering::Relaxed);
             if !self.shutting_down {
-                tracing::debug!(%error, "could not deliver host message batch to WebView");
+                tracing::error!(%error, "host batch evaluation failed; retiring transport and resyncing");
+                self.core.record_event_gap();
+                self.fail_webview_transport("script evaluation failed");
             }
         }
     }

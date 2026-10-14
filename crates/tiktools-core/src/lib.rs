@@ -84,6 +84,11 @@ pub use services::{
 
 pub trait HostEmitter: Send + Sync {
     fn emit(&self, message: HostMessage);
+    /// Optional aggregate-only host transport diagnostics; headless hosts
+    /// retain the default null value and need no GUI dependency.
+    fn diagnostics(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
 }
 
 pub(crate) struct PluginHealth {

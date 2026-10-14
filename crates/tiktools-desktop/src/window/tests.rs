@@ -84,7 +84,7 @@ fn classifier_assigns_plan_classes() {
     );
     assert_eq!(
         classify_webview_message(&domain_event("plugin.progress", "{}")),
-        Coalescable
+        Critical
     );
     // Droppable: high-rate feed plus compat duplicates of domain twins.
     assert_eq!(
@@ -148,12 +148,13 @@ fn domain_snapshots_coalesce_but_feed_and_lifecycle_do_not() {
     // Lifecycle is reliable: never coalesced, never shed.
     outbox.push(domain_event("plugin.started", r#"{"pluginId":"p1"}"#));
     outbox.push(domain_event("plugin.started", r#"{"pluginId":"p1"}"#));
-    assert_eq!(outbox.lossy.len(), 6, "unexpected lossy len");
-    assert_eq!(outbox.reliable.len(), 2, "unexpected reliable len");
+    assert_eq!(outbox.lossy.len(), 4, "unexpected lossy len");
+    assert_eq!(outbox.reliable.len(), 5, "unexpected reliable len");
     assert!(outbox.lossy[0].body.contains(r#""viewers":2"#));
     assert!(outbox.lossy[1].body.contains(r#""creatorUniqueId":"b""#));
-    assert!(outbox.lossy[2].body.contains(r#""state":"ready""#));
-    assert!(outbox.lossy[3].body.contains(r#""pluginId":"p2""#));
+    assert!(outbox.reliable[0].contains(r#""state":"loading""#));
+    assert!(outbox.reliable[1].contains(r#""state":"ready""#));
+    assert!(outbox.reliable[2].contains(r#""pluginId":"p2""#));
 }
 
 #[test]
@@ -435,17 +436,17 @@ fn reliable_lane_trips_safety_policy_by_count() {
     assert!(!outbox.transport_failed());
     assert!(!outbox.take_transport_failure());
     // The 4097th message trips the policy: the failure edge fires
-    // exactly once and every queued message is still retained.
+    // exactly once without retaining an item beyond the hard count bound.
     outbox.push(r#"{"type":"rpc-response","response":{"id":"trip"}}"#.to_owned());
     assert!(outbox.transport_failed());
     assert!(outbox.take_transport_failure());
     assert!(!outbox.take_transport_failure());
-    assert_eq!(outbox.reliable.len(), MAX_RELIABLE_MESSAGES + 1);
+    assert_eq!(outbox.reliable.len(), MAX_RELIABLE_MESSAGES);
     assert!(outbox.reliable_bytes() > 0);
     // While failed, new reliable messages are counted, never queued:
     // the queue cannot grow without bound for a dead page.
     outbox.push(r#"{"type":"rpc-response","response":{"id":"refused"}}"#.to_owned());
-    assert_eq!(outbox.reliable.len(), MAX_RELIABLE_MESSAGES + 1);
+    assert_eq!(outbox.reliable.len(), MAX_RELIABLE_MESSAGES);
     assert_eq!(outbox.dropped_while_failed, 1);
     // Recovery rearms the transport: new messages queue again.
     outbox.clear_for_reload();
@@ -464,13 +465,14 @@ fn reliable_lane_trips_safety_policy_by_bytes() {
     // far fewer than 4096 messages.
     let big = format!(
         r#"{{"type":"rpc-response","response":{{"blob":"{}"}}}}"#,
-        "x".repeat(1024 * 1024)
+        "x".repeat(1024 * 1024 - 128)
     );
     for _ in 0..17 {
         outbox.push(big.clone());
     }
     assert!(outbox.transport_failed());
-    assert!(outbox.reliable_bytes() > MAX_RELIABLE_BYTES);
+    assert!(outbox.reliable_bytes() <= MAX_RELIABLE_BYTES);
+    assert!(!outbox.reliable.is_empty());
     assert!(outbox.take_transport_failure());
 }
 
@@ -556,4 +558,22 @@ fn frontend_ready_fast_path_rejects_large_json_without_parsing() {
         classify_inbound_message(&smuggled),
         InboundRoute::Legacy(_)
     ));
+}
+
+#[test]
+fn batch_acknowledgments_are_small_and_strictly_correlated() {
+    use super::ipc::parse_batch_ack;
+    assert_eq!(parse_batch_ack("tiktools-batch-ack:7:42"), Some((7, 42)));
+    for malformed in [
+        "tiktools-batch-ack:7:42:3",
+        "tiktools-batch-ack:x:1",
+        "tiktools-batch-ack:1:",
+        "{\"type\":\"host-batch-ack\"}",
+    ] {
+        assert_eq!(parse_batch_ack(malformed), None);
+    }
+    assert_eq!(
+        parse_batch_ack(&format!("tiktools-batch-ack:1:{}", "9".repeat(128))),
+        None
+    );
 }

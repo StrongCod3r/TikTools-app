@@ -3,10 +3,11 @@
 use super::domain_events::forward_domain_events;
 use super::ipc::{
     emit_rpc_response, handle_webview_ipc_message, is_frontend_ready_fast, is_probably_control_rpc,
-    webview_request_too_large,
+    parse_batch_ack, webview_request_too_large,
 };
 use super::outbox::WebviewOutbox;
 use super::{DesktopApp, StartupState, FRONTEND_STARTUP_TIMEOUT};
+use crate::event::CoalescedSignals;
 use crate::event::{DesktopCommand, DesktopEvent};
 use crate::platform;
 use crate::tray::TrayController;
@@ -37,11 +38,10 @@ impl DesktopApp {
         runtime: Handle,
         proxy: EventLoopProxy<DesktopEvent>,
         log_path: PathBuf,
+        emitter: Arc<crate::event::EventLoopEmitter>,
     ) -> Self {
         let control = Arc::new(ControlApi::new(core.clone()));
-        let domain_mailbox = Arc::new(std::sync::Mutex::new(
-            super::outbox::ForwardMailbox::default(),
-        ));
+        let domain_mailbox = emitter.mailbox.clone();
         // Persistent local IPC shares the desktop's one AppCore: the CLI
         // and agents observe the same runtime the WebView drives. The
         // server runs on Tokio without blocking Winit and exits on core
@@ -84,7 +84,7 @@ impl DesktopApp {
                             };
                             tracing::error!(%error, "control IPC server failed");
                             core.set_ipc_error(Some(message.clone()));
-                            let _ = proxy.send_event(DesktopEvent::Command(
+                            let _ = proxy.send_coalesced(DesktopEvent::Command(
                                 DesktopCommand::IpcFailed(message),
                             ));
                             if core.is_shutdown() {
@@ -120,9 +120,12 @@ impl DesktopApp {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .push_value(notification);
-                if wake {
-                    let _ =
-                        proxy.send_event(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch));
+                if wake
+                    && proxy
+                        .send_coalesced(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch))
+                        .is_err()
+                {
+                    mailbox.lock().unwrap_or_else(|e| e.into_inner()).shutdown();
                 }
             }));
         }
@@ -137,7 +140,10 @@ impl DesktopApp {
             proxy,
             tray: None,
             pending_host_messages: WebviewOutbox::new(),
+            pending_batch: None,
+            page_ready: false,
             domain_mailbox,
+            emitter,
             shutting_down: false,
             startup_state: StartupState::Initializing,
             startup_deadline: None,
@@ -145,6 +151,9 @@ impl DesktopApp {
             webview_failed: Arc::new(AtomicBool::new(false)),
             reload_pending: false,
             log_path,
+            ui_generation: 0,
+            diagnostics_at: Instant::now(),
+            diagnostic_logging: std::env::var_os("TIKTOOLS_DIAGNOSTICS").is_some(),
             plugin_ui: crate::plugin_webview::PluginUiWindows::default(),
         }
     }
@@ -169,6 +178,9 @@ impl DesktopApp {
         let runtime = self.runtime.clone();
         let proxy_for_ipc = self.proxy.clone();
         let transport_failed = self.webview_failed.clone();
+        let ipc_emitter = self.emitter.clone();
+        let admission = self.emitter.ipc_slots.clone();
+        let page_emitter = self.emitter.clone();
         let navigation_frontend = self.frontend.clone();
         let mut builder = WebViewBuilder::new()
             .with_devtools(cfg!(debug_assertions) || cfg!(feature = "devtools"))
@@ -201,9 +213,10 @@ impl DesktopApp {
                 );
                 true
             })
-            .with_on_page_load_handler(|event, url| {
+            .with_on_page_load_handler(move |event, url| {
                 match event {
                     PageLoadEvent::Started => {
+                        page_emitter.advance_generation();
                         tracing::debug!(url = %url, "frontend page load started");
                     }
                     PageLoadEvent::Finished => {
@@ -212,7 +225,11 @@ impl DesktopApp {
                 }
             })
             .with_ipc_handler(move |request| {
-                let raw = request.body().clone();
+                let raw = request.body();
+                if let Some((generation, sequence)) = parse_batch_ack(raw) {
+                    ipc_emitter.request_batch_ack(generation, sequence);
+                    return;
+                }
                 // The Winit callback never parses JSON: size-check, match
                 // the tiny boot handshake, then move the payload to Tokio,
                 // where it is parsed exactly once and classified on the
@@ -222,16 +239,16 @@ impl DesktopApp {
                 // payloads before any JSON parsing so the WebView cannot
                 // bypass them. (`MAX_PARAMS_BYTES` is enforced inside
                 // `ControlApi::execute`, which all WebView RPCs traverse.)
-                if webview_request_too_large(&raw) {
-                    if is_probably_control_rpc(&raw) {
+                if webview_request_too_large(raw) {
+                    if is_probably_control_rpc(raw) {
                         // Preserve the request id so the frontend resolves
                         // (rejects) the pending call instead of hanging it
                         // until timeout; the id sits in the bounded prefix.
                         let response = tiktools_control_api::RpcResponse::error(
-                            tiktools_control_api::RpcId::extract_from_prefix(&raw),
+                            tiktools_control_api::RpcId::extract_from_prefix(raw),
                             tiktools_control_api::ApiError::too_large(),
                         );
-                        emit_rpc_response(&proxy_for_ipc, &response);
+                        emit_rpc_response(&ipc_emitter, &response);
                     } else {
                         tracing::warn!(
                             bytes = raw.len(),
@@ -240,23 +257,41 @@ impl DesktopApp {
                     }
                     return;
                 }
-                if is_frontend_ready_fast(&raw) {
-                    let _ = proxy_for_ipc.send_event(DesktopEvent::Command(
-                        DesktopCommand::FrontendReady,
-                    ));
+                if is_frontend_ready_fast(raw) {
+                    ipc_emitter.request_ready(ipc_emitter.generation.load(Ordering::Acquire));
                     return;
                 }
+                let permit = match admission.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        ipc_emitter.inbound_rejected.fetch_add(1, Ordering::Relaxed);
+                        if is_probably_control_rpc(raw) {
+                            let response = tiktools_control_api::RpcResponse::error(
+                                tiktools_control_api::RpcId::extract_from_prefix(raw),
+                                tiktools_control_api::ApiError::new("overloaded", "Main WebView IPC capacity exhausted"),
+                            );
+                            emit_rpc_response(&ipc_emitter, &response);
+                        }
+                        return;
+                    }
+                };
+                let raw = raw.clone();
+                let generation = ipc_emitter.generation.load(Ordering::Acquire);
+                let emitter = ipc_emitter.clone();
                 let router = router.clone();
                 let control = control.clone();
                 let proxy = proxy_for_ipc.clone();
                 let transport_failed = transport_failed.clone();
                 runtime.spawn(async move {
+                    let permit = Arc::new(permit);
                     handle_webview_ipc_message(
                         raw,
                         &router,
                         &control,
                         &proxy,
                         &transport_failed,
+                        &emitter,
+                        (generation, permit),
                     )
                     .await;
                 });
@@ -373,26 +408,49 @@ impl DesktopApp {
         }
         tracing::debug!("shutdown started");
         self.shutting_down = true;
+        self.emitter.ipc_slots.close();
+        self.emitter.generation.fetch_add(1, Ordering::AcqRel);
+        self.domain_mailbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown();
         self.startup_state = StartupState::ShuttingDown;
         self.startup_deadline = None;
         let core = Arc::clone(&self.core);
         let proxy = self.proxy.clone();
         self.runtime.spawn(async move {
             core.shutdown().await;
-            let _ = proxy.send_event(DesktopEvent::Command(DesktopCommand::ShutdownComplete));
+            let _ = proxy.send_coalesced(DesktopEvent::Command(DesktopCommand::ShutdownComplete));
         });
     }
 
     fn finalize_shutdown(&mut self, event_loop: &ActiveEventLoop) {
         self.startup_state = StartupState::ShuttingDown;
         self.tray.take();
-        self.webview.take();
+        if let Some(webview) = self.webview.take() {
+            platform::prepare_webview_teardown(&webview);
+            drop(webview);
+        }
         // Container destroy ahead of the parent destroy (see
         // `platform::sync_gtk_display`); the parent handle drops normally.
         platform::sync_gtk_display();
         self.window.take();
         tracing::debug!("shutdown complete, exiting");
         event_loop.exit();
+    }
+
+    fn sync_page_generation(&mut self, generation: u64) {
+        if generation == self.ui_generation {
+            return;
+        }
+        self.ui_generation = generation;
+        self.page_ready = false;
+        self.pending_batch = None;
+        self.emitter.clear_batch();
+        if !self.pending_host_messages.is_empty() {
+            self.core.record_event_gap();
+            self.pending_host_messages.clear_for_reload();
+        }
     }
 
     fn frontend_ready(&mut self) {
@@ -411,6 +469,9 @@ impl DesktopApp {
             self.webview_failed.store(false, Ordering::SeqCst);
             self.core.set_webview_error(None);
             tracing::error!("WebView transport recovered after reload");
+        }
+        if !self.shutting_down {
+            self.page_ready = true;
         }
         if self.shutting_down || self.startup_state == StartupState::Ready {
             return;
@@ -520,13 +581,18 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
             }
             WindowEvent::Destroyed => {
                 tracing::debug!(tray = self.tray.is_some(), "window was destroyed");
-                self.webview.take();
+                if let Some(webview) = self.webview.take() {
+                    platform::prepare_webview_teardown(&webview);
+                    drop(webview);
+                }
                 platform::sync_gtk_display();
                 // The server already destroyed this window: dropping the
                 // handle would queue a second destroy for a dead id (stale
                 // BadWindow filed where Winit's IME path panics on it).
                 // Leak the handle; the tray path below recreates on demand.
+                self.emitter.advance_generation();
                 if let Some(window) = self.window.take() {
+                    platform::record_external_destroy();
                     std::mem::forget(window);
                 }
                 if self.tray.is_none() {
@@ -538,13 +604,30 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: DesktopEvent) {
-        match event {
-            DesktopEvent::Command(DesktopCommand::EmitToWebview(message)) => {
-                self.emit_to_webview(message);
+        match crate::event::consume_signal(event) {
+            DesktopEvent::Command(DesktopCommand::AdmittedCommand {
+                command,
+                admission: _admission,
+            }) => {
+                self.user_event(event_loop, DesktopEvent::Command(*command));
             }
             // Wake-only chaining for multi-batch bursts; the flush runs in
             // `about_to_wait`, so this arm intentionally does nothing.
             DesktopEvent::Command(DesktopCommand::FlushWebviewBatch) => {}
+            DesktopEvent::Command(DesktopCommand::HostBatchAcknowledged) => {
+                if self.emitter.consume_batch_ack()
+                    && self.pending_batch.as_ref().is_some_and(|batch| {
+                        batch.generation == self.emitter.generation.load(Ordering::Acquire)
+                            && batch.sequence == self.emitter.batch_sequence.load(Ordering::Acquire)
+                    })
+                {
+                    self.pending_batch = None;
+                    self.emitter.clear_batch();
+                    self.emitter
+                        .acknowledged_batches
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
             DesktopEvent::Command(DesktopCommand::IpcFailed(message)) => {
                 // A second owner at startup means a stale host is still
                 // running: fail fast instead of mixing runtimes. After
@@ -561,7 +644,13 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     tracing::error!(message, "control IPC unavailable; CLI/agents degraded");
                 }
             }
-            DesktopEvent::Command(DesktopCommand::FrontendReady) => self.frontend_ready(),
+            DesktopEvent::Command(DesktopCommand::FrontendReady { generation: _ }) => {
+                let generation = self.emitter.consume_ready();
+                if generation == self.emitter.generation.load(Ordering::Acquire) {
+                    self.sync_page_generation(generation);
+                    self.frontend_ready();
+                }
+            }
             DesktopEvent::Command(DesktopCommand::ShowWindow) => {
                 if self.window.is_none() {
                     if let Err(error) = self.create_window(event_loop) {
@@ -602,40 +691,86 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                     tracing::warn!(%error, plugin = %plugin_id, page = %page_id, "could not open plugin UI");
                 }
             }
-            DesktopEvent::Command(DesktopCommand::ClosePluginUi { plugin_id, page_id }) => {
-                self.plugin_ui.close(&plugin_id, &page_id);
+            DesktopEvent::Command(DesktopCommand::ClosePluginUi {
+                plugin_id,
+                page_id,
+                window_id,
+                owner,
+            }) => {
+                self.plugin_ui
+                    .close_if_current(&plugin_id, &page_id, window_id, owner);
             }
             DesktopEvent::Command(DesktopCommand::PluginUiRespond {
                 window_id,
                 plugin_id,
                 page_id,
                 response,
+                effect,
+                generation,
+                admission: _admission,
             }) => {
-                self.plugin_ui
-                    .respond(&plugin_id, &page_id, &response, window_id);
+                self.plugin_ui.respond(
+                    &plugin_id, &page_id, response, window_id, generation, effect,
+                );
             }
             DesktopEvent::Command(DesktopCommand::PluginUiSubscribe {
                 window_id,
                 plugin_id,
                 page_id,
                 effect,
+                generation,
+                admission: _admission,
             }) => {
                 self.plugin_ui
-                    .apply_subscription(&plugin_id, &page_id, effect, window_id);
+                    .apply_subscription(&plugin_id, &page_id, effect, window_id, generation);
             }
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         platform::pump();
-        let (messages, failed, wake) = self
-            .domain_mailbox
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .drain();
+        let generation = self.emitter.generation.load(Ordering::Acquire);
+        self.sync_page_generation(generation);
+        if self
+            .pending_batch
+            .as_ref()
+            .is_some_and(|batch| Instant::now() >= batch.deadline)
+        {
+            self.core.record_event_gap();
+            self.fail_webview_transport("batch acknowledgment deadline exceeded");
+        }
+        if self.diagnostics_at.elapsed() >= std::time::Duration::from_secs(10) {
+            self.diagnostics_at = Instant::now();
+            *self
+                .emitter
+                .ui_snapshot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = serde_json::json!({
+                "outbox": self.pending_host_messages.diagnostics(),
+                "retainedBatchCount": self.pending_batch.as_ref().map(|batch| batch.messages.len()).unwrap_or(0),
+                "plugins": self.plugin_ui.diagnostics(),
+                "nativeLifecycle": platform::native_lifecycle_diagnostics(),
+            });
+            if self.diagnostic_logging {
+                use tiktools_core::HostEmitter;
+                tracing::info!(desktop = %self.emitter.diagnostics(), "aggregate desktop diagnostics");
+            }
+        }
+        let (messages, failed, wake, dropped) = {
+            let mut mailbox = self
+                .domain_mailbox
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let (messages, failed, wake) = mailbox.drain();
+            (messages, failed, wake, mailbox.take_lossy_drops())
+        };
+        if dropped > 0 && !failed {
+            self.pending_host_messages
+                .push_value(&tiktools_control_api::gap_notification(dropped));
+        }
         if failed {
             self.core.record_event_gap();
-            self.fail_webview_transport();
+            self.fail_webview_transport("producer mailbox admission exhausted");
         }
         for message in messages {
             self.emit_to_webview(message);
@@ -643,20 +778,25 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
         if wake {
             let _ = self
                 .proxy
-                .send_event(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch));
+                .send_coalesced(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch));
         }
         // One batch per UI tick: all host messages queued since the last
         // tick share a single `evaluate_script`.
         self.flush_webview_batch();
+        let plugin_pending = self.plugin_ui.flush_batches();
         // A batch is capped, so a burst longer than one batch must chain
         // exactly one wake per remaining batch instead of stalling under
         // ControlFlow::Wait with no further events. The wake event itself
         // is a no-op; the next turn's flush does the work. No busy loop:
         // one wake is scheduled per turn that still has backlog.
-        if !self.pending_host_messages.is_empty() {
+        if (self.page_ready
+            && self.pending_batch.is_none()
+            && !self.pending_host_messages.is_empty())
+            || plugin_pending
+        {
             let _ = self
                 .proxy
-                .send_event(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch));
+                .send_coalesced(DesktopEvent::Command(DesktopCommand::FlushWebviewBatch));
         }
         if self.startup_state == StartupState::WebViewLoading {
             if let Some(deadline) = self.startup_deadline {
@@ -678,6 +818,26 @@ impl ApplicationHandler<DesktopEvent> for DesktopApp {
                 return;
             }
         }
-        platform::prepare_for_wait(event_loop);
+        if let Some(batch) = self.pending_batch.as_ref() {
+            platform::prepare_for_startup_wait(event_loop, batch.deadline);
+        } else {
+            platform::prepare_for_wait(event_loop);
+        }
+    }
+}
+
+impl Drop for DesktopApp {
+    fn drop(&mut self) {
+        self.emitter.ipc_slots.close();
+        self.domain_mailbox
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .shutdown();
+        if let Some(webview) = self.webview.take() {
+            platform::prepare_webview_teardown(&webview);
+            drop(webview);
+            platform::sync_gtk_display();
+        }
+        self.window.take();
     }
 }

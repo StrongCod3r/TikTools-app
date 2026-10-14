@@ -1,3 +1,4 @@
+use crate::event::CoalescedSignals;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
     Icon, TrayIcon, TrayIconBuilder,
@@ -99,7 +100,7 @@ fn send_command(
     command: DesktopCommand,
     source: &'static str,
 ) {
-    if let Err(error) = proxy.send_event(DesktopEvent::Command(command)) {
+    if let Err(error) = proxy.send_coalesced(DesktopEvent::Command(command)) {
         tracing::debug!(%error, source, "could not forward system tray command");
     }
 }

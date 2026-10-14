@@ -31,7 +31,23 @@ use crate::event::{DesktopCommand, DesktopEvent};
 
 const PLUGIN_ID: &str = "smokeprobe";
 const PAGE_ID: &str = "main";
-const CYCLES: u32 = 3;
+fn cycles() -> u32 {
+    std::env::var("TIKTOOLS_NATIVE_SMOKE_CYCLES")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("cycles must be an integer"))
+        .inspect(|value| {
+            assert!((1..=500).contains(value));
+        })
+        .unwrap_or(3)
+}
+fn messages_per_cycle() -> u32 {
+    std::env::var("TIKTOOLS_NATIVE_SMOKE_MESSAGES")
+        .ok()
+        .map(|value| value.parse::<u32>().expect("messages must be integer"))
+        .map(|value| value.min(100_000))
+        .unwrap_or(0)
+}
+
 const PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 const GLOBAL_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -43,6 +59,18 @@ const PROBE_HTML: &str = r#"<!doctype html><html><head><meta charset="utf-8"></h
 /// normal `PluginUiRespond` path and the driver observes the id there.
 /// External script (not inline): the plugin CSP forbids inline scripts.
 const PROBE_JS: &str = r#"(function () {
+  var received = 0;
+  var original = window.__tiktools_broker_push__;
+  window.__tiktools_broker_push__ = function (envelope) {
+    if (original) original(envelope);
+    if (envelope.event !== 'plugin.smoke') return;
+    if (envelope.data.seq !== received) {
+      window.ipc.postMessage(JSON.stringify({apiVersion:1,id:'delivery-order-error',method:'host.locale',params:{}}));
+      return;
+    }
+    received += 1;
+    if (envelope.data.end) window.ipc.postMessage(JSON.stringify({apiVersion:1,id:'delivered-' + received,method:'host.locale',params:{}}));
+  };
   var id = (typeof window.tiktools === 'object' && window.tiktools !== null)
     ? 'has-tiktools' : 'missing-tiktools';
   window.ipc.postMessage(JSON.stringify({ apiVersion: 1, id: id, method: 'host.locale', params: {} }));
@@ -94,9 +122,19 @@ fn probe_core(root: &std::path::Path) -> Arc<AppCore> {
 #[derive(Debug, PartialEq, Eq)]
 enum Phase {
     Open,
-    WaitProbe { deadline: Instant },
+    WaitProbe {
+        deadline: Instant,
+    },
+    Load {
+        sent: u32,
+        target: u32,
+        deadline: Instant,
+    },
     Close,
     WaitClosed,
+    Cleanup {
+        deadline: Instant,
+    },
 }
 
 struct Driver {
@@ -106,6 +144,7 @@ struct Driver {
     proxy: EventLoopProxy<DesktopEvent>,
     windows: PluginUiWindows,
     cycle: u32,
+    reopen_checked: bool,
     phase: Phase,
     global_deadline: Instant,
     failure: Option<String>,
@@ -138,7 +177,7 @@ impl Driver {
             );
             return;
         }
-        match &self.phase {
+        match &mut self.phase {
             Phase::Open => {
                 let handle = self.runtime.handle().clone();
                 match self.windows.open(
@@ -176,6 +215,35 @@ impl Driver {
                         ),
                     );
                 }
+            }
+            Phase::Load {
+                sent,
+                target,
+                deadline,
+            } => {
+                if Instant::now() > *deadline {
+                    self.fail(
+                        event_loop,
+                        "native batch consumption acknowledgment timed out".to_owned(),
+                    );
+                    return;
+                }
+                let Some(window) = self.windows.windows.values().next() else {
+                    self.fail(
+                        event_loop,
+                        "native output transport closed during load".to_owned(),
+                    );
+                    return;
+                };
+                let id = window.handle().id();
+                let generation = window.generation.load(std::sync::atomic::Ordering::Acquire);
+                let end = (*sent + 128).min(*target);
+                for sequence in *sent..end {
+                    let message = serde_json::json!({"apiVersion":1,"event":"plugin.smoke","data":{"seq":sequence,"end":sequence + 1 == *target}}).to_string();
+                    self.windows
+                        .respond(PLUGIN_ID, PAGE_ID, message.into(), id, generation, None);
+                }
+                *sent = end;
             }
             Phase::Close => {
                 if self.cycle.is_multiple_of(2) {
@@ -218,16 +286,63 @@ impl Driver {
                     // teardown topics take this path).
                     self.windows.close(PLUGIN_ID, PAGE_ID);
                 }
+                if self.cycle == 0
+                    && !self.reopen_checked
+                    && std::env::var_os("TIKTOOLS_NATIVE_SMOKE_REOPEN").is_some()
+                {
+                    self.reopen_checked = true;
+                    let handle = self.runtime.handle().clone();
+                    assert!(self
+                        .windows
+                        .open(
+                            event_loop,
+                            &self.core,
+                            &self.control,
+                            &handle,
+                            &self.proxy,
+                            PLUGIN_ID,
+                            PAGE_ID
+                        )
+                        .unwrap());
+                    self.phase = Phase::WaitProbe {
+                        deadline: Instant::now() + PROBE_TIMEOUT,
+                    };
+                    return;
+                }
                 self.phase = Phase::WaitClosed;
             }
             Phase::WaitClosed => {
                 if self.windows.windows.is_empty() {
                     self.cycle += 1;
-                    if self.cycle >= CYCLES {
-                        event_loop.exit();
+                    if self.cycle.is_multiple_of(10) {
+                        eprintln!(
+                            "native-smoke cycle={} ownedWindows={} pid={}",
+                            self.cycle,
+                            self.windows.windows.len(),
+                            std::process::id()
+                        );
+                    }
+                    if self.cycle >= cycles() {
+                        let seconds = std::env::var("TIKTOOLS_NATIVE_SMOKE_CLEANUP_SECONDS")
+                            .ok()
+                            .map(|v| v.parse::<u64>().expect("cleanup seconds must be integer"))
+                            .unwrap_or(0)
+                            .min(60);
+                        eprintln!(
+                            "native-smoke cleanup ownedWindows=0 pid={}",
+                            std::process::id()
+                        );
+                        self.phase = Phase::Cleanup {
+                            deadline: Instant::now() + Duration::from_secs(seconds),
+                        };
                     } else {
                         self.phase = Phase::Open;
                     }
+                }
+            }
+            Phase::Cleanup { deadline } => {
+                if Instant::now() >= *deadline {
+                    event_loop.exit();
                 }
             }
         }
@@ -250,6 +365,24 @@ impl Driver {
             );
             return;
         }
+        if id == "delivery-order-error" {
+            self.fail(
+                event_loop,
+                "native batch delivery order mismatch".to_owned(),
+            );
+            return;
+        }
+        if id == format!("delivered-{}", messages_per_cycle())
+            && matches!(self.phase, Phase::Load { .. })
+        {
+            eprintln!(
+                "native-smoke delivery messages={} diagnostics={}",
+                messages_per_cycle(),
+                self.windows.diagnostics()
+            );
+            self.phase = Phase::Close;
+            return;
+        }
         if id != "has-tiktools" {
             return;
         }
@@ -258,7 +391,15 @@ impl Driver {
             return;
         }
         if matches!(self.phase, Phase::WaitProbe { .. }) {
-            self.phase = Phase::Close;
+            self.phase = if messages_per_cycle() == 0 {
+                Phase::Close
+            } else {
+                Phase::Load {
+                    sent: 0,
+                    target: messages_per_cycle(),
+                    deadline: Instant::now() + Duration::from_secs(120),
+                }
+            };
         }
     }
 }
@@ -280,12 +421,34 @@ impl ApplicationHandler<DesktopEvent> for Driver {
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: DesktopEvent) {
-        let DesktopEvent::Command(command) = event;
+        let DesktopEvent::Command(command) = crate::event::consume_signal(event);
         match command {
-            DesktopCommand::ClosePluginUi { plugin_id, page_id } => {
-                self.windows.close(&plugin_id, &page_id);
+            DesktopCommand::ClosePluginUi {
+                plugin_id,
+                page_id,
+                window_id,
+                owner,
+            } => {
+                self.windows
+                    .close_if_current(&plugin_id, &page_id, window_id, owner);
             }
-            DesktopCommand::PluginUiRespond { response, .. } => {
+            DesktopCommand::PluginUiRespond {
+                response,
+                window_id,
+                plugin_id,
+                page_id,
+                generation,
+                effect,
+                ..
+            } => {
+                self.windows.respond(
+                    &plugin_id,
+                    &page_id,
+                    response.clone(),
+                    window_id,
+                    generation,
+                    effect,
+                );
                 self.on_respond(event_loop, &response);
             }
             DesktopCommand::PluginUiSubscribe {
@@ -293,9 +456,11 @@ impl ApplicationHandler<DesktopEvent> for Driver {
                 plugin_id,
                 page_id,
                 effect,
+                generation,
+                ..
             } => {
                 self.windows
-                    .apply_subscription(&plugin_id, &page_id, effect, window_id);
+                    .apply_subscription(&plugin_id, &page_id, effect, window_id, generation);
             }
             _ => {}
         }
@@ -304,6 +469,7 @@ impl ApplicationHandler<DesktopEvent> for Driver {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
         crate::platform::pump();
+        self.windows.flush_batches();
         self.drive(event_loop);
         // Gentle poll: the phases are deadline-driven, not frame-driven.
         std::thread::sleep(Duration::from_millis(50));
@@ -355,15 +521,34 @@ fn native_open_close_cycles() {
         proxy,
         windows: PluginUiWindows::default(),
         cycle: 0,
+        reopen_checked: false,
         phase: Phase::Open,
-        global_deadline: Instant::now() + GLOBAL_TIMEOUT,
+        global_deadline: Instant::now()
+            + GLOBAL_TIMEOUT.max(Duration::from_secs(u64::from(cycles()) * 10)),
         failure: None,
     };
     // A teardown crash aborts the process here instead of passing: that is
     // the regression signal this test exists to catch.
     let _ = event_loop.run_app(&mut driver);
     let _ = std::fs::remove_dir_all(&root);
-    assert_eq!(driver.cycle, CYCLES, "smoke test did not finish all cycles");
+    assert_eq!(
+        crate::event::native_admissions(),
+        0,
+        "native broker work survived owner cleanup"
+    );
+    assert_eq!(
+        driver.cycle,
+        cycles(),
+        "smoke test did not finish all cycles"
+    );
+    if cfg!(target_os = "linux") && std::env::var_os("TIKTOOLS_NATIVE_SMOKE_RETAIN_IPC").is_none() {
+        assert!(
+            crate::platform::native_lifecycle_diagnostics()["disconnectedIpcHandlers"]
+                .as_u64()
+                .unwrap()
+                >= u64::from(cycles())
+        );
+    }
     if let Some(failure) = driver.failure {
         panic!("native smoke test failed: {failure}");
     }

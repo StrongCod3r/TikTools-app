@@ -227,6 +227,7 @@ impl AppCore {
             "liveDedup": live_dedup,
             "points": points,
             "memory": memory,
+            "desktop": self.emitter.diagnostics(),
             "tasks": {
                 "livePump": live_pump_alive,
                 "liveWorker": live_worker_alive,

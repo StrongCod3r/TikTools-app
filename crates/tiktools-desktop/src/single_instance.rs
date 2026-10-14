@@ -4,6 +4,7 @@
 //! launch sends the one supported activation command and exits before any
 //! desktop services are assembled.
 
+use crate::event::CoalescedSignals;
 use std::{io, sync::Arc, thread};
 
 use winit::event_loop::EventLoopProxy;
@@ -147,7 +148,7 @@ mod platform {
                                     && is_activation_message(&message)
                                     && !stop.load(std::sync::atomic::Ordering::Acquire)
                                 {
-                                    let _ = proxy.send_event(DesktopEvent::Command(
+                                    let _ = proxy.send_coalesced(DesktopEvent::Command(
                                         DesktopCommand::ShowWindow,
                                     ));
                                 }
@@ -282,8 +283,8 @@ mod platform {
                         if signaled == WAIT_OBJECT_0
                             && !stop.load(std::sync::atomic::Ordering::Acquire)
                         {
-                            let _ =
-                                proxy.send_event(DesktopEvent::Command(DesktopCommand::ShowWindow));
+                            let _ = proxy
+                                .send_coalesced(DesktopEvent::Command(DesktopCommand::ShowWindow));
                         }
                     }
                 })

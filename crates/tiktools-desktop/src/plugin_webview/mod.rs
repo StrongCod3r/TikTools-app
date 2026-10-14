@@ -23,6 +23,7 @@ pub mod broker;
 mod smoke;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -49,6 +50,46 @@ pub fn is_valid_ui_id(value: &str) -> bool {
         && characters.all(|character| {
             character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
         })
+}
+
+fn apply_topics(
+    current: &mut HashSet<String>,
+    effect: crate::event::PluginUiSubscription,
+) -> Result<(), &'static str> {
+    match effect {
+        crate::event::PluginUiSubscription::Subscribe(topics) => {
+            if current
+                .iter()
+                .cloned()
+                .chain(topics.iter().cloned())
+                .collect::<HashSet<_>>()
+                .len()
+                > 32
+            {
+                return Err("plugin broker subscription capacity exhausted");
+            }
+            current.extend(topics);
+        }
+        crate::event::PluginUiSubscription::Unsubscribe(topics) => {
+            for topic in topics {
+                current.remove(&topic);
+            }
+        }
+    }
+    Ok(())
+}
+
+static NEXT_WINDOW_OWNER: AtomicU64 = AtomicU64::new(1);
+static NEXT_PAGE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn close_owner_matches(
+    window_id: Option<WindowId>,
+    owner: Option<u64>,
+    current_id: WindowId,
+    current_owner: u64,
+) -> bool {
+    window_id.is_none_or(|id| id == current_id)
+        && owner.is_none_or(|generation| generation == current_owner)
 }
 
 /// Lifecycle of one native plugin window.
@@ -117,6 +158,10 @@ struct PluginUiWindow {
     state: PluginWindowState,
     ipc_shutdown: tokio::sync::watch::Sender<bool>,
     ipc_slots: Arc<tokio::sync::Semaphore>,
+    output: crate::window::outbox::WebviewOutbox,
+    generation: Arc<AtomicU64>,
+    output_generation: u64,
+    owner: u64,
 }
 
 impl Drop for PluginUiWindow {
@@ -131,6 +176,15 @@ impl Drop for PluginUiWindow {
 }
 
 impl PluginUiWindow {
+    fn sync_generation(&mut self) {
+        let generation = self.generation.load(Ordering::Acquire);
+        if generation != self.output_generation {
+            self.output_generation = generation;
+            self.output.discard_pending();
+            self.topics.clear();
+        }
+    }
+
     fn handle(&self) -> &Window {
         self.window
             .as_ref()
@@ -148,6 +202,8 @@ impl PluginUiWindow {
     fn teardown(&mut self) {
         let _ = self.ipc_shutdown.send(true);
         self.ipc_slots.close();
+        self.output.discard_pending();
+        self.topics.clear();
         for step in teardown_plan(false) {
             self.execute(step);
         }
@@ -160,6 +216,10 @@ impl PluginUiWindow {
     /// both handles taken, so the normal `Drop` is a no-op: no double
     /// destroy, and no leak on the normal close path.
     fn disown_destroyed(mut self) {
+        let _ = self.ipc_shutdown.send(true);
+        self.ipc_slots.close();
+        self.output.discard_pending();
+        self.topics.clear();
         for step in teardown_plan(true) {
             self.execute(step);
         }
@@ -169,6 +229,7 @@ impl PluginUiWindow {
         match step {
             TeardownStep::DropWebView => {
                 if let Some(webview) = self.webview.take() {
+                    crate::platform::prepare_webview_teardown(&webview);
                     drop(webview);
                 }
             }
@@ -182,6 +243,7 @@ impl PluginUiWindow {
                 }
             }
             TeardownStep::ForgetWindow => {
+                crate::platform::record_external_destroy();
                 std::mem::forget(self.window.take());
             }
         }
@@ -191,6 +253,10 @@ impl PluginUiWindow {
 #[derive(Default)]
 pub struct PluginUiWindows {
     windows: HashMap<(String, String), PluginUiWindow>,
+    flush_cursor: usize,
+    evaluate_calls: u64,
+    evaluate_bytes: u64,
+    evaluate_errors: u64,
 }
 
 impl PluginUiWindows {
@@ -215,8 +281,8 @@ impl PluginUiWindows {
             if existing.state == PluginWindowState::Closing {
                 // A deferred teardown is still queued: finish it now so the
                 // fresh window never shares a map entry with the dying one.
-                // The queued `ClosePluginUi` then finds nothing and is a
-                // harmless no-op.
+                // The queued close carries the old native id and cannot
+                // destroy the replacement window.
                 self.windows.remove(&key);
             } else {
                 existing.handle().focus_window();
@@ -227,6 +293,9 @@ impl PluginUiWindows {
                 );
                 return Ok(false);
             }
+        }
+        if self.windows.len() >= 32 {
+            return Err("native plugin window capacity exhausted (32)".to_owned());
         }
         let target = core
             .plugin_ui_target(plugin_id, page_id)
@@ -252,8 +321,17 @@ impl PluginUiWindows {
         let ipc_control = control.clone();
         let ipc_slots = Arc::new(tokio::sync::Semaphore::new(128));
         let handler_slots = Arc::clone(&ipc_slots);
+        let generation = Arc::new(AtomicU64::new(
+            NEXT_PAGE_GENERATION.fetch_add(1, Ordering::AcqRel),
+        ));
+        let owner = NEXT_WINDOW_OWNER.fetch_add(1, Ordering::AcqRel);
+        let page_generation = generation.clone();
+        let handler_generation = generation.clone();
         let (ipc_shutdown, shutdown_receiver) = tokio::sync::watch::channel(false);
         let mut builder = WebViewBuilder::new()
+            .with_on_page_load_handler(move |event, _url| {
+                if matches!(event, wry::PageLoadEvent::Started) { page_generation.store(NEXT_PAGE_GENERATION.fetch_add(1, Ordering::AcqRel), Ordering::Release); }
+            })
             .with_devtools(cfg!(debug_assertions) || cfg!(feature = "devtools"))
             .with_autoplay(true)
             .with_initialization_script(INIT_SCRIPT)
@@ -280,6 +358,8 @@ impl PluginUiWindows {
                     tracing::warn!(plugin = %ipc_plugin, "plugin broker admission full or closed");
                     return;
                 };
+                let generation = handler_generation.load(Ordering::Acquire);
+                let task_generation = handler_generation.clone();
                 let mut cancelled = shutdown_receiver.clone();
                 let raw = request.body().clone();
                 let broker = PluginUiBroker::new(ipc_plugin.clone(), ipc_control.clone());
@@ -287,9 +367,9 @@ impl PluginUiWindows {
                 let plugin_id = ipc_plugin.clone();
                 let page_id = ipc_page.clone();
                 ipc_runtime.spawn(async move {
-                    let _permit = permit;
-                    if *cancelled.borrow_and_update() { return; }
-                    let (response, effect) = tokio::select! {
+                    let admission = Arc::new(crate::event::NativeAdmission::new(permit));
+                    if *cancelled.borrow_and_update() || task_generation.load(Ordering::Acquire) != generation { return; }
+                    let (mut response, effect) = tokio::select! {
                         biased;
                         _ = cancelled.changed() => return,
                         result = tokio::time::timeout(std::time::Duration::from_secs(30), broker.handle(&raw)) => {
@@ -316,24 +396,16 @@ impl PluginUiWindows {
                             );
                         }
                     }
+                    if response.len() > crate::window::outbox::MAX_OUTBOUND_BYTES {
+                        let id = serde_json::from_str::<Value>(&response).ok().and_then(|v| v.get("id").cloned()).unwrap_or(Value::Null);
+                        response = serde_json::json!({"apiVersion": 1, "id": id, "ok": false, "error": "broker response exceeds transport limit"}).to_string();
+                    }
                     let _ = proxy.send_event(DesktopEvent::Command(
                         DesktopCommand::PluginUiRespond {
-                            window_id: ipc_window_id,
-                            plugin_id: plugin_id.clone(),
-                            page_id: page_id.clone(),
-                            response,
+                            window_id: ipc_window_id, plugin_id, page_id,
+                            response: response.into(), effect: effect.map(Into::into), generation, admission,
                         },
                     ));
-                    if let Some(effect) = effect {
-                        let _ = proxy.send_event(DesktopEvent::Command(
-                            DesktopCommand::PluginUiSubscribe {
-                                window_id: ipc_window_id,
-                                plugin_id,
-                                page_id,
-                                effect: effect.into(),
-                            },
-                        ));
-                    }
                 });
             });
         // Physical bounds from the start (see the main window): some
@@ -363,6 +435,10 @@ impl PluginUiWindows {
                 state: PluginWindowState::Open,
                 ipc_shutdown,
                 ipc_slots,
+                output: crate::window::outbox::WebviewOutbox::new(),
+                generation,
+                output_generation: 0,
+                owner,
             },
         );
         tracing::debug!(
@@ -378,6 +454,27 @@ impl PluginUiWindows {
     /// outside window-event dispatch (deferred `CloseRequested`, explicit
     /// close requests, teardown topics). Closing a missing window is a
     /// harmless no-op, so a queued close can never double-destroy.
+    pub(crate) fn close_if_current(
+        &mut self,
+        plugin_id: &str,
+        page_id: &str,
+        window_id: Option<WindowId>,
+        owner: Option<u64>,
+    ) {
+        if window_id.is_some() || owner.is_some() {
+            let Some(entry) = self
+                .windows
+                .get(&(plugin_id.to_owned(), page_id.to_owned()))
+            else {
+                return;
+            };
+            if !close_owner_matches(window_id, owner, entry.handle().id(), entry.owner) {
+                return;
+            }
+        }
+        self.close(plugin_id, page_id);
+    }
+
     pub fn close(&mut self, plugin_id: &str, page_id: &str) {
         if self
             .windows
@@ -419,6 +516,7 @@ impl PluginUiWindows {
         page_id: &str,
         effect: crate::event::PluginUiSubscription,
         window_id: WindowId,
+        generation: u64,
     ) {
         let Some(window) = self
             .windows
@@ -426,18 +524,15 @@ impl PluginUiWindows {
         else {
             return;
         };
-        if window.handle().id() != window_id || window.state != PluginWindowState::Open {
+        if window.handle().id() != window_id
+            || window.state != PluginWindowState::Open
+            || window.generation.load(Ordering::Acquire) != generation
+        {
             return;
         }
-        match effect {
-            crate::event::PluginUiSubscription::Subscribe(topics) => {
-                window.topics.extend(topics);
-            }
-            crate::event::PluginUiSubscription::Unsubscribe(topics) => {
-                for topic in topics {
-                    window.topics.remove(&topic);
-                }
-            }
+        window.sync_generation();
+        if let Err(error) = apply_topics(&mut window.topics, effect) {
+            tracing::warn!(error, "legacy subscription effect rejected");
         }
     }
 
@@ -445,46 +540,151 @@ impl PluginUiWindows {
     /// responses for closed (or closing) windows are ignored safely: the
     /// entry is gone or skipped, so nothing ever evaluates script on a
     /// dead WebView.
-    pub fn respond(&self, plugin_id: &str, page_id: &str, response: &str, window_id: WindowId) {
+    pub fn respond(
+        &mut self,
+        plugin_id: &str,
+        page_id: &str,
+        response: Arc<str>,
+        window_id: WindowId,
+        generation: u64,
+        effect: Option<crate::event::PluginUiSubscription>,
+    ) {
         let Some(window) = self
             .windows
-            .get(&(plugin_id.to_owned(), page_id.to_owned()))
+            .get_mut(&(plugin_id.to_owned(), page_id.to_owned()))
             .filter(|entry| {
-                entry.state == PluginWindowState::Open && entry.handle().id() == window_id
+                entry.state == PluginWindowState::Open
+                    && entry.handle().id() == window_id
+                    && entry.generation.load(Ordering::Acquire) == generation
             })
         else {
             return;
         };
-        // The payload is host-generated JSON embedded as an object
-        // literal; the init script drops anything off-protocol.
-        let script = format!(
-            "if (typeof window.__tiktools_broker_push__ === 'function') {{ window.__tiktools_broker_push__({response}); }}"
-        );
-        if let Err(error) = window.view().evaluate_script(&script) {
-            tracing::debug!(%error, plugin = plugin_id, "could not deliver broker response");
+        window.sync_generation();
+        let rejection = effect.and_then(|effect| apply_topics(&mut window.topics, effect).err());
+        if let Some(error) = rejection {
+            let id = serde_json::from_str::<Value>(&response)
+                .ok()
+                .and_then(|value| value.get("id").cloned())
+                .unwrap_or(Value::Null);
+            window.output.push(
+                serde_json::json!({"apiVersion":1,"id":id,"ok":false,"error":error}).to_string(),
+            );
+        } else {
+            window.output.push_critical(response);
         }
     }
 
-    /// Pushes one plugin-scoped domain event to subscribed windows.
-    pub fn deliver_event(&self, plugin_id: &str, topic: &str, data: &Value) {
+    /// Plugin event topics have no general loss/resync contract. Keep these
+    /// reliable rather than silently treating arbitrary plugin events as feed.
+    #[cfg(test)]
+    pub fn deliver_event(&mut self, plugin_id: &str, topic: &str, data: &Value) {
         let envelope = serde_json::json!({
-            "apiVersion": broker::BROKER_API_VERSION,
-            "event": topic,
-            "data": data,
-        })
-        .to_string();
-        for ((owner, _), window) in &self.windows {
-            if owner != plugin_id
-                || window.state != PluginWindowState::Open
-                || !window.topics.contains(topic)
+            "apiVersion": broker::BROKER_API_VERSION, "event": topic, "data": data,
+        });
+        for ((owner, _), window) in &mut self.windows {
+            window.sync_generation();
+            if owner == plugin_id
+                && window.state == PluginWindowState::Open
+                && window.topics.contains(topic)
             {
+                window.output.push_value(&envelope);
+            }
+        }
+    }
+
+    /// Fair schedule: at most one capped evaluation per open window per tick.
+    /// A failed/overflowed reliable transport closes its owner coherently;
+    /// pagehide rejects broker promises. Nothing retries side effects.
+    pub(crate) fn flush_batches(&mut self) -> bool {
+        let mut failed = Vec::new();
+        let mut pending = false;
+        let mut keys: Vec<_> = self.windows.keys().cloned().collect();
+        keys.sort();
+        let selected: Vec<_> = keys
+            .iter()
+            .cycle()
+            .skip(self.flush_cursor)
+            .take(keys.len().min(4))
+            .cloned()
+            .collect();
+        self.flush_cursor = if keys.is_empty() {
+            0
+        } else {
+            (self.flush_cursor + selected.len()) % keys.len()
+        };
+        for key in selected {
+            let window = self
+                .windows
+                .get_mut(&key)
+                .expect("selected window is map resident");
+            window.sync_generation();
+            if window.state != PluginWindowState::Open {
                 continue;
             }
-            let script = format!(
-                "if (typeof window.__tiktools_broker_push__ === 'function') {{ window.__tiktools_broker_push__({envelope}); }}"
-            );
-            if let Err(error) = window.view().evaluate_script(&script) {
-                tracing::debug!(%error, plugin = plugin_id, "could not push plugin event");
+            if window.output.take_transport_failure() {
+                failed.push(key.clone());
+                continue;
+            }
+            let batch = window.output.take_prepared_batch();
+            if !batch.is_empty() {
+                let envelopes = batch
+                    .iter()
+                    .map(|message| message.body.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let script = format!("if (typeof window.__tiktools_broker_push__ === 'function') {{ for (const item of [{envelopes}]) window.__tiktools_broker_push__(item); }}");
+                self.evaluate_calls = self.evaluate_calls.saturating_add(1);
+                self.evaluate_bytes = self.evaluate_bytes.saturating_add(script.len() as u64);
+                if let Err(error) = window.view().evaluate_script(&script) {
+                    self.evaluate_errors = self.evaluate_errors.saturating_add(1);
+                    tracing::error!(%error, "plugin batch evaluation failed; closing its transport");
+                    failed.push(key.clone());
+                }
+            }
+            pending |= !window.output.is_empty();
+        }
+        for (plugin, page) in failed {
+            self.close(&plugin, &page);
+        }
+        pending
+            || self
+                .windows
+                .values()
+                .any(|window| window.state == PluginWindowState::Open && !window.output.is_empty())
+    }
+
+    pub(crate) fn diagnostics(&self) -> Value {
+        let mut queued = 0;
+        let mut bytes = 0;
+        let mut tasks = 0;
+        for window in self.windows.values() {
+            let snapshot = window.output.diagnostics();
+            queued += snapshot["reliableCount"].as_u64().unwrap_or(0);
+            bytes += snapshot["reliableBytes"].as_u64().unwrap_or(0);
+            tasks += 128usize.saturating_sub(window.ipc_slots.available_permits());
+        }
+        serde_json::json!({"openWindows": self.windows.len(), "queued": queued, "bytes": bytes, "brokerTasks": tasks, "evaluateCalls": self.evaluate_calls, "evaluateBytes": self.evaluate_bytes, "evaluateErrors": self.evaluate_errors})
+    }
+
+    pub(crate) fn forward_prepared(
+        &mut self,
+        message: &crate::window::outbox::QueuedWebviewMessage,
+    ) {
+        let Some(route) = message.plugin.as_ref() else {
+            return;
+        };
+        if is_teardown_topic(&route.topic) {
+            self.close_plugin(&route.plugin_id);
+            return;
+        }
+        for ((owner, _), window) in &mut self.windows {
+            window.sync_generation();
+            if owner == &route.plugin_id
+                && window.state == PluginWindowState::Open
+                && window.topics.contains(&route.topic)
+            {
+                window.output.push_critical(message.body.clone());
             }
         }
     }
@@ -493,6 +693,7 @@ impl PluginUiWindows {
     /// windows, and closes windows whose plugin went away. Called with the
     /// same already-queued main-window payload (host-generated, bounded);
     /// unparseable input is ignored — the main window path owns delivery.
+    #[cfg(test)]
     pub fn forward_host_message(&mut self, message: &str) {
         let Some((plugin_id, topic, data)) = parse_host_notification(message) else {
             return;
@@ -547,6 +748,8 @@ impl PluginUiWindows {
                 let _ = proxy.send_event(DesktopEvent::Command(DesktopCommand::ClosePluginUi {
                     plugin_id: key.0.clone(),
                     page_id: key.1.clone(),
+                    window_id: Some(window_id),
+                    owner: Some(entry.owner),
                 }));
             }
             WindowEvent::Destroyed => {
@@ -614,6 +817,7 @@ fn is_teardown_topic(topic: &str) -> bool {
 /// Extracts `(plugin_id, topic, data)` from a host `event` notification.
 /// Only `plugin.*` topics with a string `pluginId` route to plugin
 /// windows; everything else (including gap markers) is ignored.
+#[cfg(test)]
 fn parse_host_notification(message: &str) -> Option<(String, String, Value)> {
     if !message.contains("\"method\":\"event\"") && !message.contains("\"method\": \"event\"") {
         return None;
@@ -660,6 +864,7 @@ const INIT_SCRIPT: &str = r#"(function () {
   var instanceId = Date.now().toString(36) + '-' + Math.random().toString(36).slice(2);
   var pending = new Map();
   var listeners = new Map();
+  var listenerCount = 0;
   var disposed = false;
   function dispose() {
     if (disposed) return;
@@ -670,10 +875,12 @@ const INIT_SCRIPT: &str = r#"(function () {
     });
     pending.clear();
     listeners.clear();
+    listenerCount = 0;
     window.removeEventListener('pagehide', dispose);
     window.removeEventListener('beforeunload', dispose);
   }
   window.__tiktools_broker_dispose__ = dispose;
+  window.__tiktools_broker_diagnostics__ = function () { return {pending:pending.size,topics:listeners.size,listeners:listenerCount}; };
   window.addEventListener('pagehide', dispose);
   window.addEventListener('beforeunload', dispose);
   function fire(topic, data) {
@@ -685,6 +892,10 @@ const INIT_SCRIPT: &str = r#"(function () {
   }
   window.__tiktools_broker_push__ = function (envelope) {
     if (disposed || !envelope || envelope.apiVersion !== 1) return;
+    if (envelope.method === 'event' && envelope.params && typeof envelope.params.topic === 'string') {
+      fire(envelope.params.topic, envelope.params.data);
+      return;
+    }
     if (typeof envelope.event === 'string') {
       fire(envelope.event, envelope.data);
       return;
@@ -730,24 +941,33 @@ const INIT_SCRIPT: &str = r#"(function () {
     },
     events: {
       subscribe: function (topics, listener) {
+        if (disposed) throw new Error('plugin host was closed');
         var names = Array.isArray(topics) ? topics : [topics];
+        if (typeof listener !== 'function' || names.length < 1 || names.length > 32 || names.some(function (topic) { return typeof topic !== 'string' || topic.length > 128 || topic.indexOf('plugin.') !== 0; })) throw new Error('invalid plugin event subscription');
+        var allTopics = new Set(Array.from(listeners.keys()).concat(names));
+        if (allTopics.size > 32 || listenerCount + names.length > 128) throw new Error('plugin event listener limit reached');
         names.forEach(function (topic) {
           if (!listeners.has(topic)) listeners.set(topic, []);
           listeners.get(topic).push(listener);
+          listenerCount += 1;
         });
-        call('events.subscribe', { topics: names }).catch(function () { /* host logs the rejection */ });
-        return function unsubscribe() {
+        var removed = false;
+        function unsubscribe() {
+          if (removed) return;
+          removed = true;
           names.forEach(function (topic) {
             var watchers = listeners.get(topic);
             if (!watchers) return;
             var index = watchers.indexOf(listener);
-            if (index >= 0) watchers.splice(index, 1);
+            if (index >= 0) { watchers.splice(index, 1); listenerCount -= 1; }
             if (watchers.length === 0) {
               listeners.delete(topic);
-              call('events.unsubscribe', { topics: [topic] }).catch(function () {});
+              if (!disposed) call('events.unsubscribe', { topics: [topic] }).catch(function () {});
             }
           });
-        };
+        }
+        call('events.subscribe', { topics: names }).catch(unsubscribe);
+        return unsubscribe;
       }
     },
     host: {
@@ -760,6 +980,41 @@ const INIT_SCRIPT: &str = r#"(function () {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn aggregate_subscription_limit_is_atomic_across_requests() {
+        let mut topics = HashSet::new();
+        apply_topics(
+            &mut topics,
+            crate::event::PluginUiSubscription::Subscribe(
+                (0..32).map(|n| format!("plugin.{n}")).collect(),
+            ),
+        )
+        .unwrap();
+        assert!(apply_topics(
+            &mut topics,
+            crate::event::PluginUiSubscription::Subscribe(vec!["plugin.more".to_owned()])
+        )
+        .is_err());
+        assert_eq!(topics.len(), 32);
+        apply_topics(
+            &mut topics,
+            crate::event::PluginUiSubscription::Unsubscribe(vec!["plugin.0".to_owned()]),
+        )
+        .unwrap();
+        apply_topics(
+            &mut topics,
+            crate::event::PluginUiSubscription::Subscribe(vec!["plugin.more".to_owned()]),
+        )
+        .unwrap();
+        assert_eq!(topics.len(), 32);
+    }
+    #[test]
+    fn deferred_close_is_fenced_even_if_a_native_window_id_is_reused() {
+        let id = WindowId::from(1);
+        assert!(close_owner_matches(Some(id), Some(5), id, 5));
+        assert!(!close_owner_matches(Some(id), Some(5), id, 6));
+        assert!(close_owner_matches(None, None, id, 6));
+    }
 
     #[test]
     fn ui_ids_follow_the_identifier_rule() {
@@ -889,12 +1144,20 @@ mod tests {
         windows.close("ghost.plugin", "main");
         windows.close_plugin("ghost.plugin");
         windows.close_plugin("ghost.plugin");
-        windows.respond("ghost.plugin", "main", r#"{"ok":true}"#, WindowId::from(0));
+        windows.respond(
+            "ghost.plugin",
+            "main",
+            r#"{"ok":true}"#.into(),
+            WindowId::from(0),
+            0,
+            None,
+        );
         windows.apply_subscription(
             "ghost.plugin",
             "main",
             crate::event::PluginUiSubscription::Subscribe(vec!["plugin.event".to_owned()]),
             WindowId::from(0),
+            0,
         );
         windows.deliver_event("ghost.plugin", "plugin.event", &Value::Null);
         windows.forward_host_message(

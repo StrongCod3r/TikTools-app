@@ -1,7 +1,9 @@
 mod domain_events;
 mod ipc;
 mod lifecycle;
-mod outbox;
+pub(crate) mod outbox;
+#[cfg(test)]
+mod smoke;
 #[cfg(test)]
 mod tests;
 
@@ -32,6 +34,9 @@ pub struct DesktopApp {
     proxy: EventLoopProxy<DesktopEvent>,
     tray: Option<TrayController>,
     pending_host_messages: WebviewOutbox,
+    pending_batch: Option<ipc::PendingBatch>,
+    page_ready: bool,
+    emitter: Arc<crate::event::EventLoopEmitter>,
     domain_mailbox: Arc<std::sync::Mutex<outbox::ForwardMailbox>>,
     shutting_down: bool,
     startup_state: StartupState,
@@ -45,6 +50,9 @@ pub struct DesktopApp {
     /// recovers the failed transport (see `frontend_ready`).
     reload_pending: bool,
     log_path: PathBuf,
+    ui_generation: u64,
+    diagnostics_at: Instant,
+    diagnostic_logging: bool,
     plugin_ui: crate::plugin_webview::PluginUiWindows,
 }
 

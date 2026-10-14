@@ -175,6 +175,87 @@ pub fn sync_gtk_display() {
     }
 }
 
+/// Stop the Wry 0.57 GTK IPC signal before releasing its WebView owner.
+/// Wry's script-message-received closure captures a strong WebView; the
+/// WebView owns the UserContentManager that owns that closure. GTK widget
+/// destroy alone did not retire renderer children in the 100-cycle reproducer.
+/// Unregistering a JS handler does not disconnect the GObject signal.
+/// Disconnect only that signal, on this private manager, at terminal teardown.
+/// This never destroys a native window or changes the child/sync/parent order.
+pub(crate) fn prepare_webview_teardown(webview: &WebView) -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        use gtk::glib::{gobject_ffi, prelude::*, translate::IntoGlib};
+        use webkit2gtk::{UserContentManagerExt, WebViewExt};
+        use wry::WebViewExtUnix;
+        #[cfg(test)]
+        if std::env::var_os("TIKTOOLS_NATIVE_SMOKE_RETAIN_IPC").is_some() {
+            return 0;
+        }
+        let native = webview.webview();
+        let Some(manager) = native.user_content_manager() else {
+            return 0;
+        };
+        manager.unregister_script_message_handler("ipc");
+        let mut disconnected = 0;
+        // SAFETY: GTK/Wry owners and manager remain live on their UI thread.
+        // Lookup uses the manager's runtime type. Each ID is found on this
+        // instance immediately before disconnect, which also releases its
+        // closure. No borrowed callback is executing during deferred teardown.
+        // Find+disconnect supports GLib versions before 2.78 (unlike matching
+        // disconnect with ID alone). The loop is finite over existing handlers.
+        unsafe {
+            let signal = gobject_ffi::g_signal_lookup(
+                c"script-message-received".as_ptr(),
+                manager.type_().into_glib(),
+            );
+            if signal == 0 {
+                return 0;
+            }
+            loop {
+                let id = gobject_ffi::g_signal_handler_find(
+                    manager.as_ptr().cast(),
+                    gobject_ffi::G_SIGNAL_MATCH_ID,
+                    signal,
+                    0,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                );
+                if id == 0 {
+                    break;
+                }
+                gobject_ffi::g_signal_handler_disconnect(manager.as_ptr().cast(), id);
+                disconnected += 1;
+            }
+        }
+        DISCONNECTED_IPC_HANDLERS.fetch_add(disconnected, std::sync::atomic::Ordering::Relaxed);
+        disconnected
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = webview;
+        0
+    }
+}
+
+static DISCONNECTED_IPC_HANDLERS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static RETAINED_EXTERNAL_HANDLES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn record_external_destroy() {
+    RETAINED_EXTERNAL_HANDLES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn native_lifecycle_diagnostics() -> serde_json::Value {
+    serde_json::json!({
+        "disconnectedIpcHandlers": DISCONNECTED_IPC_HANDLERS.load(std::sync::atomic::Ordering::Relaxed),
+        "nativeBrokerAdmissions": crate::event::native_admissions(),
+        "retainedExternalHandles": RETAINED_EXTERNAL_HANDLES.load(std::sync::atomic::Ordering::Relaxed),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
