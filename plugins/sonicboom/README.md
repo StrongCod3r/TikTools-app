@@ -70,7 +70,7 @@ bun run test:e2e --output=/tmp/tiktools-e2e-results
 ```
 
 - Plugin unit suite: 37 passed.
-- Plugin UI typecheck/build, plugin lint, app typecheck: passed.
+- Plugin UI typecheck/build, plugin lint, app typecheck and host web build: passed.
 - Isolated Chromium suite: 19 passed (compiled UI, fake native broker and real iframe
   host shim). Includes enabled/ready counts, provider switching, manual provider/profile
   payloads, profile deletion/reload, revision persistence, loading/error/retry, switching
@@ -82,7 +82,8 @@ bun run test:e2e --output=/tmp/tiktools-e2e-results
 - App-wide E2E: 29 passed, 17 failed: 13 existing screenshot comparisons and four widget
   editor tests. Representative feed screenshot and missing widget Heading failures also
   reproduce at unchanged `origin/remake` (`278ca29`); no assertions or baselines changed.
-  Full baseline comparison is recorded separately in the validation report.
+  The full unchanged baseline also has 29 passes and the identical 17 failures. See
+  [machine-readable validation](validation/provider-selection-2026-10-16.json).
 
 Use separate Playwright output directories if running suites concurrently; both default
 to `test-results`, which can otherwise cause unrelated artifact-deletion failures.
