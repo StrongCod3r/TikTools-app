@@ -69,6 +69,16 @@
           }
         },
         {
+          "key": "provider",
+          "label": {
+            "default": "TTS provider",
+            "i18key": "sonicboom.server.speak.provider.label"
+          },
+          "kind": "select",
+          "value": "supertonic",
+          "optionsFrom": "plugin-action-options:sonicboom.server.speak:provider"
+        },
+        {
           "key": "voice",
           "label": {
             "default": "Voice",
@@ -105,7 +115,7 @@
       ],
       "http": {
         "method": "POST",
-        "path": "/api/tts/play?voice={{ config.voice }}&lang={{ config.language }}&play_now={{ config.playNow }}",
+        "path": "/api/tts/play?provider={{ config.provider }}&voice={{ config.voice }}&lang={{ config.language }}&play_now={{ config.playNow }}",
         "headers": {
           "Content-Type": "text/plain"
         },
@@ -114,7 +124,11 @@
       },
       "optionSources": {
         "voice": {
-          "path": "/v1/voices",
+          "path": "/api/tts/plugin/voices",
+          "timeoutMs": 8000
+        },
+        "provider": {
+          "path": "/api/tts/plugin/providers",
           "timeoutMs": 8000
         }
       }
@@ -262,6 +276,11 @@
             "type": "boolean",
             "title": "Interrupt and play now",
             "default": false
+          },
+          "provider": {
+            "type": "string",
+            "title": "TTS provider",
+            "default": "supertonic"
           }
         }
       },
@@ -277,7 +296,7 @@
             "type": "action.http",
             "config": {
               "method": "POST",
-              "url": "{{ params.serverUrl }}/api/tts/play?voice={{ params.voice }}&lang={{ params.language }}&play_now={{ params.playNow }}",
+              "url": "{{ params.serverUrl }}/api/tts/play?provider={{ params.provider }}&voice={{ params.voice }}&lang={{ params.language }}&play_now={{ params.playNow }}",
               "headers": {
                 "Content-Type": "text/plain"
               },

@@ -49,6 +49,7 @@ struct SpeechEngine {
     deduper: Deduper,
     voices: Vec<String>,
     voices_fetched_at_ms: u64,
+    catalog_key: Option<(String, u64, String, String)>,
     /// Time-seeded xorshift state for random voice picks (no rng dep for
     /// a cosmetic shuffle).
     rng: u64,
@@ -64,6 +65,7 @@ impl Default for SpeechEngine {
             deduper: Deduper::new(DEDUP_WINDOW_MS, DEDUP_MAX_ENTRIES),
             voices: Vec::new(),
             voices_fetched_at_ms: 0,
+            catalog_key: None,
             rng: now_millis().max(1),
         }
     }
@@ -80,21 +82,32 @@ impl SpeechEngine {
         ((x.wrapping_mul(0x2545F4914F6CDD1D) >> 32) as usize) % len.max(1)
     }
 
-    /// Refreshes the cached voice list when the policy needs it (random
-    /// picks or an empty default) and the cache is stale. Failures keep
-    /// the previous list: speech still proceeds with the configured
-    /// default, and the server error names a truly unknown voice.
-    async fn ensure_voices(&mut self, server_url: &str, token: &str, needed: bool) {
-        if !needed {
-            return;
+    /// Server, credential identity, provider and UI revision scope both positive and
+    /// empty catalogs. Explicit reload invalidates immediately; TTL is a fallback.
+    async fn ensure_voices(&mut self, config: &config::BackendConfig) {
+        use std::hash::{Hash, Hasher};
+        let mut identity = std::collections::hash_map::DefaultHasher::new();
+        config.api_token.hash(&mut identity);
+        let key = (
+            config.server_url.clone(),
+            identity.finish(),
+            config.policy.provider_id.clone(),
+            config.policy.voice_catalog_revision.clone(),
+        );
+        if self.catalog_key.as_ref() != Some(&key) {
+            self.voices.clear();
+            self.voices_fetched_at_ms = 0;
+            self.catalog_key = Some(key);
         }
+        let server_url = &config.server_url;
+        let token = &config.api_token;
         let now = now_millis();
         if now.saturating_sub(self.voices_fetched_at_ms) < VOICES_TTL_SECS * 1000
-            && !self.voices.is_empty()
+            && self.voices_fetched_at_ms != 0
         {
             return;
         }
-        let url = format!("{server_url}/v1/voices");
+        let url = format!("{server_url}/api/tts/plugin/voices");
         let mut request = self
             .http
             .get(&url)
@@ -102,18 +115,32 @@ impl SpeechEngine {
         if !token.is_empty() {
             request = request.bearer_auth(token);
         }
-        let response = request
-            .send()
-            .await
-            .ok()
-            .filter(|response| response.status().is_success())
-            .map(|response| response.json::<serde_json::Value>());
-        let fetched = match response {
-            Some(body) => body.await.ok().map(voice_values),
-            None => None,
+        self.voices_fetched_at_ms = now;
+        let fetched = match request.send().await {
+            Ok(response) if response.status().is_success() => response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .map(voice_values),
+            Ok(response) => {
+                eprintln!(
+                    "sonicboom: voice catalog server answered {}",
+                    response.status()
+                );
+                None
+            }
+            Err(_) => {
+                eprintln!("sonicboom: voice catalog request failed");
+                None
+            }
         };
+        self.voices.clear();
         if let Some(voices) = fetched {
-            self.voices = voices;
+            let prefix = format!("{}:", config.policy.provider_id);
+            self.voices = voices
+                .into_iter()
+                .filter(|v| v.starts_with(&prefix))
+                .collect();
             self.voices_fetched_at_ms = now;
         }
     }
@@ -124,13 +151,15 @@ impl SpeechEngine {
         token: &str,
         text: &str,
         voice: &str,
+        provider: &str,
         language: &str,
     ) -> Result<String, String> {
         // Mirrors the declarative speak action: POST
         // `/api/tts/play?voice=…&lang=…` with a text/plain body. The
         // observer never interrupts (`play_now` stays a manual control).
         let url = format!(
-            "{server_url}/api/tts/play?voice={}&lang={}",
+            "{server_url}/api/tts/play?provider={}&voice={}&lang={}",
+            encode_param(provider),
             encode_param(voice),
             encode_param(language)
         );
@@ -170,15 +199,18 @@ fn encode_param(value: &str) -> String {
     encoded
 }
 
-/// Extracts voice value strings from a `/v1/voices` document, mirroring
+/// Extracts voice value strings from the plugin catalog, mirroring
 /// the host's default option-item mapping (bare strings pass through;
 /// objects read `id`, then `value`).
 fn voice_values(body: serde_json::Value) -> Vec<String> {
     let items = body.as_array().cloned().unwrap_or_default();
     let mut voices = Vec::new();
-    for item in &items {
+    for item in items.iter().take(500) {
+        if item.get("disabled").and_then(serde_json::Value::as_bool) == Some(true) {
+            continue;
+        }
         if let Some(text) = item.as_str() {
-            if !text.trim().is_empty() {
+            if !text.trim().is_empty() && text.len() <= 256 {
                 voices.push(text.trim().to_owned());
             }
             continue;
@@ -188,7 +220,7 @@ fn voice_values(body: serde_json::Value) -> Vec<String> {
             .or_else(|| item.get("value"))
             .and_then(serde_json::Value::as_str)
             .map(str::trim)
-            .filter(|value| !value.is_empty());
+            .filter(|value| !value.is_empty() && value.len() <= 256);
         if let Some(value) = value {
             voices.push(value.to_owned());
         }
@@ -204,10 +236,11 @@ impl SpeechEngine {
             config,
             admitted_at,
         } = *job;
-        let voices_needed =
-            config.policy.random_voice || config.policy.default_voice.trim().is_empty();
-        self.ensure_voices(&config.server_url, &config.api_token, voices_needed)
-            .await;
+        self.ensure_voices(&config).await;
+        if self.voices.is_empty() {
+            eprintln!("sonicboom: no authorized voices available for selected provider");
+            return Some(false);
+        }
         let voices = self.voices.clone();
         let decision = policy::decide(&text, &author, &config.policy, &voices, |len| {
             self.next_index(len)
@@ -227,6 +260,7 @@ impl SpeechEngine {
                 &config.api_token,
                 &decision.spoken_text,
                 &decision.voice,
+                &config.policy.provider_id,
                 &decision.language,
             )
             .await
@@ -547,6 +581,67 @@ mod tests {
                 .join(format!("../{entry}"))
                 .is_file(),
             "built UI entry must exist at {entry}"
+        );
+    }
+    #[tokio::test]
+    async fn catalog_cache_tracks_revision_provider_and_auth_even_with_explicit_default() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (report, received) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for (code, body) in [
+                (
+                    "200 OK",
+                    r#"[{"id":"supertonic:M1"},{"id":"pocket-tts:old"}]"#,
+                ),
+                ("200 OK", r#"[{"id":"supertonic:F1"}]"#),
+                (
+                    "200 OK",
+                    r#"[{"id":"pocket-tts:new"},{"id":"qwen3-gguf:foreign"}]"#,
+                ),
+                ("403 Forbidden", "{}"),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut raw = [0_u8; 4096];
+                let n = stream.read(&mut raw).unwrap();
+                let line = String::from_utf8_lossy(&raw[..n])
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                report.send(line).unwrap();
+                write!(stream, "HTTP/1.1 {code}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let mut engine = SpeechEngine::default();
+        let mut config = config::BackendConfig {
+            server_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        config.policy.default_voice = "M1".into();
+        engine.ensure_voices(&config).await;
+        assert_eq!(engine.voices, ["supertonic:M1"]);
+        engine.ensure_voices(&config).await; // Cached despite explicit default.
+        assert_eq!(received.try_iter().count(), 1);
+        config.policy.voice_catalog_revision = "new-ui-reload".into();
+        engine.ensure_voices(&config).await;
+        assert_eq!(engine.voices, ["supertonic:F1"]);
+        config.policy.provider_id = "pocket-tts".into();
+        engine.ensure_voices(&config).await;
+        assert_eq!(engine.voices, ["pocket-tts:new"]);
+        config.api_token = "test-other-tenant".into();
+        engine.ensure_voices(&config).await;
+        assert!(engine.voices.is_empty());
+        assert!(!format!("{:?}", engine.catalog_key).contains(&config.api_token));
+        engine.ensure_voices(&config).await; // Empty/error catalogs are cached too.
+        server.join().unwrap();
+        assert_eq!(
+            received.try_iter().collect::<Vec<_>>(),
+            vec!["GET /api/tts/plugin/voices HTTP/1.1"; 3]
         );
     }
 }

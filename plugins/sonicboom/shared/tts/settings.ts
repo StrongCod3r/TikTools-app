@@ -27,6 +27,8 @@ export const TTS_SPEED_PITCH_UNSUPPORTED = true;
 
 export function defaultTtsSettings(): TtsSettings {
   return {
+    providerId: 'supertonic',
+    voiceCatalogRevision: '',
     enabled: false,
     language: 'en',
     defaultVoice: '',
@@ -151,6 +153,8 @@ export function sanitizeTtsSettings(input: unknown): TtsSettings {
   const defaultPitch = typeof record.defaultPitch === 'number' ? record.defaultPitch : defaults.defaultPitch;
   const volume = typeof record.volume === 'number' ? record.volume : defaults.volume;
   return {
+    providerId: typeof record.providerId === 'string' && /^[a-z0-9-]{1,32}$/.test(record.providerId) ? record.providerId : 'supertonic',
+    voiceCatalogRevision: toTrimmedString(record.voiceCatalogRevision, 64, ''),
     enabled: toBoolean(record.enabled, defaults.enabled),
     language: toTrimmedString(record.language, TTS_LIMITS.maxLanguageLength, defaults.language),
     defaultVoice: toVoiceString(record.defaultVoice),

@@ -25,7 +25,7 @@ fn read_frame(stdout: &mut std::process::ChildStdout) -> serde_json::Value {
     serde_json::from_slice(&body).unwrap()
 }
 
-/// Minimal HTTP/1.1 stub: answers `GET /v1/voices` and records
+/// Minimal HTTP/1.1 stub: answers `GET /api/tts/plugin/voices` and records
 /// `POST /api/tts/play` requests, then reports them over the channel.
 fn stub_server(listener: TcpListener, report: mpsc::Sender<(String, String)>) {
     for stream in listener.incoming().take(4) {
@@ -77,8 +77,8 @@ fn stub_server(listener: TcpListener, report: mpsc::Sender<(String, String)>) {
             }
             body.extend_from_slice(&chunk[..read]);
         }
-        if request_line.starts_with("GET /v1/voices") {
-            let payload = r#"[{"id":"M1","name":"M1"}]"#;
+        if request_line.starts_with("GET /api/tts/plugin/voices") {
+            let payload = r#"[{"id":"supertonic:M1","name":"M1"}]"#;
             let _ = stream.write_all(
                 format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
@@ -175,7 +175,9 @@ fn chat_event_speaks_through_the_configured_server() {
         .recv_timeout(Duration::from_secs(20))
         .expect("backend must POST speech to the server");
     assert!(
-        request_line.contains("voice=M1") && request_line.contains("lang=en"),
+        request_line.contains("provider=supertonic")
+            && request_line.contains("voice=supertonic%3AM1")
+            && request_line.contains("lang=en"),
         "speech URL carries voice/lang: {request_line}"
     );
     assert_eq!(body, "hello world");
