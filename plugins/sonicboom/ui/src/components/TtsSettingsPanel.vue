@@ -20,6 +20,10 @@ type TtsSettingsPanelProps = {
   locale: Locale;
   settings: TtsSettings;
   voices: ActionOptionItem[];
+  providers?: ActionOptionItem[];
+  refreshing?: boolean;
+  catalogStatus?: string;
+  providerReady?: boolean;
   voicesError?: string;
   speaking: boolean;
   logs: TtsLogEntry[];
@@ -48,7 +52,7 @@ type TtsSettingsPanelProps = {
  * restricted broker (`settings.*`, `actions.*`, `options.*`).
  */
 export const TtsSettingsPanel = defineVueComponent<TtsSettingsPanelProps>(
-  ['locale', 'settings', 'voices', 'voicesError', 'speaking', 'logs', 'onSettingsChange', 'onRefreshVoices', 'onSpeak', 'outputsSupported', 'outputs', 'outputsSelected', 'outputsError', 'outputsPending', 'outputError', 'onSelectOutput', 'onRefreshOutputs'],
+  ['providers', 'refreshing', 'catalogStatus', 'providerReady', 'locale', 'settings', 'voices', 'voicesError', 'speaking', 'logs', 'onSettingsChange', 'onRefreshVoices', 'onSpeak', 'outputsSupported', 'outputs', 'outputsSelected', 'outputsError', 'outputsPending', 'outputError', 'onSelectOutput', 'onRefreshOutputs'],
   (props) => {
     const update = (patch: Partial<TtsSettings>): void => {
       props.onSettingsChange({ ...props.settings, ...patch });
@@ -80,7 +84,7 @@ export const TtsSettingsPanel = defineVueComponent<TtsSettingsPanelProps>(
     return () => {
       const settings = props.settings;
       const locale = props.locale;
-      const voiceList = voiceOptions(props.voices, settings.defaultVoice);
+      const voiceList = voiceOptions(props.voices);
 
       return (
         <div>
@@ -118,6 +122,16 @@ export const TtsSettingsPanel = defineVueComponent<TtsSettingsPanelProps>(
                   onInput={(event) => update({ language: (event.currentTarget as HTMLInputElement).value.slice(0, TTS_LIMITS.maxLanguageLength) || 'en' })}
                 />
               </div>
+              {(props.providers?.length ?? 0) > 1 && <div class="tts-row tts-row--stack">
+                <label class="tts-label" for="tts-provider">{t(locale, 'ttsProvider')}</label>
+                <select id="tts-provider" class="tts-select" value={settings.providerId} onChange={event => update({ providerId: (event.currentTarget as HTMLSelectElement).value })}>
+                  {!props.providers?.some(p => p.value === settings.providerId) && <option value={settings.providerId} disabled>{settings.providerId} — {t(locale, 'ttsProviderUnavailable')}</option>}
+                  {props.providers?.map(p => <option key={p.value} value={p.value} disabled={p.disabled}>{p.label.replace('(loading)', `(${t(locale, 'ttsProviderLoading')})`).replace('(not_installed)', `(${t(locale, 'ttsProviderMissing')})`).replace('(error)', `(${t(locale, 'ttsProviderError')})`)}</option>)}
+                </select>
+              </div>}
+              {props.providerReady === false && <p role="status">{t(locale, 'ttsProviderUnavailable')} ({settings.providerId})</p>}
+              {props.catalogStatus && <p role="status">{props.catalogStatus}</p>}
+              {props.voices.length === 0 && <p role="status">{t(locale, 'ttsNoProviderVoices')}</p>}
               <div class="tts-row tts-row--stack">
                 <label class="tts-label" for="tts-default-voice">{t(locale, 'ttsDefaultVoice')}</label>
                 <select
@@ -271,6 +285,8 @@ export const TtsSettingsPanel = defineVueComponent<TtsSettingsPanelProps>(
             />
 
             <TtsVoiceTester
+              refreshing={props.refreshing}
+              unavailable={props.providerReady === false || props.voices.length === 0}
               locale={locale}
               voices={props.voices}
               voicesError={props.voicesError}

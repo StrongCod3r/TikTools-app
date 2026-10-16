@@ -250,7 +250,8 @@ export class PluginBroker {
   }
 
   async getOptions(source: string, refresh = false): Promise<OptionsResult> {
-    const result = (await this.post('options.get', { source, refresh })) as Partial<OptionsResult>;
+    const result = (await this.post('options.get', { source, refresh })) as Partial<OptionsResult> & { error?: string };
+    if (result.error) throw new Error(result.error);
     return {
       options: Array.isArray(result.options) ? result.options : [],
       selected: typeof result.selected === 'string' ? result.selected : null,

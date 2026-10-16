@@ -1,5 +1,5 @@
 <script lang="tsx">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { defineVueComponent } from './vue/component.ts';
 
 import {
@@ -12,10 +12,11 @@ import {
 import { PluginBroker } from './broker.ts';
 import { TtsSettingsPanel } from './components/TtsSettingsPanel.vue';
 import { outputsTarget } from './components/source.ts';
-import type { Locale } from './i18n/index.ts';
+import { t, type Locale } from './i18n/index.ts';
 import type { ActionOptionItem } from './types.ts';
 
 const SPEAK_ACTION = 'sonicboom.server.speak';
+const PROVIDERS_SOURCE = 'plugin-action-options:sonicboom.server.speak:provider';
 const VOICES_SOURCE = 'plugin-action-options:sonicboom.server.speak:voice';
 const OUTPUTS_SOURCE = 'plugin-action-options:sonicboom.server.set-output-device:device';
 
@@ -36,7 +37,13 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
   const locale = ref<Locale>('en');
   const fullSettings = ref<Record<string, unknown>>({});
   const settings = ref<TtsSettings>(defaultTtsSettings());
-  const voices = ref<ActionOptionItem[]>([]);
+  const providers = ref<ActionOptionItem[]>([]);
+  const catalog = ref<ActionOptionItem[]>([]);
+  const voices = computed(() => catalog.value.filter(v => v.value.startsWith(`${settings.value.providerId}:`)));
+  const ready = computed(() => providers.value.some(p => p.value === settings.value.providerId && !p.disabled));
+  const refreshing = ref(false);
+  const catalogStatus = ref('');
+  let catalogEpoch = 0;
   const voicesError = ref<string | undefined>(undefined);
   const outputs = ref<ActionOptionItem[] | undefined>(undefined);
   const outputsSelected = ref<string | undefined>(undefined);
@@ -48,34 +55,61 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
   const bootError = ref('');
   let activeSpeech = 0;
   let logSequence = 0;
+  let unsubscribeSettings: (() => void) | undefined;
+  let ownSettingsEvents = 0;
+  let connectionCheckPending = false;
+  let disposed = false;
   let saveTimer: ReturnType<typeof setTimeout> | undefined;
 
   const readTtsSettings = (values: Record<string, unknown>): TtsSettings => {
     const raw = values.tts;
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return defaultTtsSettings();
+    const stored = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Partial<TtsSettings> : {};
     return sanitizeTtsSettings({
       ...defaultTtsSettings(),
-      ...(raw as Partial<TtsSettings>),
+      defaultVoice: typeof values.defaultVoice === 'string' ? values.defaultVoice : '',
+      language: typeof values.defaultLanguage === 'string' ? values.defaultLanguage : 'en',
+      ...stored,
     });
   };
 
-  const persistSettings = (): void => {
-    const values = { ...fullSettings.value, tts: { ...settings.value } };
-    fullSettings.value = values;
-    void broker.setSettings(values).catch((failure: unknown) => {
+  let saveChain = Promise.resolve();
+  const persistSettings = (): Promise<void> => {
+    const snapshot = { ...settings.value };
+    const identity = serverIdentity(fullSettings.value);
+    const operation = saveChain.then(async () => {
+      const latest = await broker.getSettings();
+      if (identity !== serverIdentity(latest)) {
+        catalogEpoch += 1;
+        catalog.value = []; providers.value = []; refreshing.value = false;
+        fullSettings.value = latest; settings.value = readTtsSettings(latest);
+        voicesError.value = t(locale.value, 'ttsConnectionChanged');
+        return;
+      }
+      const values = { ...latest, tts: snapshot };
+      ownSettingsEvents += 1;
+      try { await broker.setSettings(values); }
+      catch (failure) { ownSettingsEvents = Math.max(0, ownSettingsEvents - 1); throw failure; }
+      fullSettings.value = values;
+    });
+    saveChain = operation.catch((failure: unknown) => {
       bootError.value = failure instanceof Error ? failure.message : String(failure);
     });
+    return operation;
   };
 
   const schedulePersist = (): void => {
     if (saveTimer !== undefined) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveTimer = undefined;
-      persistSettings();
+      void persistSettings().catch(() => undefined);
     }, SETTINGS_DEBOUNCE_MS);
   };
 
   const handleSettingsChange = (next: TtsSettings): void => {
+    if (next.providerId !== settings.value.providerId) {
+      next = { ...next, defaultVoice: '', specialUsers: next.specialUsers.map(u => ({ ...u, voice: '' })) };
+      catalogStatus.value = t(locale.value, 'ttsProviderChanged');
+    }
     settings.value = sanitizeTtsSettings(next);
     schedulePersist();
   };
@@ -85,17 +119,85 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
     logs.value = [...logs.value, next].slice(-50);
   };
 
-  const refreshVoices = (): void => {
-    void broker
-      .getOptions(VOICES_SOURCE, true)
-      .then((result) => {
-        voices.value = result.options;
-        voicesError.value = undefined;
-      })
-      .catch((failure: unknown) => {
-        voicesError.value = failure instanceof Error ? failure.message : String(failure);
-      });
+  const serverIdentity = (values: Record<string, unknown>): string => JSON.stringify([values.serverUrl ?? '', values.apiToken ?? '']);
+  const loadCatalog = async (refresh: boolean): Promise<void> => {
+    if (refreshing.value) return;
+    const epoch = ++catalogEpoch;
+    refreshing.value = true;
+    catalogStatus.value = '';
+    try {
+      await saveChain;
+      if (disposed) return;
+      const latest = await broker.getSettings();
+      const identity = serverIdentity(latest);
+      if (identity !== serverIdentity(fullSettings.value)) {
+        catalog.value = []; providers.value = [];
+        settings.value = readTtsSettings(latest);
+      }
+      fullSettings.value = latest;
+      if (refresh && saveTimer !== undefined) {
+        clearTimeout(saveTimer); saveTimer = undefined;
+        await persistSettings();
+      }
+      const [providerResult, voiceResult] = await Promise.allSettled([
+        broker.getOptions(PROVIDERS_SOURCE, refresh), broker.getOptions(VOICES_SOURCE, refresh),
+      ]);
+      if (epoch !== catalogEpoch) return;
+      const connected = await broker.getSettings();
+      if (identity !== serverIdentity(connected)) {
+        catalog.value = []; providers.value = [];
+        fullSettings.value = connected;
+        settings.value = readTtsSettings(connected);
+        throw new Error(t(locale.value, 'ttsConnectionChanged'));
+      }
+      if (providerResult.status === 'fulfilled') providers.value = providerResult.value.options;
+      if (voiceResult.status === 'fulfilled') catalog.value = voiceResult.value.options;
+      if (providerResult.status === 'rejected') throw providerResult.reason;
+      if (voiceResult.status === 'rejected') throw voiceResult.reason;
+      const selectionBefore = JSON.stringify(settings.value);
+      const current = settings.value;
+      const previousProvider = current.providerId;
+      if (providers.value.length === 1 && !providers.value[0]?.disabled && providers.value[0]?.value !== current.providerId) {
+        handleSettingsChange({ ...current, providerId: providers.value[0]!.value });
+      }
+      const qualify = (v: string): string => v && !v.includes(':') && settings.value.providerId === 'supertonic' ? `supertonic:${v}` : v;
+      const valid = (v: string): string => voices.value.some(o => o.value === qualify(v)) ? qualify(v) : '';
+      // Loading is temporary: keep saved voice preferences until a ready catalog can validate them.
+      const reconcile = ready.value ? valid : qualify;
+      settings.value = { ...settings.value, defaultVoice: reconcile(settings.value.defaultVoice), specialUsers: settings.value.specialUsers.map(u => ({ ...u, voice: reconcile(u.voice) })) };
+      if (refresh) settings.value.voiceCatalogRevision = crypto.randomUUID();
+      if (refresh || selectionBefore !== JSON.stringify(settings.value) || saveTimer !== undefined) {
+        if (saveTimer !== undefined) { clearTimeout(saveTimer); saveTimer = undefined; }
+        await persistSettings();
+      }
+      if (epoch !== catalogEpoch) return;
+      voicesError.value = undefined;
+      catalogStatus.value = `${previousProvider !== settings.value.providerId ? `${t(locale.value, 'ttsProviderChanged')} ` : ''}${t(locale.value, 'ttsCatalogUpdated')}`;
+    } catch (failure) {
+      if (epoch === catalogEpoch) voicesError.value = `${t(locale.value, 'ttsReloadFailed')}: ${failure instanceof Error ? failure.message : String(failure)}`;
+    } finally {
+      if (epoch === catalogEpoch) refreshing.value = false;
+    }
   };
+  const refreshVoices = (): void => { void loadCatalog(true); };
+
+  // Settings can change in the host connection editor while this WebView stays mounted.
+  // This reads only broker-managed settings; catalogs still use host-owned option sources.
+  const syncConnection = async (): Promise<void> => {
+    if (disposed || connectionCheckPending) return;
+    connectionCheckPending = true;
+    try {
+      const latest = await broker.getSettings();
+      if (disposed || serverIdentity(latest) === serverIdentity(fullSettings.value)) return;
+      catalogEpoch += 1; refreshing.value = false;
+      catalog.value = []; providers.value = [];
+      if (saveTimer !== undefined) { clearTimeout(saveTimer); saveTimer = undefined; }
+      fullSettings.value = latest; settings.value = readTtsSettings(latest);
+      void loadCatalog(true);
+    } catch { /* A transport interruption keeps the last known connection until retry. */ }
+    finally { connectionCheckPending = false; }
+  };
+  const checkConnection = (): void => { void syncConnection(); };
 
   const refreshOutputs = (): void => {
     void broker
@@ -112,21 +214,30 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
 
   const handleSpeak = (text: string, voice: string): void => {
     const clean = text.trim().slice(0, 4_096);
-    if (!clean) return;
+    if (!clean || !ready.value || !voices.value.length) return;
     const current = settings.value;
     const resolvedVoice =
       voice.trim() ||
       current.defaultVoice.trim() ||
       firstAvailableVoice(voices.value.map((option) => option.value));
+    if (!voices.value.some(v => v.value === resolvedVoice)) return;
     activeSpeech += 1;
     speaking.value = true;
-    void broker
-      .executeAction(SPEAK_ACTION, {
+    void broker.getSettings().then(latest => {
+      if (serverIdentity(latest) !== serverIdentity(fullSettings.value)) {
+        catalogEpoch += 1; catalog.value = []; providers.value = []; refreshing.value = false;
+        fullSettings.value = latest; settings.value = readTtsSettings(latest);
+        throw new Error(t(locale.value, 'ttsConnectionChanged'));
+      }
+      if (settings.value.providerId !== current.providerId || !ready.value || !voices.value.some(v => v.value === resolvedVoice)) throw new Error(t(locale.value, 'ttsSelectionChanged'));
+      return broker.executeAction(SPEAK_ACTION, {
         text: clean,
+        provider: current.providerId,
         voice: resolvedVoice,
         language: current.language,
         playNow: true,
-      })
+      });
+    })
       .then((outcome) => {
         const lines = outcome.logs.length > 0 ? ` ${outcome.logs.slice(0, 3).join(' · ')}` : '';
         appendLog({
@@ -179,6 +290,16 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
   };
 
   onMounted(() => {
+    window.addEventListener('focus', checkConnection);
+    unsubscribeSettings = broker.subscribe('plugin.settings-changed', data => {
+      if (!data || typeof data !== 'object' || (data as { pluginId?: string }).pluginId !== 'sonicboom.server') return;
+      // The host emits one event per successful settings write. Consume our own
+      // echoes, but refresh on external writes even when secrets remain redacted.
+      if (ownSettingsEvents > 0) { ownSettingsEvents -= 1; return; }
+      catalogEpoch += 1; refreshing.value = false;
+      catalog.value = []; providers.value = [];
+      void loadCatalog(false);
+    });
     void broker
       .getLocale()
       .then((value) => {
@@ -198,17 +319,10 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
       .then((values) => {
         fullSettings.value = values;
         settings.value = readTtsSettings(values);
+        void loadCatalog(false);
       })
       .catch((failure: unknown) => {
         bootError.value = failure instanceof Error ? failure.message : String(failure);
-      });
-    void broker
-      .getOptions(VOICES_SOURCE, false)
-      .then((result) => {
-        voices.value = result.options;
-      })
-      .catch((failure: unknown) => {
-        voicesError.value = failure instanceof Error ? failure.message : String(failure);
       });
     void broker
       .getOptions(OUTPUTS_SOURCE, false)
@@ -222,13 +336,18 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
   });
 
   onUnmounted(() => {
+    disposed = true;
+    window.removeEventListener('focus', checkConnection);
+    unsubscribeSettings?.();
     // Flush a pending debounced save before the broker goes away.
     if (saveTimer !== undefined) {
       clearTimeout(saveTimer);
       saveTimer = undefined;
-      persistSettings();
+      void persistSettings().catch(() => undefined);
     }
-    broker.dispose();
+    catalogEpoch += 1;
+    // Finish a pending settings write before closing its broker transport.
+    void saveChain.finally(() => broker.dispose());
   });
 
   return () => {
@@ -246,6 +365,10 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
         locale={locale.value}
         settings={settings.value}
         voices={voices.value}
+        providers={providers.value}
+        catalogStatus={catalogStatus.value}
+        refreshing={refreshing.value}
+        providerReady={ready.value}
         voicesError={voicesError.value}
         speaking={speaking.value}
         logs={logs.value}

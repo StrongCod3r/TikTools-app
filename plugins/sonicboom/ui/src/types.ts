@@ -9,6 +9,7 @@
 export interface ActionOptionItem {
   value: string;
   label: string;
+  disabled?: boolean;
 }
 
 /** Log entry rendered by the voice tester (mirrors shared TTS types). */
