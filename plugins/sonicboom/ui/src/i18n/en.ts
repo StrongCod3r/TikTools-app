@@ -1,6 +1,20 @@
 /** SonicBoom plugin UI strings (moved from the main frontend
  * so no TTS copy ships in the TikTools web bundle). */
 export const english = {
+  ttsConnectionChanged: 'Connection changed. Reload voices.',
+  ttsProviderChanged: 'Provider changed; voice overrides reset.',
+  ttsCatalogUpdated: 'Voice catalog updated.',
+  ttsSelectionChanged: 'Voice selection changed.',
+  ttsReloadFailed: 'Reload failed',
+  ttsProviderLoading: 'loading',
+  ttsProviderMissing: 'not installed',
+  ttsProviderError: 'error',
+
+  ttsProvider: 'TTS provider',
+  ttsProviderUnavailable: 'Selected provider is unavailable.',
+  ttsNoProviderVoices: 'No authorized voices for this provider. Create a matching voice profile, then reload voices.',
+  ttsReloading: 'Reloading…',
+
   ttsAudioOutput: 'Audio output',
   ttsAudioOutputChoose: 'Choose an output…',
   ttsAudioOutputsLoading: 'Loading audio outputs…',

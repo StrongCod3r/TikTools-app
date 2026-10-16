@@ -13,6 +13,9 @@ import type { Page } from '@playwright/test';
 export interface SonicBoomFakeState {
   settings: Record<string, unknown>;
   voices: Array<{ value: string; label: string }>;
+  providers: Array<{ value: string; label: string; disabled?: boolean }>;
+  catalogError?: string;
+  catalogDelayMs?: number;
   outputs: Array<{ value: string; label: string }>;
   outputsSelected: string | null;
   speakOutcome: { ok: boolean; summary: string; logs: string[]; error?: string | null };
@@ -33,10 +36,11 @@ export function baseFakeState(): SonicBoomFakeState {
       apiToken: '',
       tts: { enabled: true, language: 'en', defaultVoice: 'M1' },
     },
+    providers: [{ value: 'supertonic', label: 'Supertonic' }],
     voices: [
-      { value: 'M1', label: 'M1' },
-      { value: 'F2', label: 'F2' },
-      { value: 'N3', label: 'N3' },
+      { value: 'supertonic:M1', label: 'M1' },
+      { value: 'supertonic:F2', label: 'F2' },
+      { value: 'supertonic:N3', label: 'N3' },
     ],
     outputs: [
       { value: 'Speakers', label: 'Speakers' },
@@ -54,6 +58,8 @@ const INIT_SCRIPT = `
 (() => {
   const state = window.__SONICBOOM_STATE__;
   const calls = window.__SONICBOOM_CALLS__;
+  const settingsListeners = new Set();
+  window.__SONICBOOM_EMIT_SETTINGS__ = () => { for (const listener of settingsListeners) listener('plugin.settings-changed', { pluginId: 'sonicboom.server' }); };
   const delay = (ms, value) => new Promise((resolve) => setTimeout(() => resolve(value), ms));
   window.tiktools = {
     settings: {
@@ -64,6 +70,7 @@ const INIT_SCRIPT = `
       set: async (values) => {
         calls.push({ method: 'settings.set', params: { values } });
         state.settings = { ...values };
+        window.__SONICBOOM_EMIT_SETTINGS__();
         return { ...state.settings };
       },
     },
@@ -85,14 +92,21 @@ const INIT_SCRIPT = `
     options: {
       get: async (source, refresh) => {
         calls.push({ method: 'options.get', params: { source, refresh: refresh === true } });
-        if (source.endsWith(':voice')) {
+        if (source.endsWith(':provider') || source.endsWith(':voice')) {
+          const result = state.catalogError ? { error: state.catalogError } : { options: [...(source.endsWith(':provider') ? state.providers : state.voices)], selected: null };
+          return state.catalogDelayMs ? delay(state.catalogDelayMs, result) : result;
+        }
+        if (false) {
           return { options: [...state.voices], selected: null };
         }
         return { options: [...state.outputs], selected: state.outputsSelected };
       },
     },
     events: {
-      subscribe: () => () => undefined,
+      subscribe: (topics, listener) => {
+        if (topics.includes('plugin.settings-changed')) settingsListeners.add(listener);
+        return () => settingsListeners.delete(listener);
+      },
     },
     host: {
       locale: async () => state.locale,

@@ -57,7 +57,7 @@ export const TtsSpecialUsers = defineVueComponent<TtsSpecialUsersProps>(
   return () => {
   const settings = props.settings;
   const locale = props.locale;
-  const voiceList = voiceOptions(props.voices, settings.defaultVoice);
+  const voiceList = voiceOptions(props.voices);
   return (
     <section class="tts-card">
       <h4 class="tts-card__title">{t(locale, 'ttsSpecialUsers')}</h4>

@@ -160,4 +160,26 @@ mod tests {
         let config = config_from_values(&json!({"serverUrl": "notaurl"}));
         assert_eq!(config.server_url, DEFAULT_SERVER_URL);
     }
+    #[test]
+    fn provider_and_catalog_revision_preserve_policy_and_legacy_voice_preferences() {
+        let config = config_from_values(&json!({ "tts": {
+            "providerId": "pocket-tts", "voiceCatalogRevision": "reload-a",
+            "defaultVoice": "pocket-tts:owned", "allowedUsers": ["ada"],
+            "specialUsers": [{"handle":"blocked", "allowed":false, "voice":"supertonic:F1"}],
+            "chargePoints": true, "pointsCost": 17, "defaultSpeed": 1.5
+        }}));
+        assert_eq!(config.policy.provider_id, "pocket-tts");
+        assert_eq!(config.policy.voice_catalog_revision, "reload-a");
+        assert_eq!(config.policy.default_voice, "pocket-tts:owned");
+        assert!(!config.policy.special_users[0].allowed);
+        assert_eq!(config.policy.allowed_users, ["ada"]);
+        assert_eq!(config.policy.points_cost, 17);
+        assert_eq!(config.policy.default_speed, 1.5);
+        assert_eq!(
+            config_from_values(&json!({"tts":{"providerId":"../invalid"}}))
+                .policy
+                .provider_id,
+            "supertonic"
+        );
+    }
 }

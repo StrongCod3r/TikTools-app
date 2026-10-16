@@ -12,6 +12,8 @@ import { voiceOptions } from './tts-voice-options.ts';
 
 type TtsVoiceTesterProps = {
   locale: Locale;
+  refreshing?: boolean;
+  unavailable?: boolean;
   voices: ActionOptionItem[];
   voicesError?: string;
   speaking: boolean;
@@ -23,16 +25,19 @@ type TtsVoiceTesterProps = {
 
 /** Voice tester card with spoken-message log. The tester voice follows the default voice until touched. */
 export const TtsVoiceTester = defineVueComponent<TtsVoiceTesterProps>(
-  ['locale', 'voices', 'voicesError', 'speaking', 'logs', 'defaultVoice', 'onSpeak', 'onRefreshVoices'],
+  ['refreshing', 'unavailable', 'locale', 'voices', 'voicesError', 'speaking', 'logs', 'defaultVoice', 'onSpeak', 'onRefreshVoices'],
   (props) => {
   const testerText = ref('Hello TikTok, this is a voice test.');
   const testerVoice = ref(props.defaultVoice);
   let testerVoiceTouched = false;
 
   watch(() => props.defaultVoice, (voice) => {
-    if (!testerVoiceTouched) testerVoice.value = voice;
+    if (!testerVoiceTouched || !props.voices.some(v => v.value === testerVoice.value)) testerVoice.value = voice;
   });
 
+  watch(() => props.voices, voices => {
+    if (!voices.some(v => v.value === testerVoice.value)) { testerVoice.value = props.defaultVoice; testerVoiceTouched = false; }
+  });
   const speak = (): void => {
     const text = testerText.value.trim();
     if (!text || props.speaking) return;
@@ -48,7 +53,7 @@ export const TtsVoiceTester = defineVueComponent<TtsVoiceTesterProps>(
   };
 
   return () => {
-  const testerVoices = voiceOptions(props.voices, testerVoice.value);
+  const testerVoices = voiceOptions(props.voices);
   const locale = props.locale;
   return (
     <section class="tts-card">
@@ -82,13 +87,13 @@ export const TtsVoiceTester = defineVueComponent<TtsVoiceTesterProps>(
         <button
           type="button"
           class="plg-btn plg-btn--primary plg-btn--sm"
-          disabled={props.speaking || !testerText.value.trim()}
+          disabled={props.unavailable || props.speaking || !testerText.value.trim()}
           onClick={speak}
         >
           {props.speaking ? t(locale, 'ttsSpeaking') : t(locale, 'ttsPlay')}
         </button>
-        <button type="button" class="plg-btn plg-btn--sm" onClick={props.onRefreshVoices}>
-          {t(locale, 'ttsRefreshVoices')}
+        <button type="button" class="plg-btn plg-btn--sm" disabled={props.refreshing} aria-busy={props.refreshing} onClick={props.onRefreshVoices}>
+          {t(locale, props.refreshing ? 'ttsReloading' : 'ttsRefreshVoices')}
         </button>
         <span class="tts-pill">{t(locale, 'ttsVoicesCount', { count: props.voices.length })}</span>
       </div>

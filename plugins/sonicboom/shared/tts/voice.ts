@@ -20,13 +20,11 @@ export function chooseVoice(
   availableVoices: readonly string[],
   randomFn: () => number = Math.random,
 ): string {
-  const special = (specialVoice ?? '').trim();
-  if (special) return special;
-  const pool = availableVoices.map((voice) => voice.trim()).filter(Boolean);
-  if (settings.randomVoice && pool.length > 0) {
-    const index = Math.floor(randomFn() * pool.length);
-    const picked = pool[Math.min(Math.max(index, 0), pool.length - 1)];
-    if (picked) return picked;
-  }
-  return settings.defaultVoice.trim() || firstAvailableVoice(availableVoices);
+  const qualify = (v: string): string => v && !v.includes(':') && settings.providerId === 'supertonic' ? `supertonic:${v}` : v;
+  const pool = availableVoices.filter(v => v.startsWith(`${settings.providerId}:`));
+  const special = qualify((specialVoice ?? '').trim());
+  if (pool.includes(special)) return special;
+  if (settings.randomVoice && pool.length) return pool[Math.min(Math.max(Math.floor(randomFn() * pool.length), 0), pool.length - 1)] ?? '';
+  const fallback = qualify(settings.defaultVoice.trim());
+  return pool.includes(fallback) ? fallback : firstAvailableVoice(pool);
 }

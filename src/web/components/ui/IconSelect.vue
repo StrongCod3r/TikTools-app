@@ -13,6 +13,7 @@ import type { TooltipPosition } from './tooltip-logic.ts';
 export type IconSelectOption = {
   value: string;
   label: string;
+  disabled?: boolean;
   /** Drawn inside the closed control and beside the option. */
   icon?: VNodeChild;
   /** Second line in the list: the code equivalent, a sample value… */
@@ -90,7 +91,7 @@ export const IconSelect = defineVueComponent<IconSelectProps>(
   const commit = (index: number): void => {
     if (props.disabled) return;
     const option = props.options[index];
-    if (option && !props.disabled) props.onChange(option.value);
+    if (option && !option.disabled && !props.disabled) props.onChange(option.value);
     close(true);
   };
 
@@ -223,6 +224,8 @@ export const IconSelect = defineVueComponent<IconSelectProps>(
               id={suggestionOptionId(listId, index)}
               role="option"
               aria-selected={option.value === value}
+              aria-disabled={option.disabled}
+              disabled={option.disabled}
               class={`autocomplete-item${option.value === value ? ' is-selected' : ''}${index === active.value ? ' is-selected' : ''}`}
               title={option.hint}
               onMouseenter={() => (active.value = index)}

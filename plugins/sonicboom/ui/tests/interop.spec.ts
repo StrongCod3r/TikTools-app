@@ -28,6 +28,7 @@ test.beforeAll(() => {
       'build',
       'plugins/sonicboom/ui/tests/harness-entry.ts',
       '--format=iife',
+      '--define=import.meta.env={}',
       `--outfile=${shimPath}`,
     ],
     { cwd: repoRoot, stdio: 'pipe' },
@@ -51,6 +52,8 @@ async function installHarness(page: Page, uiUrl: string): Promise<string[]> {
     '<!doctype html><html><body><div id="mount"></div></body></html>',
   );
   await page.addScriptTag({ path: shimPath });
+  expect(errors).toEqual([]);
+  await expect.poll(() => page.evaluate(() => typeof (window as unknown as { TikToolsShim: unknown }).TikToolsShim)).toBe('object');
   await page.evaluate((frameSrc) => {
     const w = window as unknown as {
       __HARNESS_CALLS__: HarnessCall[];
@@ -86,11 +89,12 @@ async function installHarness(page: Page, uiUrl: string): Promise<string[]> {
       },
       getOptions: async (source: string, refresh: boolean) => {
         calls.push({ method: 'options.get', params: { source, refresh } });
+        if (source.endsWith(':provider')) return { options: [{ value: 'supertonic', label: 'Supertonic' }, { value: 'qwen3-gguf', label: 'Qwen3-TTS GGUF (loading)', disabled: true }], selected: null };
         if (source.endsWith(':voice')) {
           return {
             options: [
-              { value: 'M1', label: 'M1' },
-              { value: 'F2', label: 'F2' },
+              { value: 'supertonic:M1', label: 'M1' },
+              { value: 'supertonic:F2', label: 'F2' },
             ],
             selected: null,
           };
@@ -158,6 +162,7 @@ test('real host shim boots the real plugin UI over postMessage', async ({ page, 
   const frame = page.frameLocator('#plugin-frame');
 
   await expect(frame.getByLabel('Default voice')).toBeVisible({ timeout: 10_000 });
+  await expect(frame.locator('#tts-provider option[value="qwen3-gguf"]')).toBeDisabled();
   await expect(frame.getByText('2 voices')).toBeVisible();
   await expect(frame.getByLabel('Audio output').first()).toHaveValue('Speakers');
 
@@ -173,7 +178,7 @@ test('speech and settings round-trip through the real shim', async ({ page, base
   const frame = page.frameLocator('#plugin-frame');
 
   await expect(frame.getByText('2 voices')).toBeVisible({ timeout: 10_000 });
-  await frame.getByLabel('Voice', { exact: true }).selectOption('F2');
+  await frame.getByLabel('Voice', { exact: true }).selectOption('supertonic:F2');
   await frame.getByLabel('Text', { exact: true }).fill('interop hello');
   await frame.getByRole('button', { name: 'Play' }).click();
   await expect(frame.getByRole('log')).toContainText('spoken', { timeout: 5_000 });
@@ -181,7 +186,7 @@ test('speech and settings round-trip through the real shim', async ({ page, base
   const executed = (await harnessCalls(page)).filter((call) => call.method === 'actions.execute');
   expect(executed.length).toBeGreaterThanOrEqual(1);
   expect(executed[0]?.params['action']).toBe('sonicboom.server.speak');
-  expect(executed[0]?.params['config']).toMatchObject({ text: 'interop hello', voice: 'F2' });
+  expect(executed[0]?.params['config']).toMatchObject({ text: 'interop hello', voice: 'supertonic:F2', provider: 'supertonic' });
 
   const volume = frame.getByLabel(/Volume/);
   await volume.fill('0.7');

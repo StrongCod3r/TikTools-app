@@ -191,21 +191,17 @@ describe('evaluateUserEligibility', () => {
 });
 
 describe('chooseVoice', () => {
-  test('special voice wins, then random, then default', () => {
+  test('priority stays inside the selected provider and authorized catalog', () => {
+    const pool = ['supertonic:S1', 'supertonic:A', 'supertonic:B', 'supertonic:D1'];
     const on = settings({ defaultVoice: 'D1', randomVoice: true });
-    expect(chooseVoice(on, 'S1', ['A', 'B'], () => 0.9)).toBe('S1');
-    expect(chooseVoice(on, '', ['A', 'B'], () => 0)).toBe('A');
-    expect(chooseVoice(on, '  ', ['A', 'B'], () => 0.99)).toBe('B');
-    expect(chooseVoice(settings({ defaultVoice: 'D1' }), '', ['A'])).toBe('D1');
-    expect(chooseVoice(settings({ defaultVoice: 'D1', randomVoice: true }), '', [])).toBe('D1');
+    expect(chooseVoice(on, 'S1', pool, () => 0.9)).toBe('supertonic:S1');
+    expect(chooseVoice(on, 'pocket-tts:foreign', pool, () => 0)).toBe('supertonic:S1');
+    expect(chooseVoice(settings({ defaultVoice: 'D1' }), '', pool)).toBe('supertonic:D1');
+    expect(chooseVoice(on, '', [])).toBe('');
+    expect(chooseVoice(settings({ providerId: 'pocket-tts', defaultVoice: 'supertonic:D1' }), 'qwen3-gguf:other', [...pool, 'pocket-tts:owned'])).toBe('pocket-tts:owned');
   });
-
-  test('falls back to the first available voice instead of empty', () => {
-    // Present-but-empty voice params 400 on servers whose default only
-    // applies when the param is absent, so '' must never win while voices
-    // are known.
-    expect(chooseVoice(settings({ defaultVoice: '' }), '', ['M1', 'F1'])).toBe('M1');
-    expect(chooseVoice(settings({ defaultVoice: '  ' }), '', ['  ', 'F1'])).toBe('F1');
+  test('legacy persisted raw IDs migrate at resolution without altering policy', () => {
+    expect(chooseVoice(settings({ defaultVoice: 'M1' }), '', ['supertonic:M1', 'supertonic:F1'])).toBe('supertonic:M1');
     expect(firstAvailableVoice(['  ', 'F2'])).toBe('F2');
     expect(chooseVoice(settings({ defaultVoice: '' }), '', [])).toBe('');
   });
@@ -248,7 +244,7 @@ describe('decideTts', () => {
       comment: 'hello',
       author: { handle: 'a', points: 1 },
       settings: settings({ chargePoints: true, pointsCost: 50 }),
-      availableVoices: ['V1'],
+      availableVoices: ['supertonic:V1', 'supertonic:D1'],
     });
     expect(decision.speak).toBe(false);
     expect(decision.pointsCost).toBe(50);
@@ -267,12 +263,12 @@ describe('decideTts', () => {
         defaultVoice: 'D1',
         language: 'es',
       }),
-      availableVoices: ['V1'],
+      availableVoices: ['supertonic:V1', 'supertonic:D1'],
     });
     expect(decision).toMatchObject({
       speak: true,
       spokenText: 'speak me',
-      voice: 'D1',
+      voice: 'supertonic:D1',
       language: 'es',
       pointsCost: 10,
       via: 'all-users',

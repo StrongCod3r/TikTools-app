@@ -36,6 +36,8 @@ pub struct SpecialUser {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TtsSettings {
+    pub provider_id: String,
+    pub voice_catalog_revision: String,
     pub enabled: bool,
     pub language: String,
     pub default_voice: String,
@@ -64,6 +66,8 @@ pub struct TtsSettings {
 impl Default for TtsSettings {
     fn default() -> Self {
         Self {
+            provider_id: "supertonic".into(),
+            voice_catalog_revision: String::new(),
             enabled: false,
             language: "en".to_owned(),
             default_voice: String::new(),
@@ -201,6 +205,18 @@ pub fn sanitize_settings(input: Option<&serde_json::Value>) -> TtsSettings {
         _ => CommentMode::Any,
     };
     TtsSettings {
+        provider_id: record
+            .get("providerId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|p| {
+                !p.is_empty()
+                    && p.len() <= 32
+                    && p.bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            })
+            .unwrap_or("supertonic")
+            .into(),
+        voice_catalog_revision: to_trimmed(record.get("voiceCatalogRevision"), 64, ""),
         enabled: to_bool(record.get("enabled"), defaults.enabled),
         language: to_trimmed(record.get("language"), MAX_LANGUAGE_LENGTH, "en"),
         default_voice: to_voice(record.get("defaultVoice")),
@@ -532,25 +548,31 @@ pub fn choose_voice(
     available: &[String],
     mut random_shift: impl FnMut(usize) -> usize,
 ) -> String {
-    let special = special_voice.trim();
-    if !special.is_empty() {
-        return special.to_owned();
-    }
-    let pool: Vec<&str> = available
+    let qualify = |voice: &str| {
+        let voice = voice.trim();
+        if !voice.is_empty() && !voice.contains(':') && settings.provider_id == "supertonic" {
+            format!("supertonic:{voice}")
+        } else {
+            voice.to_owned()
+        }
+    };
+    let prefix = format!("{}:", settings.provider_id);
+    let pool: Vec<String> = available
         .iter()
-        .map(|voice| voice.trim())
-        .filter(|voice| !voice.is_empty())
+        .filter(|v| v.starts_with(&prefix))
+        .cloned()
         .collect();
+    let valid = |v: &str| pool.contains(&qualify(v));
+    if valid(special_voice) {
+        return qualify(special_voice);
+    }
     if settings.random_voice && !pool.is_empty() {
-        let index = random_shift(pool.len()).min(pool.len() - 1);
-        return pool[index].to_owned();
+        return pool[random_shift(pool.len()).min(pool.len() - 1)].clone();
     }
-    let fallback = first_available_voice(available);
-    if settings.default_voice.trim().is_empty() {
-        fallback
-    } else {
-        settings.default_voice.trim().to_owned()
+    if valid(&settings.default_voice) {
+        return qualify(&settings.default_voice);
     }
+    first_available_voice(&pool)
 }
 
 /// Single full-pipeline decision. Callers must check `speak` before
@@ -826,17 +848,27 @@ mod tests {
     #[test]
     fn voice_priority_matches_the_typescript_policy() {
         let settings = enabled();
-        let available = vec!["M1".to_owned(), "F1".to_owned()];
+        let available = vec![
+            "supertonic:M1".to_owned(),
+            "supertonic:F1".to_owned(),
+            "supertonic:Custom".to_owned(),
+        ];
         assert_eq!(
             choose_voice(&settings, "Custom", &available, |_| 0),
-            "Custom"
+            "supertonic:Custom"
         );
-        assert_eq!(choose_voice(&settings, "", &available, |_| 0), "M1");
+        assert_eq!(
+            choose_voice(&settings, "", &available, |_| 0),
+            "supertonic:M1"
+        );
         let random = TtsSettings {
             random_voice: true,
             ..enabled()
         };
-        assert_eq!(choose_voice(&random, "", &available, |_| 1), "F1");
+        assert_eq!(
+            choose_voice(&random, "", &available, |_| 1),
+            "supertonic:F1"
+        );
         // Empty default with known voices falls back instead of sending ''.
         assert_eq!(choose_voice(&settings, "", &[], |_| 0), "");
     }

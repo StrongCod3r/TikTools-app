@@ -9,6 +9,8 @@ export type SpecialTtsUser = {
 };
 
 export type TtsSettings = {
+  providerId: string;
+  voiceCatalogRevision: string;
   enabled: boolean;
   language: string;
   defaultVoice: string;

@@ -341,7 +341,7 @@ function renderSchemaField({ locale, name, schema, hint, value, onChange, templa
     const iconOptions: IconSelectOption[] | undefined = !useIcons
       ? undefined
       : isDynamic
-        ? options.map((entry) => ({ value: entry.value, label: entry.label }))
+        ? options.map((entry) => ({ value: entry.value, label: entry.label, disabled: entry.disabled }))
         : options.map((entry) => ({
           value: entry.value,
           label: entry.label,
