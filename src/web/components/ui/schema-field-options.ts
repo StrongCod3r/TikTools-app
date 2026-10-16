@@ -6,6 +6,7 @@ import { localized, type FieldOption } from './schema-form-helpers.ts';
 export type SchemaSelectOption = {
   value: string;
   label: string;
+  disabled?: boolean;
   hint?: string;
   icon?: IconName;
 };

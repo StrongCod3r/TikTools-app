@@ -45,6 +45,7 @@ struct CachedOptions {
 /// have changed what the endpoints return.
 pub struct OptionSourceService {
     cache: Mutex<HashMap<String, CachedOptions>>,
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl Default for OptionSourceService {
@@ -57,6 +58,7 @@ impl OptionSourceService {
     pub fn new() -> Self {
         Self {
             cache: Mutex::new(HashMap::new()),
+            generation: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -82,7 +84,37 @@ impl OptionSourceService {
     }
 
     pub fn clear(&self) {
-        recover_mutex(&self.cache, "option cache").clear();
+        let mut cache = recover_mutex(&self.cache, "option cache");
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        cache.clear();
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// An in-flight request from old settings must never repopulate the cache.
+    fn store_if_current(
+        &self,
+        source: &str,
+        options: Vec<Value>,
+        selected: Option<String>,
+        generation: u64,
+    ) -> bool {
+        let mut cache = recover_mutex(&self.cache, "option cache");
+        if self.generation() != generation {
+            return false;
+        }
+        cache.insert(
+            source.to_owned(),
+            CachedOptions {
+                fetched_at: Instant::now(),
+                options,
+                selected,
+            },
+        );
+        true
     }
 
     /// Drops one cached option list. Explicit refresh after a
@@ -211,7 +243,11 @@ pub fn map_option_items(
         } else {
             label
         };
-        options.push(json!({"value": value, "label": label}));
+        let mut option = json!({"value": value, "label": label});
+        if let Some(disabled) = item.get("disabled").and_then(Value::as_bool) {
+            option["disabled"] = Value::Bool(disabled);
+        }
+        options.push(option);
         if options.len() >= MAX_OPTION_ITEMS {
             break;
         }
@@ -354,6 +390,7 @@ impl crate::AppCore {
         force_refresh: bool,
     ) -> (Vec<Value>, Option<String>, Option<String>) {
         let fail = |message: String| (Vec::new(), None, Some(message));
+        let generation = self.option_sources.generation();
         if !force_refresh {
             if let Some((options, selected)) = self.option_sources.cached(source) {
                 return (options, selected, None);
@@ -434,8 +471,14 @@ impl crate::AppCore {
             Err(error) => return fail(error),
         };
         let selected = selected_option_value(&body, items_path, value_path);
-        self.option_sources
-            .store(source, options.clone(), selected.clone());
+        if !self.option_sources.store_if_current(
+            source,
+            options.clone(),
+            selected.clone(),
+            generation,
+        ) {
+            return fail("Connection settings changed; reload options.".to_owned());
+        }
         (options, selected, None)
     }
 }
@@ -789,5 +832,33 @@ mod tests {
         assert_eq!(options, map_host_gift_options(&core.gift_catalog()));
         let (cached, _) = core.option_sources.cached(HOST_GIFTS_SOURCE).unwrap();
         assert_eq!(cached, options);
+    }
+    #[test]
+    fn literal_disabled_metadata_survives_mapping_without_other_server_fields() {
+        let options = map_option_items(&json!([
+            {"id":"pocket-tts", "name":"Pocket TTS (loading)", "disabled":true, "token":"never map"},
+            {"id":"supertonic", "name":"Supertonic", "disabled":false},
+            {"id":"legacy", "disabled":"true"}
+        ]), None, None, None).unwrap();
+        assert_eq!(
+            options[0],
+            json!({"value":"pocket-tts", "label":"Pocket TTS (loading)", "disabled":true})
+        );
+        assert_eq!(options[1]["disabled"], false);
+        assert!(options[2].get("disabled").is_none());
+    }
+    #[test]
+    fn settings_change_rejects_inflight_old_tenant_catalog() {
+        let service = OptionSourceService::new();
+        let generation = service.generation();
+        service.clear();
+        assert!(!service.store_if_current(
+            "source",
+            vec![json!({"value":"old-profile"})],
+            None,
+            generation
+        ));
+        assert!(service.cached("source").is_none());
+        assert!(service.store_if_current("source", vec![], None, service.generation()));
     }
 }

@@ -59,7 +59,7 @@ export type ActionOptionMeta = {
   iconUrl?: string;
 };
 
-export type ActionOptionItem = { value: string; label: string; meta?: ActionOptionMeta };
+export type ActionOptionItem = { value: string; label: string; disabled?: boolean; meta?: ActionOptionMeta };
 
 export type UiEvent = {
   kind: 'chat' | 'gift' | 'like' | 'member' | 'social';

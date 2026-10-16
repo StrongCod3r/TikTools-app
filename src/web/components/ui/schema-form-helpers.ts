@@ -10,6 +10,7 @@ import { i18nText, type Locale } from '../../i18n.ts';
 export type FieldOption = {
   value: string;
   label: string;
+  disabled?: boolean;
   /** Display metadata from host-owned sources (`host.gifts`): gift id, diamond price, icon. */
   meta?: { giftId?: string; diamondCount?: number; iconUrl?: string };
 };
