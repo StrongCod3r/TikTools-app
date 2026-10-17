@@ -635,6 +635,96 @@ async fn main_page_filters_normalized_live_events_without_changing_bus() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
+#[tokio::test]
+async fn hidden_feed_events_are_journaled_and_backfillable_by_cursor() {
+    let (core, home) = forwarder_test_core("feed-journal");
+    let bus = tiktools_core::events::EventBus::new(16);
+    let receiver = bus.subscribe_domain();
+    let projection = Arc::new(super::projection::MainPageProjection::default());
+    // Feed hidden behind a visible page: events are suspended, never sent,
+    // but must still be retained for a bounded cursor backfill.
+    projection.update(0, 1, false, false, false, true);
+    let task = tokio::spawn(forward_domain_events(
+        receiver,
+        core.clone(),
+        projection.clone(),
+        move |_notification, _generation| {},
+    ));
+    for index in 1..=5 {
+        bus.publish_domain(tiktools_core::events::DomainEvent::LiveUiEvent {
+            event: serde_json::json!({"kind": "chat", "text": index.to_string()}),
+        });
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while projection
+            .feed_suspended
+            .load(std::sync::atomic::Ordering::Relaxed)
+            < 5
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    bus.publish_domain(tiktools_core::events::DomainEvent::Shutdown);
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let backfill = projection.feed_backfill(0, super::projection::FEED_JOURNAL_CAPACITY);
+    let events = backfill["events"].as_array().unwrap();
+    assert_eq!(events.len(), 5);
+    assert_eq!(events[0]["event"]["text"], "1");
+    assert_eq!(events[4]["event"]["text"], "5");
+    assert_eq!(backfill["gap"], false);
+    assert_eq!(backfill["truncated"], false);
+    let third = events[2]["cursor"].as_u64().unwrap();
+    let tail = projection.feed_backfill(third, super::projection::FEED_JOURNAL_CAPACITY);
+    assert_eq!(tail["events"].as_array().unwrap().len(), 2);
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+#[tokio::test]
+async fn visible_feed_forward_carries_the_retained_bus_cursor() {
+    let (core, home) = forwarder_test_core("feed-cursor");
+    let bus = tiktools_core::events::EventBus::new(16);
+    let receiver = bus.subscribe_domain();
+    let forwarded = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = Arc::clone(&forwarded);
+    let task = tokio::spawn(forward_domain_events(
+        receiver,
+        core.clone(),
+        test_projection(),
+        move |notification, _generation| {
+            captured.lock().unwrap().push(notification.clone());
+        },
+    ));
+    bus.publish_domain(tiktools_core::events::DomainEvent::LiveUiEvent {
+        event: serde_json::json!({"kind": "chat", "text": "a"}),
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while forwarded.lock().unwrap().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    bus.publish_domain(tiktools_core::events::DomainEvent::Shutdown);
+    tokio::time::timeout(std::time::Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    let messages = forwarded.lock().unwrap();
+    let feed = messages
+        .iter()
+        .find(|message| message["params"]["topic"] == "live.ui-event")
+        .expect("feed event must be forwarded");
+    assert_eq!(feed["params"]["data"]["cursor"], 1);
+    assert_eq!(feed["params"]["data"]["sequence"], 1);
+    assert_eq!(feed["params"]["data"]["event"]["text"], "a");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
 fn test_projection() -> Arc<super::projection::MainPageProjection> {
     let projection = Arc::new(super::projection::MainPageProjection::default());
     projection.update(0, 1, true, false, false, true);

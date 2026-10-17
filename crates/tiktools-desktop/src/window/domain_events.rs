@@ -84,10 +84,15 @@ pub(crate) async fn forward_domain_events(
                     Err(DomainRecvError::Closed) => break,
                 };
                 projection.source.fetch_add(1, Ordering::Relaxed);
+                let mut feed_cursor = None;
                 if matches!(event.as_ref(), DomainEvent::LiveUiEvent { .. }) {
                     let sequence = events.ui_sequence();
                     projection.feed_bus_dropped.fetch_add(sequence.saturating_sub(last_feed_sequence).saturating_sub(1), Ordering::Relaxed);
                     last_feed_sequence = sequence;
+                    // Journal before the visibility filter so hidden and
+                    // reconnected pages can backfill every retained event.
+                    projection.record_feed(sequence, Arc::clone(&event));
+                    feed_cursor = Some(sequence);
                 }
                 match event.as_ref() {
                     DomainEvent::LiveEvent { .. } | DomainEvent::AnalyticsUpdated { .. } => {
@@ -118,6 +123,7 @@ pub(crate) async fn forward_domain_events(
                 if matches!(event.as_ref(), DomainEvent::LiveUiEvent { .. }) {
                     if let Ok(envelope) = event.to_envelope() {
                         let mut data = envelope.data;
+                        data["cursor"] = serde_json::json!(feed_cursor.unwrap_or(0));
                         data["sequence"] = serde_json::json!(projection.feed_forwarded.fetch_add(1, Ordering::Relaxed) + 1);
                         send(&projected("live.ui-event", view, data), view.generation);
                     }
