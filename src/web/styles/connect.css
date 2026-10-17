@@ -120,3 +120,114 @@ input:focus, select:focus {
 
 
 
+
+/* ==========================================================================
+   LIVE explorer — read-only browse list inside the Connections page.
+   Nothing here implies an active connection until the user clicks Connect.
+   ========================================================================== */
+
+.explore-hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.explore {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.explore__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.explore__bar > :first-child {
+  flex: 1 1 200px;
+  min-width: 160px;
+}
+
+.explore__status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.explore__random {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(37, 244, 238, 0.08);
+  border: 1px solid rgba(37, 244, 238, 0.3);
+}
+.explore__random-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.explore__random-name {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text);
+}
+.explore__actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.explore__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.explore__room {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel-elevated);
+}
+.explore__room-main {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.explore__room-handle {
+  font-weight: 700;
+  font-size: 12.5px;
+  color: var(--text);
+}
+.explore__room-title {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.explore__room-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+}

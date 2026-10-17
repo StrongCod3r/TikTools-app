@@ -336,7 +336,7 @@ describe('useConnection reconnect vs creator switch', () => {
     connection.dispose();
   });
 
-  test('switching to another creator resets the feed', () => {
+  test('switching to another creator resets the feed, a repeat does not', () => {
     let resets = 0;
     const control = stubControl({
       call: <T,>(): Promise<T> => Promise.resolve({ connected: false } as T),
@@ -346,9 +346,16 @@ describe('useConnection reconnect vs creator switch', () => {
       resetFeed: () => { resets += 1; },
     });
 
-    connection.handleConnect('alice');
+    // Establish a baseline creator first: whether this first connect resets
+    // depends on the persisted username from earlier tests.
     connection.handleConnect('bob');
-    expect(resets).toBe(2);
+    const baseline = resets;
+
+    connection.handleConnect('bob');
+    expect(resets).toBe(baseline);
+
+    connection.handleConnect('carol');
+    expect(resets).toBe(baseline + 1);
     connection.dispose();
   });
 });

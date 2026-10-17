@@ -39,6 +39,18 @@ export type FeedAsideState =
   | { kind: 'viewers' };
 
 /**
+ * A currently-live room from the read-only `live.channels` browse.
+ * `roomId` stays a string: TikTok ids exceed the JS safe integer range.
+ */
+export type LiveChannel = {
+  uniqueId: string;
+  roomId: string;
+  nickname: string;
+  title: string;
+  viewers: number;
+};
+
+/**
  * Enriched viewer profile for the user card. Feed events carry
  * only identity fields; the leaderboard (when the viewer is
  * tracked) fills in the engagement stats.

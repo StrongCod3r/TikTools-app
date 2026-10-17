@@ -4,10 +4,11 @@ import { defineVueComponent } from '../vue/component.ts';
 
 import type { PluginPageDescriptor, PluginStatus } from '../../automation/behavior/types.ts';
 import type { PluginConnectionState } from '../../automation/plugins/declarative.ts';
-import { IconConnected, IconDice, IconLock, IconRadio, IconServer } from '../components/icons.vue';
+import { IconConnected, IconDice, IconLock, IconRadio, IconRefresh, IconServer } from '../components/icons.vue';
 import { Icon, type IconName } from '../components/icons/index.ts';
 import { Alert, Badge, Card, EmptyState } from '../components/ui/Card.vue';
 import { Button } from '../components/ui/Button.vue';
+import { SearchInput } from '../components/ui/TextInput.vue';
 import { TextField, PasswordField } from '../components/ui/fields/index.ts';
 import { InfoTip } from '../components/ui/InfoTip.vue';
 import { Page, PageHeader } from '../components/ui/Page.vue';
@@ -15,7 +16,8 @@ import { Tooltip } from '../components/ui/Tooltip.vue';
 import { PluginConnectionCard } from '../components/plugin-connection-card.vue';
 import { connectionIconFor } from '../components/plugin-cards.ts';
 import { i18nText, t, type Locale } from '../i18n.ts';
-import type { ConnectionStatus, PluginSettingsState } from '../types.ts';
+import type { ConnectionStatus, LiveChannel, PluginSettingsState } from '../types.ts';
+import type { DiscoveryStatus } from '../features/discovery.ts';
 import type { SuggestionItem } from '../components/autocomplete/types.ts';
 import type {
   ActionOptionItem,
@@ -44,6 +46,20 @@ type ConnectionsViewProps = {
   onReconnect: () => void;
   onPickLive: () => void;
   onSelectRecent: (username: string) => void;
+  discoveryOpen: boolean;
+  discoveryKeyword: string;
+  discoveryRooms: LiveChannel[];
+  discoveryStatus: DiscoveryStatus;
+  discoveryError: string;
+  discoveryRandom: LiveChannel | null;
+  discoveryHasMore: () => boolean;
+  onToggleDiscovery: () => void;
+  onDiscoveryKeyword: (value: string) => void;
+  onRefreshDiscovery: () => void;
+  onLoadMoreDiscovery: () => void;
+  onPickRandomRoom: () => void;
+  onClearRandomRoom: () => void;
+  onConnectRoom: (room: LiveChannel) => void;
   onTestConnection: (id: string) => void;
   onGetSettings: (id: string) => void;
   onSaveSettings: (id: string, values: PluginSettingValues) => void;
@@ -67,7 +83,7 @@ type ConnectionsViewProps = {
  * icon is reused here instead.
  */
 export const ConnectionsView = defineVueComponent<ConnectionsViewProps>(
-  ['locale', 'uniqueId', 'cookie', 'status', 'recents', 'error', 'plugins', 'pluginPages', 'connections', 'pluginSettings', 'actionOptions', 'provisionStates', 'onUniqueIdChange', 'onCookieChange', 'onConnect', 'onDisconnect', 'onReconnect', 'onPickLive', 'onSelectRecent', 'onTestConnection', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onOpenMediaPicker', 'onProvisionToken', 'onOpenPlugins'],
+  ['locale', 'uniqueId', 'cookie', 'status', 'recents', 'error', 'plugins', 'pluginPages', 'connections', 'pluginSettings', 'actionOptions', 'provisionStates', 'onUniqueIdChange', 'onCookieChange', 'onConnect', 'onDisconnect', 'onReconnect', 'onPickLive', 'onSelectRecent', 'discoveryOpen', 'discoveryKeyword', 'discoveryRooms', 'discoveryStatus', 'discoveryError', 'discoveryRandom', 'discoveryHasMore', 'onToggleDiscovery', 'onDiscoveryKeyword', 'onRefreshDiscovery', 'onLoadMoreDiscovery', 'onPickRandomRoom', 'onClearRandomRoom', 'onConnectRoom', 'onTestConnection', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onOpenMediaPicker', 'onProvisionToken', 'onOpenPlugins'],
   (props) => {
   const savedConnections = loadViewState().connections;
   const showCookie = ref(savedConnections?.showCookie ?? Boolean(props.cookie));
@@ -110,6 +126,25 @@ export const ConnectionsView = defineVueComponent<ConnectionsViewProps>(
       icon: 'users' as const,
     }));
     const usedConnectionIcons = new Set<IconName>();
+
+    // One message per discovery outcome: a refusal must never read as
+    // "no rooms", and each failure keeps its own retry affordance.
+    const discoveryStatusText = (): string => {
+      switch (props.discoveryStatus) {
+        case 'loading':
+          return t(locale, 'exploreLoading');
+        case 'error':
+          return t(locale, 'exploreError', { message: props.discoveryError });
+        case 'auth_required':
+          return t(locale, 'exploreAuthRequired');
+        case 'rate_limited':
+          return t(locale, 'exploreRateLimited');
+        case 'ready':
+          return props.discoveryRooms.length === 0 ? t(locale, 'exploreNoMatches') : '';
+        default:
+          return '';
+      }
+    };
 
     return (
       <Page width="wide">
@@ -194,6 +229,116 @@ export const ConnectionsView = defineVueComponent<ConnectionsViewProps>(
               </div>
             ) : null}
           </form>
+        </Card>
+
+        <Card
+          title={t(locale, 'exploreTitle')}
+          subtitle={t(locale, 'exploreLead')}
+          icon={<IconDice />}
+          action={(
+            <Button
+              size="sm"
+              variant="soft"
+              aria-expanded={props.discoveryOpen ? 'true' : 'false'}
+              onClick={props.onToggleDiscovery}
+            >
+              {props.discoveryOpen ? t(locale, 'exploreHide') : t(locale, 'exploreOpen')}
+            </Button>
+          )}
+        >
+          {!props.discoveryOpen ? (
+            <p class="explore-hint">{t(locale, 'exploreClosedHint')}</p>
+          ) : (
+            <div class="explore">
+              <div class="explore__bar">
+                <SearchInput
+                  value={props.discoveryKeyword}
+                  onValueChange={props.onDiscoveryKeyword}
+                  placeholder={t(locale, 'exploreSearchPlaceholder')}
+                />
+                <Button
+                  size="sm"
+                  variant="soft"
+                  icon={<IconRefresh />}
+                  tooltip={t(locale, 'exploreRefresh')}
+                  onClick={props.onRefreshDiscovery}
+                  iconOnly
+                />
+                <Button
+                  size="sm"
+                  variant="cyan"
+                  icon={<IconDice />}
+                  disabled={props.discoveryStatus === 'loading' || props.discoveryRooms.length === 0}
+                  onClick={props.onPickRandomRoom}
+                >
+                  {t(locale, 'exploreChooseRandom')}
+                </Button>
+              </div>
+
+              {props.discoveryRandom ? (
+                <div class="explore__random" role="status">
+                  <span class="explore__random-label">{t(locale, 'exploreRandomPreview')}</span>
+                  <span class="explore__random-name">@{props.discoveryRandom.uniqueId}</span>
+                  <div class="explore__actions">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      onClick={() => {
+                        if (props.discoveryRandom) props.onConnectRoom(props.discoveryRandom);
+                      }}
+                    >
+                      {t(locale, 'exploreConnect')}
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={props.onClearRandomRoom}>
+                      {t(locale, 'exploreDismiss')}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+
+              {discoveryStatusText() ? (
+                <div class="explore__status" role="status">
+                  <span>{discoveryStatusText()}</span>
+                  {props.discoveryStatus === 'error' || props.discoveryStatus === 'rate_limited' ? (
+                    <Button size="sm" variant="soft" onClick={props.onRefreshDiscovery}>
+                      {t(locale, 'exploreRetry')}
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {props.discoveryRooms.length > 0 ? (
+                <ul class="explore__list">
+                  {props.discoveryRooms.map((room) => (
+                    <li key={room.roomId || room.uniqueId} class="explore__room">
+                      <div class="explore__room-main">
+                        <span class="explore__room-handle">@{room.uniqueId}</span>
+                        {room.title ? (
+                          <span class="explore__room-title" title={room.title}>
+                            {room.title}
+                          </span>
+                        ) : null}
+                        <span class="explore__room-meta">
+                          {room.viewers > 0
+                            ? t(locale, 'exploreViewers', { count: room.viewers })
+                            : t(locale, 'exploreViewersUnknown')}
+                        </span>
+                      </div>
+                      <Button size="sm" variant="primary" onClick={() => props.onConnectRoom(room)}>
+                        {t(locale, 'exploreConnect')}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+
+              {props.discoveryHasMore() ? (
+                <Button size="sm" variant="soft" block onClick={props.onLoadMoreDiscovery}>
+                  {t(locale, 'exploreLoadMore')}
+                </Button>
+              ) : null}
+            </div>
+          )}
         </Card>
 
         <Card

@@ -40,8 +40,19 @@ export interface E2EHostState {
   >;
   /** `app.state.*` key/value store. */
   appState: Record<string, string>;
-  /** Methods forced to fail: method -> error message. */
-  failures: Record<string, string>;
+  /** Authoritative `live.status`/`live.connect`/`live.disconnect` result. */
+  liveStatus: {
+    connected: boolean;
+    uniqueId: string | null;
+    roomId: string | null;
+    connectionId: string | null;
+    native: boolean;
+  };
+  /** Page served for `live.channels` (read-only LIVE browse). */
+  liveChannels: { rooms: Array<Record<string, unknown>>; nextOffset?: number };
+  /** Methods forced to fail: method -> message, or `{ code, message }` to
+   *  exercise a specific JSON-RPC error code. */
+  failures: Record<string, string | { code: string; message: string }>;
   /** Artificial delay (ms) for `plugins.action.execute` responses. */
   actionDelayMs: number;
   /** Every RPC call received, in order. */
@@ -93,6 +104,14 @@ export function baseHostState(overrides: Partial<E2EHostState> = {}): E2EHostSta
     pluginHealth: {},
     actionOutcomes: {},
     appState: {},
+    liveStatus: {
+      connected: false,
+      uniqueId: null,
+      roomId: null,
+      connectionId: null,
+      native: true,
+    },
+    liveChannels: { rooms: [] },
     failures: {},
     actionDelayMs: 0,
     calls: [],
@@ -195,12 +214,32 @@ const INIT_SCRIPT = `
       return outcome;
     },
     'plugins.token.provision': (params) => ({ pluginId: params.pluginId, ok: true, error: null }),
-    'live.status': () => ({
-      connected: false,
-      uniqueId: null,
-      roomId: null,
-      connectionId: null,
-      native: true,
+    'live.status': () => state.liveStatus,
+    'live.connect': (params) => {
+      state.liveStatus = {
+        connected: true,
+        uniqueId: params.uniqueId || null,
+        roomId: params.roomId || null,
+        connectionId: 'connection-1',
+        native: true,
+      };
+      return state.liveStatus;
+    },
+    'live.disconnect': () => {
+      state.liveStatus = {
+        connected: false,
+        uniqueId: null,
+        roomId: null,
+        connectionId: null,
+        native: true,
+      };
+      return state.liveStatus;
+    },
+    'live.channels': () => ({
+      rooms: state.liveChannels.rooms,
+      nextOffset: state.liveChannels.nextOffset,
+      fetchedAt: Date.now(),
+      source: 'tiktok-live-search',
     }),
   };
 
@@ -226,7 +265,12 @@ const INIT_SCRIPT = `
       calls.push({ method: message.method, params: message.params || {} });
       const forced = state.failures[message.method];
       if (forced !== undefined) {
-        fail(message.id, message.method, forced);
+        const forcedCode = typeof forced === 'object' && forced ? forced.code : 'e2e';
+        const forcedMessage = typeof forced === 'object' && forced ? forced.message : forced;
+        respond(message.id, undefined, {
+          code: forcedCode,
+          message: forcedMessage || ('fake host failure: ' + message.method),
+        });
         return;
       }
       const handler = handlers[message.method];

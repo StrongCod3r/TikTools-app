@@ -99,12 +99,17 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     clearReconnect();
   });
 
-  const requestConnect = async (target: string, sessionCookie: string): Promise<void> => {
+  const requestConnect = async (
+    target: string,
+    sessionCookie: string,
+    roomId?: string,
+  ): Promise<void> => {
     const requestRevision = ++revision;
     try {
       const result = await control.call<LiveStatusResult>('live.connect', {
         uniqueId: target,
         sessionCookie,
+        ...(roomId ? { roomId } : {}),
       });
       if (requestRevision === revision && !result.connected) status.value = 'disconnected';
     } catch (failure) {
@@ -114,7 +119,7 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     }
   };
 
-  const handleConnect = (userToConnect?: string): void => {
+  const handleConnect = (userToConnect?: string, roomId?: string): void => {
     const target = normalizeUsername(userToConnect || uniqueId.value);
     if (!target) {
       error.value = callbacks.translate('handleRequired');
@@ -134,7 +139,12 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     saveUsername(target);
     recents.value = addRecentUsername(target);
     callbacks.goFeed();
-    void requestConnect(target, cookie.value.trim());
+    void requestConnect(target, cookie.value.trim(), roomId);
+  };
+
+  /** Connects to a room chosen in the LIVE explorer. */
+  const handleConnectRoom = (uniqueId: string, roomId: string): void => {
+    handleConnect(uniqueId, roomId);
   };
 
   const handlePickLive = (): void => {
@@ -228,6 +238,7 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     noteCreatorSeen,
     mergeRecentNames,
     handleConnect,
+    handleConnectRoom,
     handlePickLive,
     handleDisconnect,
     handleReconnect,

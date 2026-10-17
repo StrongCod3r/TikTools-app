@@ -7,6 +7,7 @@ import { useAnalytics } from '../features/analytics.ts';
 import { useAutomation } from '../features/automation.ts';
 import { useConnection } from '../features/connection.ts';
 import { useCreators } from '../features/creators.ts';
+import { useDiscovery } from '../features/discovery.ts';
 import { useLive } from '../features/live.ts';
 import { useMedia } from '../features/media.ts';
 import { usePlugins } from '../features/plugins.ts';
@@ -37,7 +38,7 @@ import {
   type Theme,
 } from '../preferences.ts';
 import { t, type Locale } from '../i18n.ts';
-import type { AppTab } from '../types.ts';
+import type { AppTab, LiveChannel } from '../types.ts';
 import { createInitialPluginInstallState, pluginPickerOptions } from './plugin-install.ts';
 
 export type { PluginInstallState } from './plugin-install.ts';
@@ -117,6 +118,25 @@ export function useAppController() {
     systemAuthor: () => translate('system'),
     discontinuityText: () => translate('feedResumed'),
   });
+  const discovery = useDiscovery(control, {
+    translate,
+    currentCreator: () => connection.activeCreator.value,
+  });
+
+  /**
+   * Connects to a room chosen in the LIVE explorer through the existing
+   * `live.connect`. A stale listing is refreshed first instead of
+   * connecting to a room that may have ended, and the choice is never
+   * applied automatically.
+   */
+  const handleConnectRoom = (room: LiveChannel): void => {
+    if (discovery.isStale()) {
+      discovery.markStale();
+      discovery.refresh();
+      return;
+    }
+    connection.handleConnectRoom(room.uniqueId, room.roomId);
+  };
 
   // Reliable-gap resync: the host skipped authoritative events this client
   // never saw, so every authoritative snapshot is re-read (live status,
@@ -294,6 +314,7 @@ export function useAppController() {
     plugins.dispose();
     automation.dispose();
     connection.dispose();
+    discovery.dispose();
     live.dispose();
     points.dispose();
     control.detach();
@@ -548,6 +569,20 @@ export function useAppController() {
     handleDisconnect: connection.handleDisconnect,
     handleReconnect: connection.handleReconnect,
     handleSelectRecent: connection.handleSelectRecent,
+    discoveryOpen: discovery.open,
+    discoveryKeyword: discovery.keyword,
+    discoveryRooms: discovery.rooms,
+    discoveryStatus: discovery.status,
+    discoveryError: discovery.error,
+    discoveryRandom: discovery.randomCandidate,
+    discoveryHasMore: discovery.hasMore,
+    toggleDiscovery: discovery.toggle,
+    setDiscoveryKeyword: discovery.setKeyword,
+    refreshDiscovery: discovery.refresh,
+    loadMoreDiscovery: discovery.loadMore,
+    pickRandomRoom: discovery.pickRandom,
+    clearRandomRoom: discovery.clearRandom,
+    handleConnectRoom,
     handleToggleAutoScroll: live.handleToggleAutoScroll,
     handleThemeToggle,
     handleLocaleToggle,

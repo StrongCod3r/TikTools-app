@@ -54,13 +54,16 @@ export function eventKindLabelKey(kind: DisplayEvent['kind']): string {
   }
 }
 
+const timeFormatters = {
+  en: new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit' }),
+  es: new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }),
+} as const;
+
 /** Timestamp label. Date and time are kept separate so panels can stack
- *  them while feed rows stay one line. */
+ *  them while feed rows stay one line. Formatters are cached per locale:
+ *  one per frame per row would be a needless allocation hot-spot. */
 export function formatEventTime(locale: Locale, value: number): string {
-  return new Intl.DateTimeFormat(locale === 'es' ? 'es-ES' : 'en-US', {
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(value);
+  return timeFormatters[locale].format(value);
 }
 
 export function formatEventStamp(locale: Locale, value: number): string {
