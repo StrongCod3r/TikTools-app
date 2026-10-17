@@ -54,6 +54,40 @@ when credentials remain redacted. Its own settings-write echoes are consumed wit
 creating a reload loop. No tokens enter cache keys or logs in plaintext. Reload does
 not reload models, reset audio, switch output devices or interrupt queued playback.
 
+## Text processing (emote codes before speech)
+
+Chat is normalised before synthesis so recognised TikTok emote codes are never
+spoken. The pipeline order is unchanged except for one inserted step:
+
+```
+enabled → comment/trigger filter → user eligibility
+        → text processing → points check → voice
+```
+
+Text processing removes known emote shortcodes, then (optionally) Unicode
+emoji, then unwanted invisible characters, then collapses whitespace. It runs
+after the trigger filters so command matching still sees the original comment,
+and before the points check so an emote-only comment is dropped without
+charging points or posting a synthesis request.
+
+Only tokens in the verified catalog are removed. Arbitrary bracketed text —
+`[debug]`, `[1,2,3]`, `[username]` — is spoken normally; the naive "strip
+everything in brackets" approach is explicitly rejected. Zero-width joiners are
+preserved, Unicode emoji removal is opt-in (default off), and Spanish,
+Japanese, Chinese, Korean and Arabic text is untouched. An operator can switch
+emotes from "remove" to "describe" and can choose to keep messages that would
+otherwise be emptied.
+
+The **Text Processing** card in the settings UI exposes these options and a
+live preview. The preview calls the exact same `sanitizeTtsText` the backend
+policy uses, so the preview cannot disagree with production.
+
+Both implementations are pinned by shared fixtures in
+`shared/tts/fixtures/sanitizer-cases.json`, replayed by
+`shared/tts/sanitizer.test.ts` (TypeScript) and `backend/src/sanitizer.rs`
+(Rust). The catalog token list is a hypothesis pending verification against
+captured LIVE traffic — see [docs/EMOTES.md](../../docs/EMOTES.md).
+
 ## Validation (2026-10-16)
 
 ```bash
