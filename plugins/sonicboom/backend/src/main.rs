@@ -21,21 +21,74 @@
 //! Two host-mediated effects stay out of reach by design: points cannot
 //! be charged from a process backend (no host call exists for it), so
 //! affordability is checked against the delivered totals but never
-//! deducted; and speech status reaches the UI only through the shared
-//! logs it already renders, not through a backend event channel.
+//! deducted; and speech status reaches the UI through the shared,
+//! structured stderr lines the host drains and the log panel already
+//! renders, not through a backend event channel.
+//!
+//! Admission contract (Post-refactor):
+//!
+//! - `event()` performs the cheap, HTTP-free eligibility screen and then
+//!   enqueues a self-contained [`SpeechJob`] onto a bounded (64) FIFO. A
+//!   full queue is rejected with an exact counter and a rate-limited,
+//!   actionable log line; it never blocks ingestion, retries, or hides.
+//! - The single ordered worker owns voice lookup/selection, replay dedup,
+//!   freshness expiry, and the HTTP POST. An expired job is dropped before
+//!   the voice catalog request and again before the speech POST.
+//! - A 2xx response means the endpoint *accepted* the request; it does not
+//!   prove audible playback. Counters and logs say `accepted`, never
+//!   "played".
+//! - A watchdog flags a stalled worker (`degraded`) after a bounded period
+//!   without progression. Recovery is stop/restart only; a stale generation
+//!   is cancelled and joined before a replacement starts.
 
 mod config;
 mod policy;
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use policy::{Author, Deduper};
 use tiktools_plugin_sdk::prelude::*;
 
 const DEDUP_WINDOW_MS: u64 = 1500;
 const DEDUP_MAX_ENTRIES: usize = 500;
+/// True-identity replay suppression is session-scoped and deliberately much
+/// longer than the content fallback: a reconnect can replay a message well
+/// after the short window without it being a fresh comment.
+const EVENT_ID_DEDUP_WINDOW_MS: u64 = 10 * 60_000;
+const EVENT_ID_DEDUP_MAX_ENTRIES: usize = 2_000;
 const VOICES_TTL_SECS: u64 = 300;
+/// Total speech request deadline (connect + transfer). A 2xx within this
+/// window means accepted, not played.
 const SPEAK_TIMEOUT_SECS: u64 = 15;
+/// Separate connect budget so a black-holed host is distinguishable from a
+/// server that accepted but is slow to answer.
+const SPEAK_CONNECT_TIMEOUT_SECS: u64 = 5;
+/// Ordinary chat freshness: a job older than this is dropped before it can
+/// monopolize the worker. High-value/manual speech is out of the observer's
+/// scope (declarative actions bypass this queue entirely).
+const MAX_WAIT_AGE_MS: u64 = 15_000;
+const SPEECH_QUEUE_CAPACITY: usize = 64;
+/// No progression for this long flips a running worker to `degraded`.
+const WATCHDOG_STALL_MS: u64 = 45_000;
+const STATUS_LOG_INTERVAL_MS: u64 = 5_000;
+const WARN_INTERVAL_MS: u64 = 1_000;
+const WATCHDOG_TICK_MS: u64 = 250;
+
+const STATE_IDLE: u8 = 0;
+const STATE_RUNNING: u8 = 1;
+const STATE_DEGRADED: u8 = 2;
+const STATE_STOPPED: u8 = 3;
+
+fn state_name(state: u8) -> &'static str {
+    match state {
+        STATE_RUNNING => "running",
+        STATE_DEGRADED => "degraded",
+        STATE_STOPPED => "stopped",
+        _ => "idle",
+    }
+}
 
 fn now_millis() -> u64 {
     SystemTime::now()
@@ -44,34 +97,249 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Why one speech POST did not complete. Transport errors, HTTP status
+/// classes, timeouts and cancellations are distinct so the UI can tell a
+/// dead server from a rate limit from a request that was merely slow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SpeakFailure {
+    ConnectTimeout,
+    Timeout,
+    Disconnected,
+    Transport,
+    Status(u16),
+}
+
+impl SpeakFailure {
+    fn kind(&self) -> &'static str {
+        match self {
+            SpeakFailure::ConnectTimeout => "connect_timeout",
+            SpeakFailure::Timeout => "timeout",
+            SpeakFailure::Disconnected => "disconnected",
+            SpeakFailure::Transport => "transport",
+            SpeakFailure::Status(429) => "rate_limited",
+            SpeakFailure::Status(code) if *code >= 500 => "server_error",
+            SpeakFailure::Status(_) => "client_error",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            SpeakFailure::ConnectTimeout => {
+                "could not connect before the connect deadline".to_owned()
+            }
+            SpeakFailure::Timeout => "server did not answer before the request deadline".to_owned(),
+            SpeakFailure::Disconnected => "connection to the server failed".to_owned(),
+            SpeakFailure::Transport => "speech request failed in transport".to_owned(),
+            SpeakFailure::Status(code) => format!("server answered {code}"),
+        }
+    }
+}
+
+/// Classifies a reqwest error without ever including the URL, token or body.
+fn classify_request_error(error: &reqwest::Error) -> SpeakFailure {
+    if error.is_timeout() {
+        if error.is_connect() {
+            SpeakFailure::ConnectTimeout
+        } else {
+            SpeakFailure::Timeout
+        }
+    } else if error.is_connect() {
+        SpeakFailure::Disconnected
+    } else {
+        SpeakFailure::Transport
+    }
+}
+
+/// Exact, payload-free admission and execution counters. Every path through
+/// `event()`/`process()` lands in exactly one terminal counter, so totals
+/// reconcile (queued = accepted + failed + expired + deduped + filtered +
+/// cancelled-of-queued).
+#[derive(Default)]
+struct SpeechStats {
+    observed: AtomicU64,
+    eligible: AtomicU64,
+    filtered: AtomicU64,
+    deduped: AtomicU64,
+    queued: AtomicU64,
+    rejected: AtomicU64,
+    expired: AtomicU64,
+    started: AtomicU64,
+    accepted: AtomicU64,
+    failed: AtomicU64,
+    no_voice: AtomicU64,
+    cancelled: AtomicU64,
+}
+
+/// Shared worker liveness: state, generation fence, monotonic progression
+/// and a bounded queue-depth gauge the mpsc sender cannot expose directly.
+struct SpeechRuntime {
+    state: AtomicU8,
+    generation: u64,
+    /// Milliseconds since the process epoch; 0 means "no work yet".
+    last_progress_ms: AtomicU64,
+    current_job_age_ms: AtomicU64,
+    queue_depth: AtomicI64,
+    last_status_log_ms: AtomicU64,
+    last_reject_log_ms: AtomicU64,
+}
+
+impl SpeechRuntime {
+    fn new(generation: u64) -> Self {
+        Self {
+            state: AtomicU8::new(STATE_IDLE),
+            generation,
+            last_progress_ms: AtomicU64::new(0),
+            current_job_age_ms: AtomicU64::new(0),
+            queue_depth: AtomicI64::new(0),
+            last_status_log_ms: AtomicU64::new(0),
+            last_reject_log_ms: AtomicU64::new(0),
+        }
+    }
+}
+
+fn watchdog_should_degrade(now_ms: u64, last_progress_ms: u64, stall_ms: u64) -> bool {
+    last_progress_ms != 0 && now_ms.saturating_sub(last_progress_ms) > stall_ms
+}
+
+/// Session-scoped suppression of upstream message identities. Unlike the
+/// content fingerprint fallback this keeps a stable ID distinct from an
+/// identical-text duplicate, so two real viewers both speak while a
+/// reconnect replay of the same ID is dropped. Bounded and time-evicted.
+struct IdDeduper {
+    window_ms: u64,
+    max_entries: usize,
+    seen: std::collections::HashMap<(u64, String), u64>,
+}
+
+impl IdDeduper {
+    fn new(window_ms: u64, max_entries: usize) -> Self {
+        Self {
+            window_ms,
+            max_entries: max_entries.max(1),
+            seen: std::collections::HashMap::new(),
+        }
+    }
+
+    /// `true` when this identity is new (speak), `false` for a replay.
+    fn claim(&mut self, generation: u64, id: &str, now_ms: u64) -> bool {
+        let key = (generation, id.to_owned());
+        if let Some(last) = self.seen.get(&key) {
+            if now_ms.saturating_sub(*last) < self.window_ms {
+                return false;
+            }
+        }
+        self.seen.insert(key, now_ms);
+        if self.seen.len() > self.max_entries {
+            if let Some(oldest) = self
+                .seen
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(key, _)| key.clone())
+            {
+                self.seen.remove(&oldest);
+            }
+        }
+        true
+    }
+}
+
 struct SpeechEngine {
     http: reqwest::Client,
     deduper: Deduper,
+    event_ids: IdDeduper,
     voices: Vec<String>,
     voices_fetched_at_ms: u64,
     catalog_key: Option<(String, u64, String, String)>,
     /// Time-seeded xorshift state for random voice picks (no rng dep for
     /// a cosmetic shuffle).
     rng: u64,
+    request_timeout: Duration,
+    stats: Arc<SpeechStats>,
+    runtime: Arc<SpeechRuntime>,
+    epoch: Instant,
 }
 
 impl Default for SpeechEngine {
     fn default() -> Self {
         Self {
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(SPEAK_TIMEOUT_SECS))
+                .connect_timeout(Duration::from_secs(SPEAK_CONNECT_TIMEOUT_SECS))
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             deduper: Deduper::new(DEDUP_WINDOW_MS, DEDUP_MAX_ENTRIES),
+            event_ids: IdDeduper::new(EVENT_ID_DEDUP_WINDOW_MS, EVENT_ID_DEDUP_MAX_ENTRIES),
             voices: Vec::new(),
             voices_fetched_at_ms: 0,
             catalog_key: None,
             rng: now_millis().max(1),
+            request_timeout: Duration::from_secs(SPEAK_TIMEOUT_SECS),
+            stats: Arc::new(SpeechStats::default()),
+            runtime: Arc::new(SpeechRuntime::new(1)),
+            epoch: Instant::now(),
         }
     }
 }
 
 impl SpeechEngine {
+    fn new(stats: Arc<SpeechStats>, runtime: Arc<SpeechRuntime>, epoch: Instant) -> Self {
+        Self {
+            stats,
+            runtime,
+            epoch,
+            ..Self::default()
+        }
+    }
+
+    /// Test seam: the total speech deadline without rebuilding the client
+    /// (connect timeout stays at its configured default).
+    #[cfg(test)]
+    fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.request_timeout = timeout;
+        self
+    }
+
+    fn mark_progress(&self) {
+        self.runtime
+            .last_progress_ms
+            .store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
+    }
+
+    /// One rate-limited aggregate snapshot. Contains no payloads.
+    fn log_status_if_due(&self) {
+        let now = now_millis();
+        let last = self.runtime.last_status_log_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < STATUS_LOG_INTERVAL_MS {
+            return;
+        }
+        if self
+            .runtime
+            .last_status_log_ms
+            .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let s = &self.stats;
+        eprintln!(
+            "sonicboom: status worker={} generation={} queue_depth={} observed={} eligible={} filtered={} deduped={} queued={} started={} accepted={} failed={} expired={} rejected={} no_voice={} cancelled={}",
+            state_name(self.runtime.state.load(Ordering::Relaxed)),
+            self.runtime.generation,
+            self.runtime.queue_depth.load(Ordering::Relaxed).max(0),
+            s.observed.load(Ordering::Relaxed),
+            s.eligible.load(Ordering::Relaxed),
+            s.filtered.load(Ordering::Relaxed),
+            s.deduped.load(Ordering::Relaxed),
+            s.queued.load(Ordering::Relaxed),
+            s.started.load(Ordering::Relaxed),
+            s.accepted.load(Ordering::Relaxed),
+            s.failed.load(Ordering::Relaxed),
+            s.expired.load(Ordering::Relaxed),
+            s.rejected.load(Ordering::Relaxed),
+            s.no_voice.load(Ordering::Relaxed),
+            s.cancelled.load(Ordering::Relaxed),
+        );
+    }
+
     fn next_index(&mut self, len: usize) -> usize {
         // xorshift64*: good enough for voice shuffling.
         let mut x = self.rng.max(1);
@@ -153,7 +421,7 @@ impl SpeechEngine {
         voice: &str,
         provider: &str,
         language: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String, SpeakFailure> {
         // Mirrors the declarative speak action: POST
         // `/api/tts/play?voice=…&lang=…` with a text/plain body. The
         // observer never interrupts (`play_now` stays a manual control).
@@ -166,21 +434,131 @@ impl SpeechEngine {
         let mut request = self
             .http
             .post(&url)
-            .timeout(Duration::from_secs(SPEAK_TIMEOUT_SECS))
+            .timeout(self.request_timeout)
             .header("Content-Type", "text/plain")
             .body(text.to_owned());
         if !token.is_empty() {
             request = request.bearer_auth(token);
         }
-        let response = request.send().await.map_err(|error| {
-            // Never log the token: only the outcome and status travel.
-            format!("speech request failed: {error}")
-        })?;
+        // No retry: a timed-out POST may already have synthesized audio, and
+        // the endpoint exposes no idempotency key. A truthful failure beats a
+        // duplicated spoken line.
+        let response = request
+            .send()
+            .await
+            .map_err(|error| classify_request_error(&error))?;
         let status = response.status();
         if !status.is_success() {
-            return Err(format!("speech server answered {status}"));
+            return Err(SpeakFailure::Status(status.as_u16()));
         }
-        Ok(format!("spoke {} chars as {voice}", text.chars().count()))
+        Ok(format!("{} chars as {voice}", text.chars().count()))
+    }
+
+    /// One full job. Counters are the single source of truth for the
+    /// terminal accounting; the caller only owns cancellation and liveness.
+    async fn process(&mut self, job: Box<SpeechJob>) {
+        let SpeechJob {
+            job_id,
+            upstream_event_id,
+            session_generation,
+            admitted,
+            admitted_at_ms,
+            deadline,
+            text,
+            author,
+            config,
+        } = *job;
+        self.runtime
+            .current_job_age_ms
+            .store(admitted.elapsed().as_millis() as u64, Ordering::Relaxed);
+        self.mark_progress();
+        let event_ref = upstream_event_id.as_deref().unwrap_or("-");
+
+        // Drop stale work before paying for a voice-catalog request.
+        if Instant::now() >= deadline {
+            self.stats.expired.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "sonicboom: job {job_id} expired stage=admission age_ms={} event={event_ref}",
+                admitted.elapsed().as_millis()
+            );
+            self.log_status_if_due();
+            return;
+        }
+
+        self.ensure_voices(&config).await;
+        if self.voices.is_empty() {
+            self.stats.no_voice.fetch_add(1, Ordering::Relaxed);
+            self.stats.failed.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "sonicboom: job {job_id} failed reason=no_voices provider={} session={session_generation} event={event_ref}",
+                config.policy.provider_id
+            );
+            self.log_status_if_due();
+            return;
+        }
+        let voices = self.voices.clone();
+        let decision = policy::decide(&text, &author, &config.policy, &voices, |len| {
+            self.next_index(len)
+        });
+        if !decision.speak {
+            self.stats.filtered.fetch_add(1, Ordering::Relaxed);
+            self.log_status_if_due();
+            return;
+        }
+        // Freshness again immediately before dispatch: a slow catalog fetch
+        // may have consumed the whole waiting budget.
+        if Instant::now() >= deadline {
+            self.stats.expired.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "sonicboom: job {job_id} expired stage=dispatch age_ms={} event={event_ref}",
+                admitted.elapsed().as_millis()
+            );
+            self.log_status_if_due();
+            return;
+        }
+        // Primary key is the upstream identity; the content fingerprint is
+        // only a fallback for synthetic events that carry no ID, so two
+        // distinct messages with identical text both speak.
+        let fresh = match upstream_event_id.as_deref() {
+            Some(id) => self.event_ids.claim(session_generation, id, now_millis()),
+            None => self.deduper.claim(
+                &policy::fingerprint(&author.handle, &decision.spoken_text),
+                admitted_at_ms,
+            ),
+        };
+        if !fresh {
+            self.stats.deduped.fetch_add(1, Ordering::Relaxed);
+            self.log_status_if_due();
+            return;
+        }
+        self.stats.started.fetch_add(1, Ordering::Relaxed);
+        self.mark_progress();
+        match self
+            .speak(
+                &config.server_url,
+                &config.api_token,
+                &decision.spoken_text,
+                &decision.voice,
+                &config.policy.provider_id,
+                &decision.language,
+            )
+            .await
+        {
+            Ok(summary) => {
+                self.stats.accepted.fetch_add(1, Ordering::Relaxed);
+                eprintln!("sonicboom: job {job_id} accepted {summary} event={event_ref}");
+            }
+            Err(failure) => {
+                self.stats.failed.fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "sonicboom: job {job_id} failed reason={} detail={} event={event_ref}",
+                    failure.kind(),
+                    failure.message()
+                );
+            }
+        }
+        self.mark_progress();
+        self.log_status_if_due();
     }
 }
 
@@ -228,146 +606,262 @@ fn voice_values(body: serde_json::Value) -> Vec<String> {
     voices
 }
 
-impl SpeechEngine {
-    async fn process(&mut self, job: Box<SpeechJob>) -> Option<bool> {
-        let SpeechJob {
-            text,
-            author,
-            config,
-            admitted_at,
-        } = *job;
-        self.ensure_voices(&config).await;
-        if self.voices.is_empty() {
-            eprintln!("sonicboom: no authorized voices available for selected provider");
-            return Some(false);
+/// Stable upstream identity for a chat line, when one exists. Used for
+/// traceability now and true-identity dedup later; it is an opaque
+/// identifier, never chat content.
+fn extract_msg_id(chat: &serde_json::Value) -> Option<String> {
+    match chat.get("msgId") {
+        Some(serde_json::Value::String(text)) if !text.is_empty() && text.len() <= 128 => {
+            Some(text.clone())
         }
-        let voices = self.voices.clone();
-        let decision = policy::decide(&text, &author, &config.policy, &voices, |len| {
-            self.next_index(len)
-        });
-        if !decision.speak {
-            return None;
-        }
-        if !self.deduper.claim(
-            &policy::fingerprint(&author.handle, &decision.spoken_text),
-            admitted_at,
-        ) {
-            return None;
-        }
-        match self
-            .speak(
-                &config.server_url,
-                &config.api_token,
-                &decision.spoken_text,
-                &decision.voice,
-                &config.policy.provider_id,
-                &decision.language,
-            )
-            .await
-        {
-            Ok(summary) => {
-                eprintln!("sonicboom: {summary}");
-                Some(true)
-            }
-            Err(error) => {
-                eprintln!("sonicboom: {error}");
-                Some(false)
-            }
-        }
+        Some(serde_json::Value::Number(number)) => Some(number.to_string()),
+        _ => None,
     }
 }
 
-const SPEECH_QUEUE_CAPACITY: usize = 64;
-
+/// One admitted unit of work, self-contained so settings reloads never
+/// mutate an in-flight job and a cancel/restart can retire it cleanly.
 struct SpeechJob {
+    job_id: u64,
+    upstream_event_id: Option<String>,
+    session_generation: u64,
+    /// Monotonic admission instant for elapsed-age and freshness decisions.
+    admitted: Instant,
+    /// Wall-clock admission ms for the replay-dedup window.
+    admitted_at_ms: u64,
+    deadline: Instant,
     text: String,
     author: Author,
     config: config::BackendConfig,
-    admitted_at: u64,
-}
-
-#[derive(Default)]
-struct SpeechStats {
-    queued: std::sync::atomic::AtomicU64,
-    spoken: std::sync::atomic::AtomicU64,
-    failed: std::sync::atomic::AtomicU64,
-    rejected: std::sync::atomic::AtomicU64,
-    cancelled: std::sync::atomic::AtomicU64,
 }
 
 struct SonicBoom {
     settings: config::ConfigCache,
-    stats: std::sync::Arc<SpeechStats>,
+    stats: Arc<SpeechStats>,
+    runtime: Arc<SpeechRuntime>,
+    next_job_id: u64,
     jobs: Option<tokio::sync::mpsc::Sender<Box<SpeechJob>>>,
     cancel: tokio::sync::watch::Sender<bool>,
     worker: Option<std::thread::JoinHandle<()>>,
+    watchdog: Option<std::thread::JoinHandle<()>>,
+    /// Dropping the sender wakes the watchdog immediately (disconnected).
+    watchdog_wake: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl Default for SonicBoom {
     fn default() -> Self {
+        let epoch = Instant::now();
+        let generation = 1;
+        let stats = Arc::new(SpeechStats::default());
+        let runtime = Arc::new(SpeechRuntime::new(generation));
         let (jobs, mut receiver) = tokio::sync::mpsc::channel(SPEECH_QUEUE_CAPACITY);
         let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
-        let stats = std::sync::Arc::new(SpeechStats::default());
-        let worker_stats = std::sync::Arc::clone(&stats);
-        let worker =
-            std::thread::Builder::new()
-                .name("sonicboom-speech".into())
-                .spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .expect("speech runtime");
-                    runtime.block_on(async move {
-                let mut engine = SpeechEngine::default();
+        let (watchdog_wake, watchdog_rx) = std::sync::mpsc::channel::<()>();
+
+        let worker_stats = Arc::clone(&stats);
+        let worker_runtime = Arc::clone(&runtime);
+        let worker = std::thread::Builder::new()
+            .name("sonicboom-speech".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("speech runtime");
+                runtime.block_on(async move {
+                    let mut engine = SpeechEngine::new(
+                        Arc::clone(&worker_stats),
+                        Arc::clone(&worker_runtime),
+                        epoch,
+                    );
+                    loop {
+                        let job: Box<SpeechJob> = tokio::select! {
+                            biased;
+                            _ = cancelled.changed() => break,
+                            job = receiver.recv() => match job { Some(job) => job, None => break },
+                        };
+                        worker_runtime.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                        worker_runtime.state.store(STATE_RUNNING, Ordering::Relaxed);
+                        let age = job.admitted.elapsed().as_millis() as u64;
+                        worker_runtime
+                            .current_job_age_ms
+                            .store(age, Ordering::Relaxed);
+                        tokio::select! {
+                            biased;
+                            _ = cancelled.changed() => {
+                                worker_stats.cancelled.fetch_add(1, Ordering::Relaxed);
+                                break;
+                            },
+                            () = engine.process(job) => {}
+                        }
+                        worker_runtime.state.store(STATE_IDLE, Ordering::Relaxed);
+                    }
+                    worker_runtime.state.store(STATE_STOPPED, Ordering::Relaxed);
+                    receiver.close();
+                    // Everything still queued at shutdown is retired with an
+                    // exact count; nothing is silently dropped.
+                    let pending = receiver.len();
+                    worker_runtime.queue_depth.store(0, Ordering::Relaxed);
+                    worker_stats
+                        .cancelled
+                        .fetch_add(pending as u64, Ordering::Relaxed);
+                    if pending > 0 {
+                        eprintln!("sonicboom: cancelled {pending} queued speech jobs");
+                    }
+                });
+            })
+            .expect("speech worker");
+
+        let watchdog_runtime = Arc::clone(&runtime);
+        let watchdog = std::thread::Builder::new()
+            .name("sonicboom-watchdog".into())
+            .spawn(move || {
                 loop {
-                    let job = tokio::select! {
-                        biased;
-                        _ = cancelled.changed() => break,
-                        job = receiver.recv() => match job { Some(job) => job, None => break },
-                    };
-                    tokio::select! {
-                        biased;
-                        _ = cancelled.changed() => { worker_stats.cancelled.fetch_add(1, std::sync::atomic::Ordering::Relaxed); break; },
-                        outcome = engine.process(job) => match outcome {
-                            Some(true) => { worker_stats.spoken.fetch_add(1, std::sync::atomic::Ordering::Relaxed); },
-                            Some(false) => { worker_stats.failed.fetch_add(1, std::sync::atomic::Ordering::Relaxed); },
-                            None => {},
-                        },
+                    // A disconnected sender (stop) ends the loop immediately;
+                    // otherwise the tick bounds how quickly a stall is seen.
+                    match watchdog_rx.recv_timeout(Duration::from_millis(WATCHDOG_TICK_MS)) {
+                        Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                    let now = epoch.elapsed().as_millis() as u64;
+                    let last = watchdog_runtime.last_progress_ms.load(Ordering::Relaxed);
+                    if watchdog_should_degrade(now, last, WATCHDOG_STALL_MS)
+                        && watchdog_runtime.state.load(Ordering::Relaxed) == STATE_RUNNING
+                        && watchdog_runtime
+                            .state
+                            .compare_exchange(
+                                STATE_RUNNING,
+                                STATE_DEGRADED,
+                                Ordering::AcqRel,
+                                Ordering::Acquire,
+                            )
+                            .is_ok()
+                    {
+                        eprintln!(
+                            "sonicboom: watchdog flagged stalled worker age_ms={} stall_ms={} generation={}",
+                            watchdog_runtime.current_job_age_ms.load(Ordering::Relaxed),
+                            WATCHDOG_STALL_MS,
+                            watchdog_runtime.generation
+                        );
                     }
                 }
-                receiver.close();
-                let pending = receiver.len();
-                worker_stats.cancelled.fetch_add(pending as u64, std::sync::atomic::Ordering::Relaxed);
-                if pending > 0 { eprintln!("sonicboom: cancelled {pending} queued speech jobs"); }
-            });
-                })
-                .expect("speech worker");
+            })
+            .ok();
+
         Self {
             settings: config::ConfigCache::new(),
             stats,
+            runtime,
+            next_job_id: 1,
             jobs: Some(jobs),
             cancel,
             worker: Some(worker),
+            watchdog,
+            watchdog_wake: Some(watchdog_wake),
         }
     }
 }
 
 impl SonicBoom {
+    /// HTTP-free eligibility screen plus bounded FIFO admission. Kept
+    /// separate from `event()` so admission accounting is unit-testable
+    /// without a settings file or process environment.
+    /// Returns `false` only when the worker sender is gone (plugin
+    /// unavailable), so the caller can surface a truthful error. Filtering
+    /// and rejection are accounted internally and return `true`.
+    fn admit(
+        &mut self,
+        text: &str,
+        author: Author,
+        config: config::BackendConfig,
+        upstream_event_id: Option<String>,
+    ) -> bool {
+        if !config.policy.enabled {
+            return true;
+        }
+        if !policy::decide(text, &author, &config.policy, &[], |_| 0).speak {
+            self.stats.filtered.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        self.stats.eligible.fetch_add(1, Ordering::Relaxed);
+        let admitted = Instant::now();
+        let job = Box::new(SpeechJob {
+            job_id: self.next_job_id,
+            upstream_event_id,
+            session_generation: self.runtime.generation,
+            admitted,
+            admitted_at_ms: now_millis(),
+            deadline: admitted + Duration::from_millis(MAX_WAIT_AGE_MS),
+            text: text.to_owned(),
+            author,
+            config,
+        });
+        self.next_job_id = self.next_job_id.wrapping_add(1);
+        match self.jobs.as_ref().map(|jobs| jobs.try_send(job)) {
+            Some(Ok(())) => {
+                self.stats.queued.fetch_add(1, Ordering::Relaxed);
+                self.runtime.queue_depth.fetch_add(1, Ordering::Relaxed);
+                true
+            }
+            Some(Err(tokio::sync::mpsc::error::TrySendError::Full(_))) => {
+                // Truthful rejection: counted, rate-limited, actionable. The
+                // event dispatch stays non-blocking and never retries.
+                self.stats.rejected.fetch_add(1, Ordering::Relaxed);
+                let now = now_millis();
+                let last = self.runtime.last_reject_log_ms.load(Ordering::Relaxed);
+                if now.saturating_sub(last) >= WARN_INTERVAL_MS
+                    && self
+                        .runtime
+                        .last_reject_log_ms
+                        .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    eprintln!(
+                        "sonicboom: speech rejected reason=queue_full capacity={SPEECH_QUEUE_CAPACITY} queue_depth={} total_rejected={} generation={}",
+                        self.runtime.queue_depth.load(Ordering::Relaxed).max(0),
+                        self.stats.rejected.load(Ordering::Relaxed),
+                        self.runtime.generation
+                    );
+                }
+                true
+            }
+            // Sender gone: the worker stopped. Report unavailable so the
+            // host records a delivery failure instead of a false success.
+            _ => false,
+        }
+    }
+
     fn stop(&mut self) {
         let _ = self.cancel.send(true);
         self.jobs.take();
+        // Dropping the wake sender ends the watchdog loop immediately.
+        self.watchdog_wake.take();
+        // Join the worker before the watchdog so a stalled HTTP future is
+        // dropped, then join the watchdog.
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
-            use std::sync::atomic::Ordering::Relaxed;
-            eprintln!(
-                "sonicboom: speech totals queued={} spoken={} failed={} rejected={} cancelled={}",
-                self.stats.queued.load(Relaxed),
-                self.stats.spoken.load(Relaxed),
-                self.stats.failed.load(Relaxed),
-                self.stats.rejected.load(Relaxed),
-                self.stats.cancelled.load(Relaxed)
-            );
         }
+        if let Some(watchdog) = self.watchdog.take() {
+            let _ = watchdog.join();
+        }
+        self.runtime.state.store(STATE_STOPPED, Ordering::Relaxed);
+        let s = &self.stats;
+        eprintln!(
+            "sonicboom: totals worker={} generation={} observed={} eligible={} filtered={} deduped={} queued={} started={} accepted={} failed={} expired={} rejected={} no_voice={} cancelled={}",
+            state_name(self.runtime.state.load(Ordering::Relaxed)),
+            self.runtime.generation,
+            s.observed.load(Ordering::Relaxed),
+            s.eligible.load(Ordering::Relaxed),
+            s.filtered.load(Ordering::Relaxed),
+            s.deduped.load(Ordering::Relaxed),
+            s.queued.load(Ordering::Relaxed),
+            s.started.load(Ordering::Relaxed),
+            s.accepted.load(Ordering::Relaxed),
+            s.failed.load(Ordering::Relaxed),
+            s.expired.load(Ordering::Relaxed),
+            s.rejected.load(Ordering::Relaxed),
+            s.no_voice.load(Ordering::Relaxed),
+            s.cancelled.load(Ordering::Relaxed),
+        );
     }
 }
 
@@ -400,6 +894,7 @@ impl Plugin for SonicBoom {
         if text.trim().is_empty() {
             return Ok(());
         }
+        self.stats.observed.fetch_add(1, Ordering::Relaxed);
         let author = Author {
             handle: chat
                 .get("author")
@@ -412,33 +907,11 @@ impl Plugin for SonicBoom {
             roles: policy::AuthorRoles::default(),
         };
         let config = self.settings.get().clone();
-        if !config.policy.enabled {
-            return Ok(());
-        }
         // Eligibility needs no HTTP. Voice choice and replay dedup run in
         // the ordered worker with the admission timestamp.
-        if !policy::decide(text, &author, &config.policy, &[], |_| 0).speak {
-            return Ok(());
-        }
-        let job = Box::new(SpeechJob {
-            text: text.to_owned(),
-            author,
-            config,
-            admitted_at: now_millis(),
-        });
-        match self.jobs.as_ref().map(|jobs| jobs.try_send(job)) {
-            Some(Ok(())) => {
-                self.stats
-                    .queued
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            Some(Err(tokio::sync::mpsc::error::TrySendError::Full(_))) => {
-                self.stats
-                    .rejected
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                eprintln!("sonicboom: speech queue full; rejected job");
-            }
-            _ => return Err(PluginError::other("speech worker stopped")),
+        let upstream_event_id = extract_msg_id(chat);
+        if !self.admit(text, author, config, upstream_event_id) {
+            return Err(PluginError::other("speech worker stopped"));
         }
         Ok(())
     }
@@ -450,25 +923,109 @@ tiktools_process_plugin!(SonicBoom);
 mod tests {
     use super::*;
 
-    fn speech_job(server_url: String) -> Box<SpeechJob> {
-        let config = config::BackendConfig {
-            server_url,
-            policy: policy::TtsSettings {
-                enabled: true,
-                default_voice: "M1".into(),
-                ..Default::default()
-            },
+    fn enabled_policy() -> policy::TtsSettings {
+        policy::TtsSettings {
+            enabled: true,
+            default_voice: "M1".into(),
             ..Default::default()
-        };
+        }
+    }
+
+    fn backend_config(server_url: String) -> config::BackendConfig {
+        config::BackendConfig {
+            server_url,
+            policy: enabled_policy(),
+            ..Default::default()
+        }
+    }
+
+    fn author() -> Author {
+        Author {
+            handle: "viewer".into(),
+            points: None,
+            roles: Default::default(),
+        }
+    }
+
+    fn speech_job(server_url: String) -> Box<SpeechJob> {
+        job_with_id(None, "test", server_url)
+    }
+
+    fn job_with_id(
+        upstream_event_id: Option<&str>,
+        text: &str,
+        server_url: String,
+    ) -> Box<SpeechJob> {
+        let admitted = Instant::now();
         Box::new(SpeechJob {
-            text: "test".into(),
-            author: Author {
-                handle: "viewer".into(),
-                points: None,
-                roles: Default::default(),
-            },
-            config,
-            admitted_at: now_millis(),
+            job_id: 1,
+            upstream_event_id: upstream_event_id.map(str::to_owned),
+            session_generation: 1,
+            admitted,
+            admitted_at_ms: now_millis(),
+            deadline: admitted + Duration::from_millis(MAX_WAIT_AGE_MS),
+            text: text.into(),
+            author: author(),
+            config: backend_config(server_url),
+        })
+    }
+
+    /// A stub that answers `requests` connections: every `GET
+    /// /api/tts/plugin/voices` gets a catalog, every `POST /api/tts/play`
+    /// gets `play_status_line`. Bodies are not consumed: the request line is
+    /// enough to route.
+    fn serve_voices_and_plays(
+        listener: std::net::TcpListener,
+        requests: usize,
+        play_status_line: &'static str,
+    ) -> std::thread::JoinHandle<()> {
+        use std::io::{Read, Write};
+        std::thread::spawn(move || {
+            for _ in 0..requests {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut raw = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            raw.extend_from_slice(&chunk[..read]);
+                            if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&raw);
+                let line = text.lines().next().unwrap_or_default();
+                if line.starts_with("GET /api/tts/plugin/voices") {
+                    let payload = r#"[{"id":"supertonic:M1"}]"#;
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                            payload.len()
+                        )
+                        .as_bytes(),
+                    );
+                } else if line.starts_with("POST /api/tts/play") {
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 {play_status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    );
+                } else {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
         })
     }
 
@@ -520,11 +1077,226 @@ mod tests {
     }
 
     #[test]
+    fn burst_reports_bounded_queue_with_exact_accounting() {
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let (started, ready) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut buffer = [0; 4096];
+            assert!(stream.read(&mut buffer).unwrap() > 0);
+            started.send(()).unwrap();
+            let _ = released.recv_timeout(Duration::from_secs(10));
+        });
+        let mut plugin = SonicBoom::default();
+        let config = backend_config(url);
+        // 1,000 eligible events against a server that never answers. The
+        // worker occupies one slot; the FIFO holds the rest; the surplus is
+        // rejected. Memory stays bounded and every event is accounted.
+        for _ in 0..1_000 {
+            plugin.admit("hello world", author(), config.clone(), None);
+        }
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        let queued = plugin.stats.queued.load(Ordering::Relaxed);
+        let rejected = plugin.stats.rejected.load(Ordering::Relaxed);
+        assert_eq!(queued + rejected, 1_000, "no event is silently lost");
+        assert!(
+            queued <= (SPEECH_QUEUE_CAPACITY as u64) + 1,
+            "queue stays bounded (one in flight): queued={queued}"
+        );
+        assert!(rejected > 0, "surplus must be rejected, not buffered");
+        assert_eq!(
+            plugin.runtime.queue_depth.load(Ordering::Relaxed),
+            queued as i64 - 1
+        );
+        plugin.stop();
+        let _ = release.send(());
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_job_never_reaches_the_server() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let mut engine = SpeechEngine::default();
+        let stats = Arc::clone(&engine.stats);
+        let past = Instant::now() - Duration::from_secs(5);
+        let job = Box::new(SpeechJob {
+            job_id: 7,
+            upstream_event_id: Some("m-1".into()),
+            session_generation: 1,
+            admitted: past,
+            admitted_at_ms: now_millis() - 5_000,
+            deadline: past,
+            text: "stale".into(),
+            author: author(),
+            config: backend_config(url),
+        });
+        engine.process(job).await;
+        assert_eq!(stats.expired.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.started.load(Ordering::Relaxed), 0);
+        assert!(listener.accept().is_err(), "no HTTP request may be sent");
+    }
+
+    #[tokio::test]
+    async fn server_error_status_is_a_failure_not_a_success() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = serve_voices_and_plays(listener, 2, "500 Internal Server Error");
+        let mut engine = SpeechEngine::default();
+        let stats = Arc::clone(&engine.stats);
+        engine.process(speech_job(url)).await;
+        assert_eq!(stats.started.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.accepted.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.failed.load(Ordering::Relaxed), 1);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepted_response_counts_as_accepted() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = serve_voices_and_plays(listener, 2, "200 OK");
+        let mut engine = SpeechEngine::default();
+        let stats = Arc::clone(&engine.stats);
+        engine.process(speech_job(url)).await;
+        assert_eq!(stats.started.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.accepted.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.failed.load(Ordering::Relaxed), 0);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn distinct_message_ids_with_identical_text_both_speak_and_replay_is_suppressed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        // One voices lookup (cached after the first job) plus exactly two
+        // speech POSTs. A replay of the first ID must not open a third.
+        let server = serve_voices_and_plays(listener, 3, "200 OK");
+        let mut engine = SpeechEngine::default();
+        let stats = Arc::clone(&engine.stats);
+        engine
+            .process(job_with_id(Some("m-1"), "hello", url.clone()))
+            .await;
+        engine
+            .process(job_with_id(Some("m-2"), "hello", url.clone()))
+            .await;
+        assert_eq!(stats.accepted.load(Ordering::Relaxed), 2);
+        assert_eq!(stats.deduped.load(Ordering::Relaxed), 0);
+        // Replay of an already-seen upstream identity is dropped.
+        engine.process(job_with_id(Some("m-1"), "hello", url)).await;
+        assert_eq!(stats.accepted.load(Ordering::Relaxed), 2);
+        assert_eq!(stats.deduped.load(Ordering::Relaxed), 1);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn id_deduper_separates_identities_sessions_and_windows() {
+        let mut deduper = IdDeduper::new(10_000, 10);
+        assert!(deduper.claim(1, "a", 1_000));
+        assert!(!deduper.claim(1, "a", 5_000));
+        // Same id under a different session generation is a fresh identity.
+        assert!(deduper.claim(2, "a", 5_000));
+        // Window expiry allows the identity again.
+        assert!(deduper.claim(1, "a", 12_000));
+        assert!(!deduper.claim(1, "a", 12_500));
+    }
+
+    #[test]
+    fn id_deduper_evicts_the_oldest_at_capacity() {
+        let mut deduper = IdDeduper::new(1_000_000, 2);
+        assert!(deduper.claim(1, "a", 1_000));
+        assert!(deduper.claim(1, "b", 2_000));
+        // Capacity is 2: inserting "c" evicts the oldest ("a").
+        assert!(deduper.claim(1, "c", 3_000));
+        assert!(deduper.claim(1, "a", 4_000));
+        // "c" is still retained, so its replay is suppressed.
+        assert!(!deduper.claim(1, "c", 4_100));
+    }
+
+    #[tokio::test]
+    async fn slow_server_times_out_without_counting_success() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut raw = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            raw.extend_from_slice(&chunk[..read]);
+                            if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if index == 0 {
+                    let payload = r#"[{"id":"supertonic:M1"}]"#;
+                    let _ = stream.write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                            payload.len()
+                        )
+                        .as_bytes(),
+                    );
+                } else {
+                    // Hold the connection past the request deadline.
+                    std::thread::sleep(Duration::from_millis(1_000));
+                }
+            }
+        });
+        let mut engine = SpeechEngine::default().with_request_timeout(Duration::from_millis(200));
+        let stats = Arc::clone(&engine.stats);
+        engine.process(speech_job(url)).await;
+        assert_eq!(stats.started.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.accepted.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.failed.load(Ordering::Relaxed), 1);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn watchdog_flags_only_a_running_stall_after_progress() {
+        assert!(!watchdog_should_degrade(1_000, 0, 500));
+        assert!(!watchdog_should_degrade(1_400, 1_000, 500));
+        assert!(watchdog_should_degrade(1_600, 1_000, 500));
+    }
+
+    #[test]
+    fn message_ids_extract_from_strings_and_numbers_without_content() {
+        assert_eq!(
+            extract_msg_id(&serde_json::json!({"msgId": "abc"})),
+            Some("abc".to_owned())
+        );
+        assert_eq!(
+            extract_msg_id(&serde_json::json!({"msgId": 42})),
+            Some("42".to_owned())
+        );
+        assert_eq!(extract_msg_id(&serde_json::json!({})), None);
+        assert_eq!(extract_msg_id(&serde_json::json!({"msgId": ""})), None);
+    }
+
+    #[test]
     fn repeated_speech_worker_creation_and_teardown() {
         for _ in 0..128 {
             let mut plugin = SonicBoom::default();
             plugin.stop();
             assert!(plugin.worker.is_none());
+            assert!(plugin.watchdog.is_none());
             assert!(plugin.jobs.is_none());
         }
     }
