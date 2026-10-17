@@ -29,7 +29,7 @@ pub use automation::{
 #[cfg(any(test, feature = "native-tiktok"))]
 pub(crate) use helpers::check_session_cookie_len;
 pub(crate) use helpers::{clean_plugin_id, clean_record_id, fresh_record_id};
-pub use live::LiveStatus;
+pub use live::{LiveChannel, LiveChannelsResult, LiveStatus};
 pub use plugin_settings::{PluginConnectionResult, PluginProvisionResult, PluginSettingsResult};
 pub use plugins::{PluginActionOutcome, PluginInstallResult};
 pub use processors::ProcessorOutcomeDto;

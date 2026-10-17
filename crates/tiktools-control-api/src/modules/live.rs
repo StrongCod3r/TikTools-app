@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-pub use tiktools_core::control::LiveStatus;
+pub use tiktools_core::control::{LiveChannelsResult, LiveStatus};
 use tiktools_core::AppCore;
 
 use crate::{error::ApiError, modules::Empty, router::ControlRouter};
@@ -19,6 +19,22 @@ pub struct LiveConnectParams {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LivePickParams {
+    pub session_cookie: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveChannelsParams {
+    /// Search hint; trimmed and capped by the host. Defaults to `live`.
+    #[serde(default)]
+    pub keyword: Option<String>,
+    #[serde(default)]
+    pub offset: Option<u32>,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Optional signed-in session. Empty uses TikTok's guest session and is
+    /// never logged or returned.
+    #[serde(default)]
     pub session_cookie: String,
 }
 
@@ -57,6 +73,21 @@ pub fn register(router: &mut ControlRouter) {
         false,
         |core: Arc<AppCore>, _params: Empty| async move {
             Ok::<LiveStatus, ApiError>(core.live_status())
+        },
+    );
+    router.register_typed::<LiveChannelsParams, LiveChannelsResult, _, _>(
+        "live.channels",
+        "Browses currently live rooms without connecting",
+        false,
+        |core: Arc<AppCore>, params: LiveChannelsParams| async move {
+            core.live_channels(
+                params.keyword,
+                params.offset,
+                params.limit,
+                params.session_cookie,
+            )
+            .await
+            .map_err(ApiError::from)
         },
     );
 }

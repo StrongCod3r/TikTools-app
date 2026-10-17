@@ -91,11 +91,18 @@ impl LiveService {
     }
 
     #[cfg(feature = "native-tiktok")]
-    pub async fn live_channels(
+    pub async fn live_channels_page(
         &self,
         session_cookie: &str,
-    ) -> Result<Vec<tiktools_tiktok::discovery::LiveRoom>, TikTokError> {
-        self.client.live_channels(session_cookie).await
+        keyword: &str,
+        offset: usize,
+    ) -> Result<
+        Vec<tiktools_tiktok::discovery::LiveRoom>,
+        tiktools_tiktok::discovery::DiscoveryFailure,
+    > {
+        self.client
+            .live_channels_page(session_cookie, keyword, offset)
+            .await
     }
 
     pub async fn disconnect(&self) {

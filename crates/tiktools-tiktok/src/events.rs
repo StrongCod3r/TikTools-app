@@ -13,42 +13,17 @@ pub use ttl_live_events::{
     RoomUserEvent, SocialEvent, TopViewer,
 };
 
-/// Confirmed `WebcastSocialMessage.action` value for a follow.
-pub const SOCIAL_ACTION_FOLLOW: i64 = 1;
-/// Confirmed `WebcastSocialMessage.action` value for a share.
-pub const SOCIAL_ACTION_SHARE: i64 = 3;
-
-/// Semantic kind of a social message. Mirrors `ttl_live_events::social::SocialKind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SocialKind {
-    Follow,
-    Share,
-    /// An observed but unconfirmed `action` code.
-    Other,
-    /// No usable `action` code.
-    Unknown,
-}
+pub use ttl_live_events::social::SocialKind;
 
 /// The single `action` -> kind table for the application.
 ///
-/// Classification is driven by `action` alone. `follow_count`/`share_count` are
+/// Classification is driven by `action` alone; `follow_count`/`share_count` are
 /// cumulative room totals, not per-event increments, so deciding by "the first
-/// positive counter" mislabels every share in a room that has any follower.
-///
-/// This is a faithful mirror of `ttl_live_events::social::classify_action` and
-/// is pinned by the shared `social-classification` table. It exists here only
-/// because the `ttl-*` crates are pinned by git rev (see the workspace
-/// `Cargo.toml`); once that rev advances past the classifier it is replaced by
-/// a direct `ttl_live_events::social::classify_action` call and this function
-/// disappears. Every consumer must go through it so the three call sites cannot
-/// drift apart.
+/// positive counter" would mislabel every share in a room that has any
+/// follower. Delegates to the canonical `ttl-live-events` classifier so the
+/// application mirror cannot drift from the crates it consumes.
 pub fn classify_social_action(action: i64) -> SocialKind {
-    match action {
-        SOCIAL_ACTION_FOLLOW => SocialKind::Follow,
-        SOCIAL_ACTION_SHARE => SocialKind::Share,
-        0 => SocialKind::Unknown,
-        _ => SocialKind::Other,
-    }
+    ttl_live_events::social::classify_action(action).kind
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

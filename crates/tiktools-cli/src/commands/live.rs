@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 use tiktools_client::{ClientError, TikToolsClient};
-use tiktools_control_api::modules::live::{LiveConnectParams, LivePickParams};
+use tiktools_control_api::modules::live::{LiveChannelsParams, LiveConnectParams, LivePickParams};
 
 use super::args::{flag_value, split_first};
 use super::{result_value, CommandError};
@@ -14,6 +14,12 @@ pub enum Command {
         room_id: Option<String>,
     },
     Pick {
+        session_cookie: String,
+    },
+    Channels {
+        keyword: Option<String>,
+        offset: Option<u32>,
+        limit: Option<u32>,
         session_cookie: String,
     },
     Disconnect,
@@ -37,9 +43,28 @@ pub fn parse(args: &[String]) -> Result<Command, CommandError> {
             let session_cookie = session_cookie(rest, "live pick")?;
             Ok(Command::Pick { session_cookie })
         }
+        "channels" => Ok(Command::Channels {
+            keyword: flag_value(rest, "--keyword"),
+            offset: flag_u32(rest, "--offset")?,
+            limit: flag_u32(rest, "--limit")?,
+            // Discovery works without a session (guest bootstrap), so the
+            // cookie is optional here, unlike connect/pick.
+            session_cookie: optional_session_cookie(rest),
+        }),
         "disconnect" => Ok(Command::Disconnect),
         "status" => Ok(Command::Status),
         other => Err(format!("unknown live verb `{other}`").into()),
+    }
+}
+
+/// Reads a numeric `--flag`; a present but non-numeric value is an error
+/// rather than a silent default.
+fn flag_u32(args: &[String], flag: &str) -> Result<Option<u32>, CommandError> {
+    match flag_value(args, flag) {
+        Some(raw) => Ok(Some(raw.parse::<u32>().map_err(|_| -> CommandError {
+            format!("{flag} needs a whole number").into()
+        })?)),
+        None => Ok(None),
     }
 }
 
@@ -47,15 +72,23 @@ pub fn parse(args: &[String]) -> Result<Command, CommandError> {
 /// the flag wins when both are set. The cookie value never appears in
 /// usage text or diagnostics.
 fn session_cookie(args: &[String], usage: &str) -> Result<String, CommandError> {
+    let value = optional_session_cookie(args);
+    if value.is_empty() {
+        return Err(
+            format!("{usage} needs --session-cookie <cookie> (or TIKTOOLS_SESSION_COOKIE)").into(),
+        );
+    }
+    Ok(value)
+}
+
+fn optional_session_cookie(args: &[String]) -> String {
     flag_value(args, "--session-cookie")
         .or_else(|| {
             std::env::var("TIKTOOLS_SESSION_COOKIE")
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .ok_or_else(|| {
-            format!("{usage} needs --session-cookie <cookie> (or TIKTOOLS_SESSION_COOKIE)").into()
-        })
+        .unwrap_or_default()
 }
 
 pub async fn execute(client: &TikToolsClient, command: Command) -> Result<Value, ClientError> {
@@ -76,6 +109,21 @@ pub async fn execute(client: &TikToolsClient, command: Command) -> Result<Value,
         Command::Pick { session_cookie } => {
             result_value(client.live_pick(LivePickParams { session_cookie }).await?)
         }
+        Command::Channels {
+            keyword,
+            offset,
+            limit,
+            session_cookie,
+        } => result_value(
+            client
+                .live_channels(LiveChannelsParams {
+                    keyword,
+                    offset,
+                    limit,
+                    session_cookie,
+                })
+                .await?,
+        ),
         Command::Disconnect => result_value(client.live_disconnect().await?),
         Command::Status => result_value(client.live_status().await?),
     }

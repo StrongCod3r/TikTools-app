@@ -63,10 +63,10 @@ napi-vm = { git = "https://github.com/nglmercer/napi-vm", rev = "881cc8f1cec2620
 
 # The checked-in JavaScript/Bun package was only a compatibility implementation. The desktop
 # host consumes the Rust crates directly from the upstream workspace at a pinned revision.
-ttl-sign-core = { git = "https://github.com/nglmercer/tiktok-signer", rev = "98361a7c00178ff8c8dc9f0fc4fda9f9c82c941a" }
-ttl-live-discovery = { git = "https://github.com/nglmercer/tiktok-signer", rev = "98361a7c00178ff8c8dc9f0fc4fda9f9c82c941a" }
-ttl-live-events = { git = "https://github.com/nglmercer/tiktok-signer", rev = "98361a7c00178ff8c8dc9f0fc4fda9f9c82c941a" }
-ttl-live-proto = { git = "https://github.com/nglmercer/tiktok-signer", rev = "98361a7c00178ff8c8dc9f0fc4fda9f9c82c941a" }
-ttl-live-ws = { git = "https://github.com/nglmercer/tiktok-signer", rev = "98361a7c00178ff8c8dc9f0fc4fda9f9c82c941a" }
-ttl-sign-headless = { git = "https://github.com/nglmercer/tiktok-signer", rev = "98361a7c00178ff8c8dc9f0fc4fda9f9c82c941a" }
-ttl-sign-embedded = { git = "https://github.com/nglmercer/tiktok-signer", rev = "98361a7c00178ff8c8dc9f0fc4fda9f9c82c941a" }
+ttl-sign-core = { git = "https://github.com/nglmercer/tiktok-signer", rev = "bcab9dcb7a6d060d111329bc3b531a7206e4e5f8" }
+ttl-live-discovery = { git = "https://github.com/nglmercer/tiktok-signer", rev = "bcab9dcb7a6d060d111329bc3b531a7206e4e5f8" }
+ttl-live-events = { git = "https://github.com/nglmercer/tiktok-signer", rev = "bcab9dcb7a6d060d111329bc3b531a7206e4e5f8" }
+ttl-live-proto = { git = "https://github.com/nglmercer/tiktok-signer", rev = "bcab9dcb7a6d060d111329bc3b531a7206e4e5f8" }
+ttl-live-ws = { git = "https://github.com/nglmercer/tiktok-signer", rev = "bcab9dcb7a6d060d111329bc3b531a7206e4e5f8" }
+ttl-sign-headless = { git = "https://github.com/nglmercer/tiktok-signer", rev = "bcab9dcb7a6d060d111329bc3b531a7206e4e5f8" }
+ttl-sign-embedded = { git = "https://github.com/nglmercer/tiktok-signer", rev = "bcab9dcb7a6d060d111329bc3b531a7206e4e5f8" }

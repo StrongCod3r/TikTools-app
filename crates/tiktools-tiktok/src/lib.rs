@@ -301,20 +301,26 @@ impl NativeTikTokClient {
         Ok(())
     }
 
-    pub async fn live_channels(
+    /// Browse one page of currently-live rooms without connecting. Read-only
+    /// and guest-capable: an empty cookie falls through to the guest session.
+    /// The caller controls pagination and selects a creator explicitly.
+    pub async fn live_channels_page(
         &self,
         session_cookie: &str,
-    ) -> Result<Vec<discovery::LiveRoom>, TikTokError> {
-        let cookies = resolve_session(session_cookie).await?;
-        let preset = default_preset();
-        let client = ttl_live_discovery::DiscoveryClient::new(&preset)
-            .map_err(|error| TikTokError::Discovery(error.to_string()))?
+        keyword: &str,
+        offset: usize,
+    ) -> Result<Vec<discovery::LiveRoom>, discovery::DiscoveryFailure> {
+        let cookies = resolve_session(session_cookie)
+            .await
+            .map_err(session_failure)?;
+        let client = ttl_live_discovery::DiscoveryClient::new(&default_preset())
+            .map_err(discovery::DiscoveryFailure::from_error)?
             .with_session(cookies.to_cookie_string());
         client
-            .live_channels("live")
+            .live_channels_page(keyword, offset)
             .await
             .map(|rooms| rooms.into_iter().map(Into::into).collect())
-            .map_err(|error| TikTokError::Discovery(error.to_string()))
+            .map_err(discovery::DiscoveryFailure::from_error)
     }
 }
 
@@ -585,6 +591,19 @@ async fn run_connection(
                 }
             }
         }
+    }
+}
+
+/// Classify a session-resolution failure for the LIVE browse path. A missing
+/// guest identity is an authentication problem; anything else is transport.
+fn session_failure(error: TikTokError) -> discovery::DiscoveryFailure {
+    let kind = match &error {
+        TikTokError::EmptySession => discovery::DiscoveryFailureKind::AuthRequired,
+        _ => discovery::DiscoveryFailureKind::Transport,
+    };
+    discovery::DiscoveryFailure {
+        kind,
+        message: error.to_string(),
     }
 }
 

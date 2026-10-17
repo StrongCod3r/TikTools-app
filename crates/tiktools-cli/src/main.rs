@@ -27,6 +27,7 @@ commands:
   processor list | status | test <plugin-id> <processor-id> [event-json]
   live connect --unique-id <id> --session-cookie <cookie> [--room-id <id>]
        | pick --session-cookie <cookie> | disconnect | status
+       | channels [--keyword <text>] [--offset N] [--limit N] [--session-cookie <cookie>]
   points config get | config set k=v... | viewer get <id> | adjust <id> <delta>
        | leaderboard [--limit N] | reset [id]
   globals list | get <key> | set <key> <value> | delete <key>

@@ -625,6 +625,7 @@ mod tests {
                 action: 1,
                 follow_count: 2,
                 share_count: 0,
+                ..Default::default()
             }),
             None,
         )
