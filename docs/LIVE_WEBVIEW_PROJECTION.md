@@ -12,8 +12,15 @@ visibility is delivered explicitly because native hiding need not update
 Main-page presentation:
 
 - Normalized `live.event` is filtered before JSON construction. `live.ui-event`
-  is forwarded only while Feed is visible. Hidden events are counted, never
-  replayed on return; Feed inserts a discontinuity marker.
+  is forwarded only while Feed is visible. Every observed feed event is also
+  retained in a bounded native journal (512 render events, evict-oldest)
+  keyed by its monotonic bus cursor, before the visibility filter. On return
+  from a hidden period the page requests `ui.feed.backfill` (version 1,
+  generation-fenced, no revision advance) with its last presented cursor and
+  replays retained events read-only; it inserts a discontinuity marker only
+  when the replay reports an unrecoverable gap or is truncated, or when no
+  host history is available. Backfill performs no TTS/points/automation side
+  effects. The forwarded `live.ui-event` carries its `cursor` for bookkeeping.
 - Individual `points.changed` stays reliable on the domain/control bus. The
   main page receives immutable authoritative top-100 `ui.points.snapshot`
   projections at most every 250 ms while Feed or Points is visible. A dirty
@@ -30,8 +37,10 @@ Main-page presentation:
   behavior unless explicitly opting out. Snapshot RPCs remain available.
 - `ui.projection.stats` separates suspended feed events, lossy domain skips,
   exact feed-source skips, attempted feed deliveries and projection counts.
-  A main-page delivery sequence counts transport shedding separately from
-  source-bus loss. Coalesced snapshots are not reliable award notifications.
+  It also reports the retained journal cursors (`feedOldestCursor`,
+  `feedLatestCursor`, `feedJournalDepth`). A main-page delivery sequence counts
+  transport shedding separately from source-bus loss. Coalesced snapshots are
+  not reliable award notifications.
 
 The shared bus stores immutable Arc payloads. Its old owned receive API retains
 its wire/ownership behavior; `recv_shared()` avoids deep cloning events that a

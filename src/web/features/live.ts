@@ -22,6 +22,16 @@ export interface GiftCatalogResult {
   gifts: GiftCatalogEntry[];
 }
 
+/** Bounded native replay of retained feed events after a cursor. */
+export interface FeedBackfillResult {
+  oldestCursor: number;
+  latestCursor: number;
+  depth: number;
+  gap: boolean;
+  truncated: boolean;
+  events: Array<{ cursor: number; event: UiEvent }>;
+}
+
 /** Live feed: events, room stats, gift catalog, and scroll state. */
 
 /**
@@ -127,6 +137,10 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   let lastHostSuspended: number | null = null;
   let lastHostBusDropped: number | null = null;
   let lastDeliverySequence: number | null = null;
+  /** Native bus cursor of the newest feed event this page has consumed or
+   *  replayed. Reset on a room change so a hidden backlog from the previous
+   *  room is never re-inserted. */
+  let lastFeedCursor: number | null = null;
 
   // Frame scheduler with a synchronous fallback: unit tests and
   // non-browser hosts have no `requestAnimationFrame`, and the feed must
@@ -249,15 +263,58 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
     }
   };
 
-  const pushFeedEvent = (event: UiEvent): void => {
+  const pushFeedEvent = (event: UiEvent, cursor?: number): void => {
     // Drop replays before they reach the feed: a reconnect
     // replay must not re-render, count as unread, or re-fire
     // the chat observer.
     if (disposed) return;
     received += 1;
     if (!presentationActive) { droppedUiEvents.value += 1; return; }
+    // Advance the recovery cursor only for events actually presented; a
+    // hidden event must stay recoverable by the backfill.
+    if (cursor !== undefined) lastFeedCursor = Math.max(lastFeedCursor ?? 0, cursor);
     if (isDuplicateEvent(event, Date.now(), seenMsgIds, seenChecksums)) return;
     stageEvent({ ...event, id: nextEventId++, receivedAt: Date.now() });
+  };
+
+  const insertDiscontinuity = (): void => {
+    stageEvent({
+      kind: 'member',
+      author: callbacks.systemAuthor(),
+      text: callbacks.discontinuityText?.() ?? 'Feed resumed. Events received while hidden were skipped.',
+      id: nextEventId++,
+      receivedAt: Date.now(),
+    });
+  };
+
+  /** Read-only recovery after a hidden period: replay retained native feed
+   *  events beyond the last cursor instead of only announcing a gap. Falls
+   *  back to the discontinuity marker when the host has no bounded history
+   *  (no cursor yet), the page has no `call`, or the replay left a hole. */
+  const recoverFeed = async (): Promise<void> => {
+    const cursor = lastFeedCursor;
+    const canCall = typeof (control as { call?: unknown }).call === 'function';
+    if (!canCall || cursor === null) {
+      insertDiscontinuity();
+      return;
+    }
+    try {
+      const result = await control.call<FeedBackfillResult>('ui.feed.backfill', { version: 1, after: cursor });
+      if (disposed || !presentationActive) return;
+      let recovered = 0;
+      const now = Date.now();
+      for (const entry of result.events ?? []) {
+        if (typeof entry?.event !== 'object' || entry.event === null) continue;
+        if (isDuplicateEvent(entry.event, now, seenMsgIds, seenChecksums)) continue;
+        stageEvent({ ...entry.event, id: nextEventId++, receivedAt: now });
+        recovered += 1;
+      }
+      if (typeof result.latestCursor === 'number') lastFeedCursor = Math.max(lastFeedCursor ?? 0, result.latestCursor);
+      droppedUiEvents.value = Math.max(0, droppedUiEvents.value - recovered);
+      if (result.gap || result.truncated) insertDiscontinuity();
+    } catch {
+      if (!disposed && presentationActive) insertDiscontinuity();
+    }
   };
 
   const setPresentationActive = (active: boolean): void => {
@@ -283,9 +340,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
       flushFrame = scrollFrame = 0;
       flushQueued = false;
     } else if (hasPresented || droppedUiEvents.value > suspendedAt) {
-      stageEvent({ kind: 'member', author: callbacks.systemAuthor(),
-        text: callbacks.discontinuityText?.() ?? 'Feed resumed. Events received while hidden were skipped.',
-        id: nextEventId++, receivedAt: Date.now() });
+      void recoverFeed();
     }
   };
 
@@ -313,14 +368,18 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
       seenMsgIds.clear();
       seenChecksums.clear();
       sessionScope = scope;
+      // A new room must never replay the previous room's backlog; the next
+      // live event re-seeds the cursor.
+      lastFeedCursor = null;
     }
   }));
-  unsubscribers.push(control.onTopic<{ event: UiEvent; sequence?: number }>('live.ui-event', (data) => {
+  unsubscribers.push(control.onTopic<{ event: UiEvent; sequence?: number; cursor?: number }>('live.ui-event', (data) => {
     if (typeof data.sequence === 'number' && Number.isSafeInteger(data.sequence)) {
       if (lastDeliverySequence !== null) droppedUiEvents.value += Math.max(0, data.sequence - lastDeliverySequence - 1);
       lastDeliverySequence = Math.max(lastDeliverySequence ?? 0, data.sequence);
     }
-    pushFeedEvent(data.event);
+    const cursor = typeof data.cursor === 'number' && Number.isSafeInteger(data.cursor) ? data.cursor : undefined;
+    pushFeedEvent(data.event, cursor);
   }));
   unsubscribers.push(control.onTopic<{ viewers: number; totalUsers: number; topViewers: TopViewerPayload[] }>(
     'room.stats',
@@ -426,7 +485,7 @@ export function useLive(control: ControlClient, callbacks: LiveCallbacks) {
   };
 
   return {
-    diagnostics: () => ({ visible: events.value.length, staged: staged.length, dropped: droppedUiEvents.value, presentationActive, commits, received, timers: Number(flushTimer !== null) + Number(scrollTimer !== null) + Number(restoreTimer !== null), frames: Number(flushFrame !== 0) + Number(scrollFrame !== 0) + Number(restoreFrame !== 0) }),
+    diagnostics: () => ({ visible: events.value.length, staged: staged.length, dropped: droppedUiEvents.value, presentationActive, commits, received, cursor: lastFeedCursor, timers: Number(flushTimer !== null) + Number(scrollTimer !== null) + Number(restoreTimer !== null), frames: Number(flushFrame !== 0) + Number(scrollFrame !== 0) + Number(restoreFrame !== 0) }),
     events,
     imagesEnabled,
     renderLimit,

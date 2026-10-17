@@ -267,3 +267,115 @@ test('feed counts source-bus and transport shedding separately without counting 
   live.dispose();
   uninstallFrameControl();
 });
+
+/** A control client that also answers `ui.feed.backfill`, recording calls. */
+function createBackfillControl(responder: (params: { after: number }) => unknown) {
+  const handlers = new Map<string, TopicHandler[]>();
+  const calls: Array<{ method: string; params: unknown }> = [];
+  return {
+    handlers,
+    calls,
+    control: {
+      onTopic: (topic: string, handler: TopicHandler) => {
+        const list = handlers.get(topic) ?? [];
+        list.push(handler);
+        handlers.set(topic, list);
+        return () => {
+          handlers.set(
+            topic,
+            (handlers.get(topic) ?? []).filter((entry) => entry !== handler),
+          );
+        };
+      },
+      onPush: () => () => {},
+      call: async (method: string, params: unknown) => {
+        calls.push({ method, params });
+        return responder(params as { after: number });
+      },
+    } as never as ControlClient,
+    emit(topic: string, data: never): void {
+      for (const handler of handlers.get(topic) ?? []) handler(data);
+    },
+  };
+}
+
+test('returning from a hidden feed replays retained native events instead of a marker', async () => {
+  installFrameControl();
+  const harness = createBackfillControl(() => ({
+    oldestCursor: 9,
+    latestCursor: 12,
+    depth: 4,
+    gap: false,
+    truncated: false,
+    events: [
+      { cursor: 11, event: { kind: 'chat', author: 'a', text: 'recovered-11', msgId: 'r11' } },
+      { cursor: 12, event: { kind: 'chat', author: 'a', text: 'recovered-12', msgId: 'r12' } },
+    ],
+  }));
+  const live = useLive(harness.control, { systemAuthor: () => 'System' });
+  harness.emit('live.ui-event', { event: { kind: 'chat', author: 'a', text: 'live-10', msgId: 'l10' }, cursor: 10 } as never);
+  runFrames();
+  live.setPresentationActive(false);
+  // Hidden events must not advance the recovery cursor.
+  harness.emit('live.ui-event', { event: { kind: 'chat', author: 'a', text: 'hidden-11', msgId: 'h11' }, cursor: 11 } as never);
+  harness.emit('live.ui-event', { event: { kind: 'chat', author: 'a', text: 'hidden-12', msgId: 'h12' }, cursor: 12 } as never);
+  runFrames();
+  expect(live.events.value).toHaveLength(1);
+  expect(live.droppedUiEvents.value).toBe(2);
+  live.setPresentationActive(true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  runFrames();
+  expect(harness.calls).toEqual([{ method: 'ui.feed.backfill', params: { version: 1, after: 10 } }]);
+  const texts = live.events.value.map((event) => event.text);
+  expect(texts).toContain('live-10');
+  expect(texts).toContain('recovered-11');
+  expect(texts).toContain('recovered-12');
+  expect(texts.some((text) => text?.includes('Feed resumed'))).toBe(false);
+  expect(live.diagnostics().cursor).toBe(12);
+  expect(live.droppedUiEvents.value).toBe(0);
+  live.dispose();
+  uninstallFrameControl();
+});
+
+test('a gap or truncation in the native replay still inserts a discontinuity marker', async () => {
+  installFrameControl();
+  const harness = createBackfillControl(() => ({
+    oldestCursor: 9,
+    latestCursor: 12,
+    depth: 4,
+    gap: true,
+    truncated: false,
+    events: [{ cursor: 11, event: { kind: 'chat', author: 'a', text: 'recovered-11', msgId: 'r11' } }],
+  }));
+  const live = useLive(harness.control, { systemAuthor: () => 'System' });
+  harness.emit('live.ui-event', { event: { kind: 'chat', author: 'a', text: 'live-10', msgId: 'l10' }, cursor: 10 } as never);
+  runFrames();
+  live.setPresentationActive(false);
+  harness.emit('live.ui-event', { event: { kind: 'chat', author: 'a', text: 'hidden-11', msgId: 'h11' }, cursor: 11 } as never);
+  live.setPresentationActive(true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  runFrames();
+  const texts = live.events.value.map((event) => event.text);
+  expect(texts).toContain('recovered-11');
+  expect(texts.some((text) => text?.includes('Feed resumed'))).toBe(true);
+  live.dispose();
+  uninstallFrameControl();
+});
+
+test('a failed native replay degrades to the remaining discontinuity marker', async () => {
+  installFrameControl();
+  const harness = createBackfillControl(() => {
+    throw new Error('host unavailable');
+  });
+  const live = useLive(harness.control, { systemAuthor: () => 'System' });
+  harness.emit('live.ui-event', { event: { kind: 'chat', author: 'a', text: 'live-10', msgId: 'l10' }, cursor: 10 } as never);
+  runFrames();
+  live.setPresentationActive(false);
+  harness.emit('live.ui-event', { event: { kind: 'chat', author: 'a', text: 'hidden-11', msgId: 'h11' }, cursor: 11 } as never);
+  live.setPresentationActive(true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  runFrames();
+  expect(live.events.value.some((event) => event.text?.includes('Feed resumed'))).toBe(true);
+  live.dispose();
+  uninstallFrameControl();
+});
