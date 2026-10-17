@@ -54,6 +54,7 @@ export interface TestFollowOverrides {
   id?: string;
   user?: TestUserOverrides | null;
   action?: number;
+  msgId?: string;
   isHistory?: boolean;
 }
 
@@ -68,7 +69,7 @@ export function makeTestFollowEvent(overrides: TestFollowOverrides = {}): Follow
       followCount: 42,
       shareCount: 0,
       method: 'test',
-      msgId: 'msg-follow',
+      msgId: overrides.msgId ?? nextId('msg-follow'),
       isHistory: overrides.isHistory ?? false,
     },
   };
@@ -86,6 +87,7 @@ export interface TestGiftOverrides {
   repeatEnd?: boolean;
   streakable?: boolean;
   giftIconUrl?: string | null;
+  msgId?: string;
   isHistory?: boolean;
 }
 
@@ -106,7 +108,7 @@ export function makeTestGiftEvent(overrides: TestGiftOverrides = {}): GiftAutoma
       streakable: overrides.streakable ?? false,
       giftIconUrl: overrides.giftIconUrl ?? null,
       method: 'test',
-      msgId: 'msg-gift',
+      msgId: overrides.msgId ?? nextId('msg-gift'),
       isHistory: overrides.isHistory ?? false,
     },
   };
@@ -116,6 +118,7 @@ export interface TestChatOverrides {
   id?: string;
   user?: TestUserOverrides | null;
   comment?: string;
+  msgId?: string;
   isHistory?: boolean;
 }
 
@@ -128,7 +131,7 @@ export function makeTestChatEvent(overrides: TestChatOverrides = {}): ChatAutoma
     data: {
       comment: overrides.comment ?? 'Hello from the test chat!',
       method: 'test',
-      msgId: 'msg-chat',
+      msgId: overrides.msgId ?? nextId('msg-chat'),
       isHistory: overrides.isHistory ?? false,
     },
   };
@@ -138,6 +141,7 @@ export interface TestShareOverrides {
   id?: string;
   user?: TestUserOverrides | null;
   action?: number;
+  msgId?: string;
   isHistory?: boolean;
 }
 
@@ -152,7 +156,7 @@ export function makeTestShareEvent(overrides: TestShareOverrides = {}): ShareAut
       followCount: 0,
       shareCount: 7,
       method: 'test',
-      msgId: 'msg-share',
+      msgId: overrides.msgId ?? nextId('msg-share'),
       isHistory: overrides.isHistory ?? false,
     },
   };
@@ -163,6 +167,7 @@ export interface TestSubscribeOverrides {
   user?: TestUserOverrides | null;
   action?: number;
   memberCount?: number;
+  msgId?: string;
   isHistory?: boolean;
 }
 
@@ -176,7 +181,7 @@ export function makeTestSubscribeEvent(overrides: TestSubscribeOverrides = {}): 
       memberCount: overrides.memberCount ?? 128,
       action: overrides.action ?? SUBSCRIBE_MEMBER_ACTION,
       method: 'test',
-      msgId: 'msg-subscribe',
+      msgId: overrides.msgId ?? nextId('msg-subscribe'),
       isHistory: overrides.isHistory ?? false,
     },
   };
@@ -211,6 +216,7 @@ export interface TestLikeOverrides {
   user?: TestUserOverrides | null;
   count?: number;
   total?: number;
+  msgId?: string;
   isHistory?: boolean;
 }
 
@@ -224,7 +230,7 @@ export function makeTestLikeEvent(overrides: TestLikeOverrides = {}): LikeAutoma
       count: overrides.count ?? 5,
       total: overrides.total ?? 128,
       method: 'test',
-      msgId: 'msg-like',
+      msgId: overrides.msgId ?? nextId('msg-like'),
       isHistory: overrides.isHistory ?? false,
     },
   };
@@ -238,6 +244,7 @@ export interface TestSocialOverrides {
   id?: string;
   user?: TestUserOverrides | null;
   action?: number;
+  msgId?: string;
   isHistory?: boolean;
 }
 
@@ -252,7 +259,7 @@ export function makeTestSocialEvent(overrides: TestSocialOverrides = {}): Social
       followCount: 1,
       shareCount: 1,
       method: 'test',
-      msgId: 'msg-social',
+      msgId: overrides.msgId ?? nextId('msg-social'),
       isHistory: overrides.isHistory ?? false,
     },
   };
@@ -266,6 +273,7 @@ export interface TestJoinOverrides {
   id?: string;
   user?: TestUserOverrides | null;
   memberCount?: number;
+  msgId?: string;
   isHistory?: boolean;
 }
 
@@ -280,7 +288,7 @@ export function makeTestJoinEvent(overrides: TestJoinOverrides = {}): JoinAutoma
       memberCount: overrides.memberCount ?? 129,
       action: 0,
       method: 'test',
-      msgId: 'msg-join',
+      msgId: overrides.msgId ?? nextId('msg-join'),
       isHistory: overrides.isHistory ?? false,
     },
   };
@@ -296,6 +304,7 @@ export interface TestRoomStatsOverrides {
   totalUsers?: number;
   popularity?: number;
   anonymous?: number;
+  msgId?: string;
   isHistory?: boolean;
 }
 
@@ -310,7 +319,7 @@ export function makeTestRoomStatsEvent(overrides: TestRoomStatsOverrides = {}): 
       popularity: overrides.popularity ?? 1024,
       anonymous: overrides.anonymous ?? 4,
       method: 'test',
-      msgId: 'msg-room-stats',
+      msgId: overrides.msgId ?? nextId('msg-room-stats'),
       isHistory: overrides.isHistory ?? false,
     },
   };

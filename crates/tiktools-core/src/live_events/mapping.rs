@@ -87,25 +87,28 @@ impl AppCore {
                 "join",
             )),
             tiktools_tiktok::events::CanonicalLiveEvent::Social(social) => {
-                let is_follow = social.action == 1;
-                let is_share = social.action == 3;
-                let (text, i18n_key, point_action, reason) = if is_follow {
-                    (
-                        "followed the creator",
-                        "followedCreator",
-                        PointAction::Follow,
-                        "follow",
-                    )
-                } else if is_share {
-                    ("shared the LIVE", "sharedLive", PointAction::Share, "share")
-                } else {
-                    (
-                        "performed a social action",
-                        "socialAction",
-                        PointAction::Manual,
-                        "social",
-                    )
-                };
+                use tiktools_tiktok::events::SocialKind;
+                let (text, i18n_key, point_action, reason) =
+                    match tiktools_tiktok::events::classify_social_action(social.action) {
+                        SocialKind::Follow => (
+                            "followed the creator",
+                            "followedCreator",
+                            PointAction::Follow,
+                            "follow",
+                        ),
+                        SocialKind::Share => {
+                            ("shared the LIVE", "sharedLive", PointAction::Share, "share")
+                        }
+                        // An unconfirmed social action is shown as a generic
+                        // social event and awards nothing: it is never counted
+                        // as a follow or a share.
+                        SocialKind::Other | SocialKind::Unknown => (
+                            "performed a social action",
+                            "socialAction",
+                            PointAction::Manual,
+                            "social",
+                        ),
+                    };
                 Some((
                     json!({
                         "kind": "social",
@@ -203,10 +206,11 @@ impl AppCore {
                 Some(user_value(&member.user)),
             ),
             tiktools_tiktok::events::CanonicalLiveEvent::Social(social) => (
-                match social.action {
-                    1 => "tiktok.follow",
-                    3 => "tiktok.share",
-                    _ => "tiktok.social",
+                match tiktools_tiktok::events::classify_social_action(social.action) {
+                    tiktools_tiktok::events::SocialKind::Follow => "tiktok.follow",
+                    tiktools_tiktok::events::SocialKind::Share => "tiktok.share",
+                    tiktools_tiktok::events::SocialKind::Other
+                    | tiktools_tiktok::events::SocialKind::Unknown => "tiktok.social",
                 },
                 serde_json::to_value(crate::contracts::SocialAutomationData {
                     action: social.action,

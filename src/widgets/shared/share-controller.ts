@@ -12,7 +12,7 @@ import {
 import { AlertQueue, RecentEventIds, type QueueDropPolicy } from './alert-queue.ts';
 import { realClock, type WidgetClock } from './clock.ts';
 import { routeLiveEvent } from './event-router.ts';
-import { displayNameFor, handleFor } from './event-types.ts';
+import { displayNameFor, eventIdentity, handleFor } from './event-types.ts';
 import { createLogger } from './logger.ts';
 
 const log = createLogger('share');
@@ -70,7 +70,7 @@ export class ShareController {
     if (!routed || routed.kind !== 'share') return 'ignored';
     const { event } = routed;
     if (event.data.isHistory) return 'history';
-    if (!this.recentIds.add(event.id)) return 'duplicate';
+    if (!this.recentIds.add(eventIdentity(event))) return 'duplicate';
     const alert: ShareAlert = {
       id: event.id,
       displayName: displayNameFor(event.user),

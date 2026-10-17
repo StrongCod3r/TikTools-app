@@ -226,12 +226,16 @@ impl AnalyticsEventRecord {
                 record.joins = 1;
             }
             CanonicalLiveEvent::Social(social) => {
-                if social.action == 1 {
-                    record.follows = 1;
-                } else if social.action == 3 {
-                    record.shares = 1;
-                } else {
-                    return None;
+                // Classify through the shared table so analytics, points and the
+                // feed all agree. An unconfirmed action returns `None`: it is
+                // not counted as a follow or a share, but it still flows to
+                // points/automation/feed as `tiktok.social` — this suppresses
+                // the analytics row only.
+                match tiktools_tiktok::events::classify_social_action(social.action) {
+                    tiktools_tiktok::events::SocialKind::Follow => record.follows = 1,
+                    tiktools_tiktok::events::SocialKind::Share => record.shares = 1,
+                    tiktools_tiktok::events::SocialKind::Other
+                    | tiktools_tiktok::events::SocialKind::Unknown => return None,
                 }
             }
             CanonicalLiveEvent::RoomUser(_) | CanonicalLiveEvent::Unknown { .. } => return None,

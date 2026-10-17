@@ -13,6 +13,44 @@ pub use ttl_live_events::{
     RoomUserEvent, SocialEvent, TopViewer,
 };
 
+/// Confirmed `WebcastSocialMessage.action` value for a follow.
+pub const SOCIAL_ACTION_FOLLOW: i64 = 1;
+/// Confirmed `WebcastSocialMessage.action` value for a share.
+pub const SOCIAL_ACTION_SHARE: i64 = 3;
+
+/// Semantic kind of a social message. Mirrors `ttl_live_events::social::SocialKind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocialKind {
+    Follow,
+    Share,
+    /// An observed but unconfirmed `action` code.
+    Other,
+    /// No usable `action` code.
+    Unknown,
+}
+
+/// The single `action` -> kind table for the application.
+///
+/// Classification is driven by `action` alone. `follow_count`/`share_count` are
+/// cumulative room totals, not per-event increments, so deciding by "the first
+/// positive counter" mislabels every share in a room that has any follower.
+///
+/// This is a faithful mirror of `ttl_live_events::social::classify_action` and
+/// is pinned by the shared `social-classification` table. It exists here only
+/// because the `ttl-*` crates are pinned by git rev (see the workspace
+/// `Cargo.toml`); once that rev advances past the classifier it is replaced by
+/// a direct `ttl_live_events::social::classify_action` call and this function
+/// disappears. Every consumer must go through it so the three call sites cannot
+/// drift apart.
+pub fn classify_social_action(action: i64) -> SocialKind {
+    match action {
+        SOCIAL_ACTION_FOLLOW => SocialKind::Follow,
+        SOCIAL_ACTION_SHARE => SocialKind::Share,
+        0 => SocialKind::Unknown,
+        _ => SocialKind::Other,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventMetadata {
     pub method: String,
@@ -115,5 +153,34 @@ impl TikToolsEvent {
 
     pub fn gift_icon_url(&self) -> Option<&str> {
         self.gift.as_ref().and_then(|gift| gift.icon_url.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify_social_action, SocialKind};
+
+    /// The same table the `tiktok-signer` fixture pins. Duplicated here only
+    /// because the fixture lives in the other repository.
+    #[test]
+    fn action_table_is_follow_share_or_unclassified() {
+        assert_eq!(classify_social_action(1), SocialKind::Follow);
+        assert_eq!(classify_social_action(3), SocialKind::Share);
+        assert_eq!(classify_social_action(0), SocialKind::Unknown);
+        for code in [-1, 2, 4, 5, 8, 97, i64::MAX] {
+            assert_eq!(
+                classify_social_action(code),
+                SocialKind::Other,
+                "action {code} must stay unclassified"
+            );
+        }
+    }
+
+    /// The counters are cumulative room totals; they must never influence the
+    /// kind. This is the classifier contract that the counters cannot reach.
+    #[test]
+    fn the_table_has_no_counter_inputs() {
+        // The signature is the guarantee: only `action` is consulted.
+        let _: fn(i64) -> SocialKind = classify_social_action;
     }
 }

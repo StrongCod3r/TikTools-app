@@ -14,7 +14,7 @@ import {
 import { AlertQueue, RecentEventIds, type QueueDropPolicy } from './alert-queue.ts';
 import { realClock, type WidgetClock } from './clock.ts';
 import { routeLiveEvent } from './event-router.ts';
-import { displayNameFor, handleFor, type GiftAutomationData } from './event-types.ts';
+import { displayNameFor, eventIdentity, handleFor, type GiftAutomationData } from './event-types.ts';
 import { createLogger } from './logger.ts';
 
 const log = createLogger('gift');
@@ -118,7 +118,7 @@ export class GiftController {
     if (!routed || routed.kind !== 'gift') return 'ignored';
     const { event } = routed;
     if (event.data.isHistory) return 'history';
-    if (!this.recentIds.add(event.id)) return 'duplicate';
+    if (!this.recentIds.add(eventIdentity(event))) return 'duplicate';
 
     const { count, diamondsEach, totalDiamonds } = giftCounts(event.data);
     const base = {

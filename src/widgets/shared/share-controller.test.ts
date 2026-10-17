@@ -5,7 +5,12 @@ import {
   type ShareAlert,
 } from './share-controller.ts';
 import { createFakeClock } from './test-clock.ts';
-import { makeTestGiftEnvelope, makeTestShareEnvelope } from './test-events.ts';
+import {
+  makeTestGiftEnvelope,
+  makeTestShareEnvelope,
+  makeTestShareEvent,
+  toLiveEnvelope,
+} from './test-events.ts';
 
 function setup(options: { visibleMs?: number; queueCapacity?: number } = {}) {
   const fake = createFakeClock();
@@ -70,5 +75,49 @@ describe('share controller', () => {
     expect(controller.handleEnvelope(makeTestGiftEnvelope())).toBe('ignored');
     expect(controller.handleEnvelope({ topic: 'live.event', data: 'garbage' })).toBe('ignored');
     expect(shown).toHaveLength(1);
+  });
+
+  test('a replayed message with the same msgId is a duplicate under a fresh envelope id', () => {
+    const { shown, controller } = setup();
+    const event = makeTestShareEvent({ msgId: 'shared-789' });
+    expect(controller.handleEnvelope(toLiveEnvelope(event))).toBe('shown');
+    // TikTok replays recent messages after a reconnect; the host mints a new
+    // envelope id for each emission, so only the upstream msgId can catch it.
+    const replay = toLiveEnvelope({ ...event, id: 'tiktok-share-replay-1' });
+    expect(controller.handleEnvelope(replay)).toBe('duplicate');
+    expect(shown).toHaveLength(1);
+  });
+
+  test('two distinct messages from the same user both alert', () => {
+    const { fake, shown, controller } = setup();
+    expect(controller.handleEnvelope(toLiveEnvelope(makeTestShareEvent({ msgId: 'shared-1' })))).toBe(
+      'shown',
+    );
+    expect(controller.handleEnvelope(toLiveEnvelope(makeTestShareEvent({ msgId: 'shared-2' })))).toBe(
+      'queued',
+    );
+    fake.advance(4000);
+    expect(shown).toHaveLength(2);
+  });
+
+  test('the same msgId in another room is not a duplicate', () => {
+    const { fake, shown, controller } = setup();
+    const event = makeTestShareEvent({ msgId: 'shared-1' });
+    expect(
+      controller.handleEnvelope(
+        toLiveEnvelope({ ...event, creator: { uniqueId: 'creator', roomId: 'room-1' } }),
+      ),
+    ).toBe('shown');
+    expect(
+      controller.handleEnvelope(
+        toLiveEnvelope({
+          ...event,
+          id: 'tiktok-share-other-room',
+          creator: { uniqueId: 'creator', roomId: 'room-2' },
+        }),
+      ),
+    ).toBe('queued');
+    fake.advance(4000);
+    expect(shown).toHaveLength(2);
   });
 });

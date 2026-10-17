@@ -298,10 +298,13 @@ pub(crate) fn classify_data_event(event: &NativeLiveEvent) -> DataClass {
             }
         }
         CanonicalLiveEvent::Social(social) => {
-            if social.action == 1 || social.action == 3 {
-                DataClass::Critical // follow / share
-            } else {
-                DataClass::Sheddable
+            match tiktools_tiktok::events::classify_social_action(social.action) {
+                tiktools_tiktok::events::SocialKind::Follow
+                | tiktools_tiktok::events::SocialKind::Share => DataClass::Critical,
+                // An unconfirmed social action has no durable side effect yet,
+                // so it sheds under overload like the other high-volume ticks.
+                tiktools_tiktok::events::SocialKind::Other
+                | tiktools_tiktok::events::SocialKind::Unknown => DataClass::Sheddable,
             }
         }
         // Chat, likes, joins, room stats, and unknown payloads are

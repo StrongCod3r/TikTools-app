@@ -8,7 +8,7 @@
 import { DEFAULT_CHAT_MESSAGE_LIMIT, DEFAULT_RECENT_IDS_CAPACITY } from './config.ts';
 import { RecentEventIds } from './alert-queue.ts';
 import { routeLiveEvent } from './event-router.ts';
-import { displayNameFor, handleFor } from './event-types.ts';
+import { displayNameFor, eventIdentity, handleFor } from './event-types.ts';
 
 export interface ChatMessageView {
   id: string;
@@ -51,7 +51,7 @@ export class ChatController {
     if (!routed || routed.kind !== 'chat') return 'ignored';
     const { event } = routed;
     if (event.data.isHistory) return 'history';
-    if (!this.recentIds.add(event.id)) return 'duplicate';
+    if (!this.recentIds.add(eventIdentity(event))) return 'duplicate';
     const text = event.data.comment.trim();
     if (!text) return 'ignored';
     this.messages = [
