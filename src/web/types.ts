@@ -28,6 +28,17 @@ export type DisplayEvent = UiEvent & {
 export type EventFilter = 'all' | 'chat' | 'gift' | 'like' | 'social';
 
 /**
+ * Which contextual panel is showing beside the feed. `event`/`user`
+ * selections carry the session that owns them so a creator change can
+ * clear a stale selection instead of resolving it against the new feed.
+ */
+export type FeedAsideState =
+  | { kind: 'closed' }
+  | { kind: 'event'; sessionId: string; eventId: number }
+  | { kind: 'user'; sessionId: string; uniqueId: string }
+  | { kind: 'viewers' };
+
+/**
  * Enriched viewer profile for the user card. Feed events carry
  * only identity fields; the leaderboard (when the viewer is
  * tracked) fills in the engagement stats.

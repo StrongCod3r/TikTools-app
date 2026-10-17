@@ -2,80 +2,46 @@
 import { defineVueComponent } from '../vue/component.ts';
 import type { DisplayEvent } from '../types.ts';
 import { t, type Locale } from '../i18n.ts';
-import { IconBolt, IconGift, IconHeart } from './icons.vue';
+import { avatarFallbackColor } from '../features/avatar-color.ts';
+import { formatEventTime, localizedEventText } from '../features/event-text.ts';
+import { IconGift, IconHeart, IconUsers } from './icons.vue';
 import { UserAvatar } from './user-avatar.vue';
 
-function getAvatarColor(username: string): string {
-  const gradients = [
-    'linear-gradient(135deg, #ff0050, #00f2fe)',
-    'linear-gradient(135deg, #fe2c55, #ff7e40)',
-    'linear-gradient(135deg, #69c9d0, #0070f3)',
-    'linear-gradient(135deg, #9b51e0, #fe2c55)',
-    'linear-gradient(135deg, #ff007a, #7928ca)',
-    'linear-gradient(135deg, #00c9ff, #92fe9d)',
-    'linear-gradient(135deg, #f857a6, #ff5858)',
-    'linear-gradient(135deg, #ff8a00, #e52e71)',
-    'linear-gradient(135deg, #06d6a0, #118ab2)',
-  ] as const;
-  let hash = 0;
-  for (let i = 0; i < username.length; i++) {
-    hash = username.charCodeAt(i) + ((hash << 5) - hash);
-  }
-  const idx = Math.abs(hash) % gradients.length;
-  return gradients[idx] ?? gradients[0];
-}
+export type EventAuthor = {
+  uniqueId: string;
+  nickname?: string;
+  avatarUrl?: string;
+};
 
 type EventCardProps = {
   event: DisplayEvent;
   imagesEnabled?: boolean;
   locale?: Locale;
-  /** Opens the user card for the event author. */
-  onAuthorClick?: (user: {
-    uniqueId: string;
-    nickname?: string;
-    avatarUrl?: string;
-  }) => void;
+  /** Highlights the row and marks it `aria-current` in the feed list. */
+  selected?: boolean;
+  /** Selects this event in the shared contextual panel. */
+  onSelect?: (event: DisplayEvent) => void;
+  /** Opens the event author's profile in the shared contextual panel. */
+  onAuthorClick?: (user: EventAuthor) => void;
 };
 
-function localizedText(event: DisplayEvent, locale: Locale): string {
-  const key = event.i18nKey;
-  const p = event.i18nParams ?? {};
-  if (!key) return event.text;
-
-  switch (key) {
-    case 'giftSent':
-      return t(locale, 'giftSent', {
-        count: p.count ?? event.giftDetails?.count ?? 1,
-        giftName: p.giftName ?? event.giftDetails?.name ?? 'Gift',
-        diamonds: p.diamonds ?? event.giftDetails?.diamonds ?? 1,
-      });
-    case 'likeSent': {
-      const c = Number(p.count ?? event.likeCount ?? 1);
-      return c === 1
-        ? t(locale, 'likeSentOne', { count: c })
-        : t(locale, 'likeSentMany', { count: c });
-    }
-    case 'joinedLive':
-      return t(locale, 'joinedLive');
-    case 'followedCreator':
-      return t(locale, 'followedCreator');
-    case 'sharedLive':
-      return t(locale, 'sharedLive');
-    case 'chatMessage':
-      return String(p.comment ?? event.text);
-    default:
-      return event.text;
-  }
-}
-
-const timeFormatters = {
-  en: new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit' }),
-  es: new Intl.DateTimeFormat('es-ES', { hour: '2-digit', minute: '2-digit' }),
-};
-
-function renderEventCard({ event, locale = 'en', imagesEnabled = true, onAuthorClick }: EventCardProps) {
+/**
+ * One compact feed row. Only the fields needed to scan the stream are
+ * visible (avatar, name, a kind glyph, content, timestamp); level, points,
+ * gift cost, ids, and payload details live in the contextual panel so the
+ * row stays badge-free. The avatar and the author name open the author's
+ * profile; the content control selects the event. All three are sibling
+ * buttons — no interactive element is nested inside another.
+ */
+function renderEventCard({
+  event,
+  locale = 'en',
+  imagesEnabled = true,
+  selected = false,
+  onSelect,
+  onAuthorClick,
+}: EventCardProps) {
   const cleanHandle = event.author.replace(/^@+/, '');
-  const level = event.level ?? 1;
   const openAuthor = (): void => {
     onAuthorClick?.({
       uniqueId: cleanHandle,
@@ -87,100 +53,93 @@ function renderEventCard({ event, locale = 'en', imagesEnabled = true, onAuthorC
   const displayName =
     event.nickname && event.nickname !== cleanHandle ? event.nickname : `@${cleanHandle}`;
 
-  const text = localizedText(event, locale);
+  const text = localizedEventText(event, locale);
+  const timeLabel = formatEventTime(locale, event.receivedAt);
 
-  const timeLabel = timeFormatters[locale].format(event.receivedAt);
+  const giftImage =
+    event.kind === 'gift' && imagesEnabled && event.giftDetails?.imageUrl ? (
+      <img
+        class="tt-gift-img"
+        src={event.giftDetails.imageUrl}
+        alt={event.giftDetails.name}
+        loading="lazy"
+        referrerpolicy="no-referrer"
+        decoding="async"
+        onError={(e) => {
+          const img = e.currentTarget as HTMLImageElement;
+          console.warn('[gift-img-error]', event.giftDetails?.name, img.src.slice(0, 80));
+          img.style.display = 'none';
+          const fallback = img.nextElementSibling as HTMLElement | null;
+          if (fallback) fallback.style.display = 'inline-flex';
+        }}
+      />
+    ) : null;
 
   return (
-    <div class={`tiktok-chat-row ${event.kind}`}>
+    <div
+      class={`tiktok-chat-row ${event.kind}${selected ? ' is-selected' : ''}`}
+      role="listitem"
+      aria-current={selected ? 'true' : undefined}
+    >
       <button
         type="button"
         class="tt-user-chip"
         title={`@${cleanHandle}`}
-        aria-label={`@${cleanHandle}`}
-        onClick={onAuthorClick ? openAuthor : undefined}
+        aria-label={t(locale, 'openProfileFor', { user: `@${cleanHandle}` })}
+        onClick={openAuthor}
       >
         <UserAvatar
           uniqueId={cleanHandle}
           nickname={event.nickname}
           avatarUrl={imagesEnabled ? event.avatarUrl : undefined}
-          fallbackStyle={{ background: getAvatarColor(cleanHandle) }}
+          fallbackStyle={{ background: avatarFallbackColor(cleanHandle) }}
         />
       </button>
 
-      {/* Message Content Container */}
-      <div class="tt-content-wrap">
-        <div class="tt-message-line">
-          {/* Level Badge N.º */}
-          <span class="tt-badge-level" title={`Level ${level}`}>
-            <span class="tt-badge-icon">
-              <IconBolt />
+      <button
+        type="button"
+        class="tt-author tt-author-link"
+        title={`@${cleanHandle}`}
+        onClick={openAuthor}
+      >
+        {displayName}
+      </button>
+
+      <button
+        type="button"
+        class="tt-row-content"
+        title={text}
+        aria-label={t(locale, 'openEventDetails', { user: displayName })}
+        onClick={() => onSelect?.(event)}
+      >
+        {event.kind === 'gift' ? (
+          <>
+            {giftImage}
+            <span
+              class="tt-gift-icon"
+              style={{ display: giftImage ? 'none' : 'inline-flex' }}
+              title={event.giftDetails?.name || 'Gift'}
+            >
+              <IconGift />
             </span>
-            <span class="tt-badge-text">{t(locale, 'levelBadge', { level })}</span>
+          </>
+        ) : null}
+        {event.kind === 'like' ? (
+          <span class="tt-kind-icon">
+            <IconHeart />
           </span>
+        ) : null}
+        {event.kind === 'member' || event.kind === 'social' ? (
+          <span class="tt-kind-icon">
+            <IconUsers />
+          </span>
+        ) : null}
+        <span class={`tt-text tt-${event.kind}-text`}>{text}</span>
+      </button>
 
-          {/* Author handle/nickname */}
-          <button
-            type="button"
-            class="tt-author tt-author-link"
-            title={`@${cleanHandle}`}
-            onClick={onAuthorClick ? openAuthor : undefined}
-          >
-            {displayName}
-          </button>
-
-          {/* Content text depending on event kind */}
-          {event.kind === 'chat' ? (
-            <span class="tt-chat-text">{text}</span>
-          ) : event.kind === 'gift' ? (
-            <span class="tt-gift-text">
-              {imagesEnabled && event.giftDetails?.imageUrl ? (
-                <img
-                  class="tt-gift-img"
-                  src={event.giftDetails.imageUrl}
-                  alt={event.giftDetails.name}
-                  loading="lazy"
-                  referrerpolicy="no-referrer"
-                  decoding="async"
-                  onError={(e) => {
-                    const img = e.currentTarget as HTMLImageElement;
-                    console.warn('[gift-img-error]', event.giftDetails?.name, img.src.slice(0, 80));
-                    img.style.display = 'none';
-                    const fallback = img.nextElementSibling as HTMLElement | null;
-                    if (fallback) fallback.style.display = 'inline-flex';
-                  }}
-                />
-              ) : null}
-              <span
-                class="tt-gift-icon"
-                style={{ display: imagesEnabled && event.giftDetails?.imageUrl ? 'none' : 'inline-flex' }}
-                title={event.giftDetails?.name || 'Gift'}
-              >
-                <IconGift />
-              </span>{' '}
-              {text}
-            </span>
-          ) : event.kind === 'like' ? (
-            <span class="tt-like-text">
-              <span style={{ display: 'inline-flex', verticalAlign: 'middle', marginRight: '4px' }}>
-                <IconHeart />
-              </span>
-              {text}
-            </span>
-          ) : (
-            <span class="tt-social-text">{text}</span>
-          )}
-        </div>
-      </div>
-
-      {/* Point Earned Pill or Time */}
-      <div class="tt-row-tail">
-        {typeof event.pointsDelta === 'number' && event.pointsDelta > 0 ? (
-          <span class="tt-points-badge">{t(locale, 'ptsEarned', { amount: event.pointsDelta })}</span>
-        ) : (
-          <time class="tt-timestamp">{timeLabel}</time>
-        )}
-      </div>
+      <time class="tt-timestamp" datetime={new Date(event.receivedAt).toISOString()}>
+        {timeLabel}
+      </time>
     </div>
   );
 }
@@ -188,7 +147,7 @@ function renderEventCard({ event, locale = 'en', imagesEnabled = true, onAuthorC
 // Stateful components skip updates when their immutable event and other
 // props are unchanged, even as the parent appends new feed entries.
 export const EventCard = defineVueComponent<EventCardProps>(
-  ['event', 'locale', 'imagesEnabled', 'onAuthorClick'],
+  ['event', 'locale', 'imagesEnabled', 'selected', 'onSelect', 'onAuthorClick'],
   (props) => () => renderEventCard(props),
 );
 

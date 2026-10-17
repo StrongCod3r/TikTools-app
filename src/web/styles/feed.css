@@ -252,12 +252,14 @@
   color: var(--text-muted);
 }
 
-/* Two-column live layout: stream left, contributors right. */
+/* Two-column live layout: stream left, shared contextual panel right. */
 .feed-layout {
   display: flex;
   flex: 1;
   min-height: 0;
   min-width: 0;
+  position: relative;
+  overflow: hidden;
 }
 
 .feed-main {
@@ -268,8 +270,11 @@
   min-height: 0;
 }
 
-.feed-side {
-  width: 248px;
+/* One panel, three modes (viewers / event details / user profile). Replaces
+   the old floating user card so nothing is painted over the stream. */
+.feed-aside {
+  width: 300px;
+  max-width: 320px;
   flex: none;
   min-height: 0;
   display: flex;
@@ -279,40 +284,49 @@
   background: var(--panel);
 }
 
-/* Collapsible contributors rail: header owns the toggle so the panel reads
-   as one minimalist column instead of a second bordered card stack. */
-.feed-side__head {
+.feed-aside__head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--line);
   flex-shrink: 0;
-  min-height: 37px;
+  min-height: 40px;
 }
-.feed-side__title {
+
+.feed-aside__tabs {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 2px;
   min-width: 0;
+}
+
+.feed-aside__tab {
+  padding: 3px 8px;
+  border-radius: 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-muted);
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-  color: var(--text-muted);
+  white-space: nowrap;
 }
-.feed-side__count {
-  padding: 1px 7px;
-  border-radius: 9px;
+.feed-aside__tab:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+.feed-aside__tab.is-active {
+  color: var(--text);
   background: var(--input-bg);
-  border: 1px solid var(--line);
-  font-size: 10.5px;
-  font-weight: 800;
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
+  border-color: var(--line);
 }
-.feed-side__toggle {
+.feed-aside__tab:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+.feed-aside__close {
   width: 26px;
   height: 26px;
   padding: 0;
@@ -321,49 +335,212 @@
   border: 1px solid transparent;
   color: var(--text-muted);
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
-.feed-side__toggle:hover {
+.feed-aside__close:hover {
   color: var(--text);
   background: rgba(255, 255, 255, 0.05);
   border-color: var(--line);
-  transform: none;
 }
-.feed-side__body {
+
+.feed-aside__body {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 10px 10px;
+  padding: 10px;
 }
 
-/* Collapsed: slim rail with just the toggle. */
-.feed-side.is-collapsed {
+.feed-aside__empty {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+}
+
+/* Embedded profile card: the aside owns the chrome, so the card is flat. */
+.feed-aside .tt-user-card {
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Collapsed on desktop: a slim rail that reopens the panel. */
+.feed-aside:not(.is-open) {
   width: 44px;
 }
-.feed-side.is-collapsed .feed-side__head {
+.feed-aside:not(.is-open) .feed-aside__head {
+  flex: 1;
   justify-content: center;
   padding: 8px 4px;
   border-bottom: none;
 }
+.feed-aside__open {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.feed-aside__open:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+.feed-aside__open-label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
 
-@media (max-width: 960px) {
-  .feed-layout {
-    flex-direction: column;
+/* Event details mode. */
+.feed-details {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.feed-details__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.feed-details__avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 800;
+  color: #ffffff;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+.feed-details__avatar.fallback {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+}
+.feed-details__identity {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.feed-details__name {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.feed-details__handle {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.feed-details__text {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.42;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.feed-details__rows {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.feed-details__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 7px;
+  border-radius: 7px;
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  min-width: 0;
+}
+.feed-details__row dt {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.feed-details__row dd {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Narrow windows: the panel becomes a right-side drawer with a backdrop
+   instead of squeezing the stream into an unusable column. */
+.feed-aside-backdrop {
+  display: none;
+}
+
+@media (max-width: 900px) {
+  .feed-aside {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(320px, 86vw);
+    max-width: none;
+    z-index: var(--z-popover);
+    transform: translateX(100%);
+    transition: transform 0.18s ease;
+    box-shadow: -8px 0 28px rgba(0, 0, 0, 0.4);
   }
-  .feed-side {
-    width: 100%;
-    border-left: none;
-    border-top: 1px solid var(--line);
-    overflow: visible;
+  .feed-aside.is-open {
+    transform: translateX(0);
   }
-  .feed-side.is-collapsed {
-    width: 100%;
+  /* No collapsed rail on narrow screens: it would eat the stream width. */
+  .feed-aside:not(.is-open) {
+    display: none;
   }
-  .feed-side.is-collapsed .feed-side__head {
-    justify-content: space-between;
-    border-bottom: 1px solid var(--line);
+  .feed-aside__open-label {
+    writing-mode: horizontal-tb;
   }
-  .feed-side__body {
-    overflow: visible;
+  .feed-aside-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: calc(var(--z-popover) - 1);
+    background: rgba(0, 0, 0, 0.45);
+    border: none;
+    padding: 0;
+    cursor: pointer;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .feed-aside {
+    transition: none;
+  }
+}
+
+:root[data-theme="light"] .feed-aside__avatar {
+  border-color: rgba(15, 23, 42, 0.12);
+}
+:root[data-theme="light"] .feed-aside-backdrop {
+  background: rgba(15, 23, 42, 0.28);
 }
 

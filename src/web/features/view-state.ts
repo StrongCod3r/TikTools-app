@@ -73,6 +73,12 @@ export interface ConnectionsViewState {
   openServers?: Record<string, boolean>;
 }
 
+/** Feed contextual panel preference. Only the open/closed state is stored;
+ *  selected events and users are session data and are never persisted. */
+export interface AsideViewState {
+  open?: boolean;
+}
+
 export interface ViewState {
   tab?: string;
   feed?: FeedViewState;
@@ -82,6 +88,7 @@ export interface ViewState {
   widgets?: WidgetsViewState;
   plugins?: PluginsViewState;
   connections?: ConnectionsViewState;
+  aside?: AsideViewState;
 }
 
 function readRaw(): string | null {
@@ -221,6 +228,12 @@ function cleanConnections(value: unknown): ConnectionsViewState | undefined {
   return Object.keys(cleaned).length > 0 ? (cleaned as ConnectionsViewState) : undefined;
 }
 
+function cleanAside(value: unknown): AsideViewState | undefined {
+  if (!isRecord(value)) return undefined;
+  const cleaned = pickDefined({ open: cleanBoolean(value['open']) });
+  return Object.keys(cleaned).length > 0 ? (cleaned as AsideViewState) : undefined;
+}
+
 function cleanOpenServers(value: unknown): Record<string, boolean> | undefined {
   if (!isRecord(value)) return undefined;
   const result: Record<string, boolean> = {};
@@ -256,6 +269,7 @@ export function loadViewState(): ViewState {
     widgets: cleanWidgets(parsed['widgets']),
     plugins: cleanPlugins(parsed['plugins']),
     connections: cleanConnections(parsed['connections']),
+    aside: cleanAside(parsed['aside']),
   });
   return state as ViewState;
 }

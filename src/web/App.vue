@@ -106,6 +106,7 @@ const activePluginBackend = computed(() => {
         :auto-scroll="app.autoScroll"
         :unread-count="app.unreadCount"
         :dropped-ui-events="app.droppedUiEvents"
+        :session-key="app.activeCreator"
         :on-filter-change="app.setFilter"
         :on-search-change="app.setSearchQuery"
         :on-toggle-auto-scroll="app.handleToggleAutoScroll"

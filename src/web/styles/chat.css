@@ -93,17 +93,34 @@
   box-shadow: 0 1px 4px rgba(0,0,0,0.3);
 }
 
-.tt-content-wrap {
+/* The event's content control: selects the row in the shared panel. It is a
+   sibling of the avatar/author buttons, never nested inside them. */
+.tt-row-content {
   flex: 1;
   min-width: 0;
-  display: flex;
-  align-items: center;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.tt-message-line {
-  display: inline;
-  word-break: break-word;
-  overflow-wrap: anywhere;
+.tt-kind-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  color: currentColor;
+  flex-shrink: 0;
+}
+.tt-kind-icon svg {
+  width: 14px;
+  height: 14px;
 }
 
 .tt-badge-level {
@@ -149,7 +166,6 @@
 .tt-author {
   font-weight: 700;
   color: #e6e8ef;
-  margin-right: 5px;
   font-size: 12.5px;
   white-space: nowrap;
 }
@@ -222,40 +238,40 @@
 }
 :root[data-theme="light"] .tt-like-text { color: #be123c; }
 
-.tt-social-text {
+.tt-social-text,
+.tt-member-text {
   color: #9aa3b8;
   font-style: italic;
   font-weight: 400;
 }
-:root[data-theme="light"] .tt-social-text { color: #475569; }
+:root[data-theme="light"] .tt-social-text,
+:root[data-theme="light"] .tt-member-text { color: #475569; }
 
-.tt-row-tail {
-  flex-shrink: 0;
-  margin-left: auto;
-  padding-left: 8px;
-  display: flex;
-  align-items: center;
+/* Selected row: a narrow accent bar and a muted background, not a bright
+   border around every item. The bar is a pseudo-element so the gift row's
+   own left border keeps its category tint. */
+.tiktok-chat-row.is-selected {
+  background: rgba(37, 244, 238, 0.1);
+  border-color: rgba(37, 244, 238, 0.28);
 }
-
-.tt-points-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 6px;
-  border-radius: 10px;
-  background: rgba(4, 211, 205, 0.14);
-  border: 1px solid rgba(37, 244, 238, 0.38);
-  color: #0ff0e6;
-  font-size: 10px;
-  font-weight: 800;
-  line-height: 14px;
-  white-space: nowrap;
-  box-shadow: 0 1px 6px rgba(37,244,238,0.15);
+.tiktok-chat-row.is-selected::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--tt-cyan);
 }
-:root[data-theme="light"] .tt-points-badge {
+:root[data-theme="light"] .tiktok-chat-row.is-selected {
   background: #ecfeff;
-  border-color: #06b6d4;
-  color: #0e7490;
-  box-shadow: 0 1px 3px rgba(6,182,212,0.18);
+  border-color: #a5f3fc;
+}
+
+.tiktok-chat-row:focus-within {
+  outline: 1px solid var(--line-focus);
+  outline-offset: -1px;
 }
 
 .tt-timestamp {

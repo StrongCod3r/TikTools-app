@@ -63,6 +63,7 @@ test('save and load round-trips every section', () => {
     showCookie: true,
     openServers: { srv1: true, srv2: false },
   });
+  saveViewState('aside', { open: true });
 
   const state = loadViewState();
   expect(state.tab).toBe('behavior');
@@ -94,11 +95,12 @@ test('save and load round-trips every section', () => {
     showCookie: true,
     openServers: { srv1: true, srv2: false },
   });
+  expect(state.aside).toEqual({ open: true });
 
   // Sections never clobber each other: the blob holds all of them.
   const stored = readStored();
   expect(stored?.['version']).toBe(1);
-  expect(Object.keys(stored ?? {})).toHaveLength(9);
+  expect(Object.keys(stored ?? {})).toHaveLength(10);
 });
 
 test('empty storage and corrupt JSON load as empty state', () => {

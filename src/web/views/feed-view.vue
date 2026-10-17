@@ -1,17 +1,17 @@
 <script lang="tsx">
-import { ref } from 'vue';
+import { computed, onUnmounted, ref, watch } from 'vue';
 import type { VNode, VNodeRef } from 'vue';
 
-import { EventCard } from '../components/event-card.vue';
-import { IconArrowDown, IconBolt, IconChat, IconChevronLeft, IconChevronRight, IconDot, IconGift, IconHeart, IconPause, IconRadio, IconTrash, IconUsers } from '../components/icons.vue';
+import { EventCard, type EventAuthor } from '../components/event-card.vue';
+import { FeedAside } from '../components/FeedAside.vue';
+import { IconArrowDown, IconBolt, IconChat, IconDot, IconGift, IconHeart, IconPause, IconRadio, IconTrash, IconUsers } from '../components/icons.vue';
 import { Button } from '../components/ui/Button.vue';
 import { SearchInput } from '../components/ui/TextInput.vue';
 import { Tooltip } from '../components/ui/Tooltip.vue';
-import { UserCard } from '../components/user-card.vue';
 import { defineVueComponent } from '../vue/component.ts';
+import { loadViewState, saveViewState } from '../features/view-state.ts';
 import { t, type Locale } from '../i18n.ts';
-import type { DisplayEvent, EventFilter, TopViewerPayload, UserCardUser, ViewerRecord } from '../types.ts';
-import { TopViewersRibbon } from '../components/top-viewers.vue';
+import type { DisplayEvent, EventFilter, FeedAsideState, TopViewerPayload, UserCardUser, ViewerRecord } from '../types.ts';
 
 type FeedViewProps = {
   locale: Locale;
@@ -26,17 +26,14 @@ type FeedViewProps = {
   autoScroll: boolean;
   unreadCount: number;
   droppedUiEvents?: number;
+  /** Identity of the current session; a change clears a stale selection. */
+  sessionKey?: string;
   onFilterChange: (f: EventFilter) => void;
   onSearchChange: (q: string) => void;
   onToggleAutoScroll: () => void;
   onClearFeed: () => void;
   streamContainerRef: (el: Element | null) => void;
 };
-
-/** Identity fields every feed section can offer to the user card. */
-type UserSource = { uniqueId: string; nickname?: string; avatarUrl?: string };
-
-const VIEWERS_COLLAPSED_KEY = 'tiktok-live-viewers-collapsed';
 
 /** Shared filter memo across renders: re-renders from unrelated state
  * reuse the last scan instead of re-filtering up to 300 events. */
@@ -45,12 +42,24 @@ const filterCache = new WeakMap<
   { key: string; result: DisplayEvent[] }
 >;
 
-function readViewersCollapsed(): boolean {
-  try {
-    return localStorage.getItem(VIEWERS_COLLAPSED_KEY) === '1';
-  } catch {
-    return false;
-  }
+/** Fills a viewer's engagement stats from the leaderboard when tracked,
+ * leaving untracked stats absent so the card shows N/A, never a fake zero. */
+function enrichUser(source: EventAuthor, leaderboard: ViewerRecord[]): UserCardUser {
+  const record = leaderboard.find((entry) => entry.uniqueId === source.uniqueId);
+  return {
+    uniqueId: source.uniqueId,
+    nickname: source.nickname ?? record?.nickname,
+    avatarUrl: source.avatarUrl ?? record?.avatarUrl,
+    points: record?.points,
+    level: record?.level,
+    isSubscriber: record?.isSubscriber,
+    totalChats: record?.totalChats,
+    totalCoins: record?.totalCoins,
+    totalLikes: record?.totalLikes,
+    totalShares: record?.totalShares,
+    firstSeen: record?.firstSeen,
+    lastSeen: record?.lastSeen,
+  };
 }
 
 function renderFeedView({
@@ -71,17 +80,25 @@ function renderFeedView({
   onToggleAutoScroll,
   onClearFeed,
   streamContainerRef,
-  viewersCollapsed,
-  onToggleViewers,
+  asideState,
+  selectedEvent,
   selectedUser,
+  onSelectEvent,
   onOpenUser,
-  onCloseUser,
+  onShowViewers,
+  onShowDetails,
+  onShowProfile,
+  onCloseAside,
 }: FeedViewProps & {
-  viewersCollapsed: boolean;
-  onToggleViewers: () => void;
+  asideState: FeedAsideState;
+  selectedEvent: DisplayEvent | null;
   selectedUser: UserCardUser | null;
-  onOpenUser: (source: UserSource) => void;
-  onCloseUser: () => void;
+  onSelectEvent: (event: DisplayEvent) => void;
+  onOpenUser: (source: EventAuthor) => void;
+  onShowViewers: () => void;
+  onShowDetails: () => void;
+  onShowProfile: () => void;
+  onCloseAside: () => void;
 }) {
   const filterButtons: Array<{ key: EventFilter; tooltip: string; icon: VNode }> = [
     { key: 'all', tooltip: t(locale, 'filterAll'), icon: <IconBolt /> },
@@ -123,12 +140,6 @@ function renderFeedView({
   const windowed = autoScroll && filter === 'all' && !normalizedQuery && filteredEvents.length > renderLimit;
   const renderedEvents = windowed ? filteredEvents.slice(-renderLimit) : filteredEvents;
 
-  const viewersTotal = liveViewers > 0
-    ? liveViewers
-    : topViewers.length > 0
-      ? topViewers.length
-      : leaderboard.length;
-
   return (
     <main class="feed-pane">
       <div class="feed-toolbar">
@@ -153,7 +164,7 @@ function renderFeedView({
 
       <div class="feed-layout">
         <section class="feed-main">
-          <div class="feed-stream" ref={streamContainerRef as VNodeRef}>
+          <div class="feed-stream" role="list" ref={streamContainerRef as VNodeRef}>
             {filteredEvents.length === 0 ? (
               <div class="feed-empty">
                 <div class="empty-icon empty-icon--illustration">
@@ -163,7 +174,15 @@ function renderFeedView({
               </div>
             ) : (
               renderedEvents.map((ev) => (
-                <EventCard key={ev.id} event={ev} locale={locale} imagesEnabled={imagesEnabled} onAuthorClick={onOpenUser} />
+                <EventCard
+                  key={ev.id}
+                  event={ev}
+                  locale={locale}
+                  imagesEnabled={imagesEnabled}
+                  selected={asideState.kind === 'event' && asideState.eventId === ev.id}
+                  onSelect={onSelectEvent}
+                  onAuthorClick={onOpenUser}
+                />
               ))
             )}
           </div>
@@ -202,60 +221,22 @@ function renderFeedView({
           </footer>
         </section>
 
-        <aside class={`feed-side${viewersCollapsed ? ' is-collapsed' : ''}`} aria-label={t(locale, 'topContributors')}>
-          <div class="feed-side__head">
-            {viewersCollapsed ? (
-              <Tooltip text={t(locale, 'expandViewers')} position="left">
-                <button
-                  type="button"
-                  class="feed-side__toggle"
-                  aria-label={t(locale, 'expandViewers')}
-                  aria-expanded="false"
-                  onClick={onToggleViewers}
-                >
-                  <IconChevronLeft size={15} />
-                </button>
-              </Tooltip>
-            ) : (
-              <>
-                <span class="feed-side__title">
-                  {t(locale, 'viewersCount')}
-                  <span class="feed-side__count">{viewersTotal}</span>
-                </span>
-                <Tooltip text={t(locale, 'collapseViewers')} position="left">
-                  <button
-                    type="button"
-                    class="feed-side__toggle"
-                    aria-label={t(locale, 'collapseViewers')}
-                    aria-expanded="true"
-                    onClick={onToggleViewers}
-                  >
-                    <IconChevronRight size={15} />
-                  </button>
-                </Tooltip>
-              </>
-            )}
-          </div>
-          {viewersCollapsed ? null : (
-            <div class="feed-side__body">
-              <TopViewersRibbon
-                locale={locale}
-                imagesEnabled={imagesEnabled}
-                topViewers={topViewers}
-                leaderboard={leaderboard}
-                liveViewers={liveViewers}
-                onSelect={onOpenUser}
-              />
-            </div>
-          )}
-        </aside>
+        <FeedAside
+          locale={locale}
+          imagesEnabled={imagesEnabled}
+          state={asideState}
+          event={selectedEvent}
+          user={selectedUser}
+          topViewers={topViewers}
+          leaderboard={leaderboard}
+          liveViewers={liveViewers}
+          onClose={onCloseAside}
+          onShowViewers={onShowViewers}
+          onShowDetails={onShowDetails}
+          onShowProfile={onShowProfile}
+          onOpenUser={onOpenUser}
+        />
       </div>
-
-      {selectedUser ? (
-        <div class="tt-user-card-overlay">
-          <UserCard user={selectedUser} locale={locale} onClose={onCloseUser} />
-        </div>
-      ) : null}
 
       {!autoScroll && unreadCount > 0 ? (
         <div class="feed-floating-bar">
@@ -282,6 +263,7 @@ export const FeedView = defineVueComponent<FeedViewProps>(
     'autoScroll',
     'unreadCount',
     'droppedUiEvents',
+    'sessionKey',
     'onFilterChange',
     'onSearchChange',
     'onToggleAutoScroll',
@@ -289,46 +271,93 @@ export const FeedView = defineVueComponent<FeedViewProps>(
     'streamContainerRef',
   ],
   (props) => {
-    const viewersCollapsed = ref(readViewersCollapsed());
-    const selectedUser = ref<UserCardUser | null>(null);
-    const onToggleViewers = (): void => {
-      viewersCollapsed.value = !viewersCollapsed.value;
-      try {
-        localStorage.setItem(VIEWERS_COLLAPSED_KEY, viewersCollapsed.value ? '1' : '0');
-      } catch {
-        // Collapse preference is best-effort when storage is unavailable.
+    const savedAside = loadViewState().aside;
+    const asideState = ref<FeedAsideState>(
+      savedAside?.open === false ? { kind: 'closed' } : { kind: 'viewers' },
+    );
+    const selectedEventId = ref<number | null>(null);
+    const selectedUserSource = ref<EventAuthor | null>(null);
+
+    const sessionId = (): string => props.sessionKey ?? '';
+    const selectedEvent = computed<DisplayEvent | null>(() => {
+      const state = asideState.value;
+      if (state.kind !== 'event') return null;
+      return props.events.find((event) => event.id === state.eventId) ?? null;
+    });
+    const selectedUser = computed<UserCardUser | null>(() => {
+      const source = selectedUserSource.value;
+      return source ? enrichUser(source, props.leaderboard ?? []) : null;
+    });
+
+    const selectEvent = (event: DisplayEvent): void => {
+      selectedEventId.value = event.id;
+      asideState.value = { kind: 'event', sessionId: sessionId(), eventId: event.id };
+    };
+    const openUser = (source: EventAuthor): void => {
+      selectedUserSource.value = source;
+      asideState.value = { kind: 'user', sessionId: sessionId(), uniqueId: source.uniqueId };
+    };
+    const showViewers = (): void => {
+      asideState.value = { kind: 'viewers' };
+    };
+    const showDetails = (): void => {
+      if (selectedEventId.value !== null) {
+        asideState.value = { kind: 'event', sessionId: sessionId(), eventId: selectedEventId.value };
       }
     };
-    // Feed sections only carry identity fields; the leaderboard
-    // fills in the engagement stats for tracked viewers.
-    const onOpenUser = (source: UserSource): void => {
-      const record = props.leaderboard?.find((entry) => entry.uniqueId === source.uniqueId);
-      selectedUser.value = {
-        uniqueId: source.uniqueId,
-        nickname: source.nickname ?? record?.nickname,
-        avatarUrl: source.avatarUrl ?? record?.avatarUrl,
-        points: record?.points,
-        level: record?.level,
-        isSubscriber: record?.isSubscriber,
-        totalChats: record?.totalChats,
-        totalCoins: record?.totalCoins,
-        totalLikes: record?.totalLikes,
-        totalShares: record?.totalShares,
-        firstSeen: record?.firstSeen,
-        lastSeen: record?.lastSeen,
-      };
+    const showProfile = (): void => {
+      const source = selectedUserSource.value;
+      if (source) {
+        asideState.value = { kind: 'user', sessionId: sessionId(), uniqueId: source.uniqueId };
+      }
     };
-    const onCloseUser = (): void => {
-      selectedUser.value = null;
+    const closeAside = (): void => {
+      asideState.value = { kind: 'closed' };
     };
+
+    // Persist only the open/closed preference (never event or user data),
+    // and restore focus to whatever opened the panel when it closes.
+    let restoreFocus: HTMLElement | null = null;
+    watch(asideState, (state, previous) => {
+      if (previous?.kind === 'closed' && state.kind !== 'closed') {
+        restoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      }
+      if (state.kind === 'closed' && restoreFocus) {
+        restoreFocus.focus?.();
+        restoreFocus = null;
+      }
+      saveViewState('aside', { open: state.kind !== 'closed' });
+    });
+
+    // A creator switch is a new session: drop the stale selection so it can
+    // never resolve against the new feed, but keep the panel's open state.
+    watch(
+      () => props.sessionKey,
+      () => {
+        selectedEventId.value = null;
+        selectedUserSource.value = null;
+        asideState.value = asideState.value.kind === 'closed' ? { kind: 'closed' } : { kind: 'viewers' };
+      },
+    );
+
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape' && asideState.value.kind !== 'closed') closeAside();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    onUnmounted(() => window.removeEventListener('keydown', onKeyDown));
+
     return () =>
       renderFeedView({
         ...props,
-        viewersCollapsed: viewersCollapsed.value,
-        onToggleViewers,
+        asideState: asideState.value,
+        selectedEvent: selectedEvent.value,
         selectedUser: selectedUser.value,
-        onOpenUser,
-        onCloseUser,
+        onSelectEvent: selectEvent,
+        onOpenUser: openUser,
+        onShowViewers: showViewers,
+        onShowDetails: showDetails,
+        onShowProfile: showProfile,
+        onCloseAside: closeAside,
       });
   },
 );

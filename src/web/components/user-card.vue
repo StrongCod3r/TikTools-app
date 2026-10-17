@@ -10,6 +10,11 @@ type UserCardProps = {
   user: UserCardUser;
   locale: Locale;
   onClose: () => void;
+  /**
+   * When false the card is embedded in a host panel (the shared feed aside)
+   * that owns dismissal: no outside/ESC listeners and no close button.
+   */
+  dismissable?: boolean;
 };
 
 function formatStamp(locale: Locale, value: number): string {
@@ -27,24 +32,29 @@ function formatStamp(locale: Locale, value: number): string {
  * when the viewer is tracked; untracked viewers show identity only.
  */
 export const UserCard = defineVueComponent<UserCardProps>(
-  ['user', 'locale', 'onClose'],
+  ['user', 'locale', 'onClose', 'dismissable'],
   (props) => {
     const cardRef = ref<HTMLElement | null>(null);
+    const dismissable = (): boolean => props.dismissable !== false;
 
     const onPointerDown = (event: PointerEvent): void => {
+      if (!dismissable()) return;
       const card = cardRef.value;
       if (card && !card.contains(event.target as Node)) props.onClose();
     };
     const onKeyDown = (event: KeyboardEvent): void => {
+      if (!dismissable()) return;
       if (event.key === 'Escape') props.onClose();
     };
 
-    document.addEventListener('pointerdown', onPointerDown, true);
-    window.addEventListener('keydown', onKeyDown);
-    onUnmounted(() => {
-      document.removeEventListener('pointerdown', onPointerDown, true);
-      window.removeEventListener('keydown', onKeyDown);
-    });
+    if (dismissable()) {
+      document.addEventListener('pointerdown', onPointerDown, true);
+      window.addEventListener('keydown', onKeyDown);
+      onUnmounted(() => {
+        document.removeEventListener('pointerdown', onPointerDown, true);
+        window.removeEventListener('keydown', onKeyDown);
+      });
+    }
 
     return () => {
       const { user, locale } = props;
@@ -85,14 +95,16 @@ export const UserCard = defineVueComponent<UserCardProps>(
               </span>
               <span class="tt-badge-text">{t(locale, 'levelBadge', { level })}</span>
             </span>
-            <button
-              type="button"
-              class="tt-user-card__close"
-              aria-label={t(locale, 'dialogClose')}
-              onClick={props.onClose}
-            >
-              <IconClose size={14} />
-            </button>
+            {dismissable() ? (
+              <button
+                type="button"
+                class="tt-user-card__close"
+                aria-label={t(locale, 'dialogClose')}
+                onClick={props.onClose}
+              >
+                <IconClose size={14} />
+              </button>
+            ) : null}
           </div>
 
           {user.isSubscriber ? (

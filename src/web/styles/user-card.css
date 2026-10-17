@@ -1,15 +1,8 @@
 /* ==========================================================================
-   User card — closable profile popover, opened from every feed section
-   (stream rows and contributor list).
+   User card — closable profile panel, opened from every feed section
+   (stream rows and contributor list). Embedded in the shared feed aside it
+   is rendered flat (see `.feed-aside .tt-user-card`).
    ========================================================================== */
-
-.tt-user-card-overlay {
-  position: absolute;
-  top: 56px;
-  right: 14px;
-  z-index: 40;
-  animation: message-in 0.16s cubic-bezier(0.2, 0.9, 0.3, 1);
-}
 
 .tt-user-card {
   width: 232px;
