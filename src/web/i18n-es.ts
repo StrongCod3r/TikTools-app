@@ -504,6 +504,7 @@ export const spanish: Record<TranslationKey, string> = {
   detailPoints: 'Puntos ganados',
   detailTime: 'Hora',
   detailMessageId: 'ID del mensaje',
+  detailRawComment: 'Comentario original',
   kindChat: 'Chat',
   kindGift: 'Regalo',
   kindLike: 'Like',

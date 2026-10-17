@@ -11,6 +11,7 @@ import type {
   NodeDefinition,
   WorkflowGraph,
 } from '../automation/types.ts';
+import type { LiveEmote } from './emotes/types.ts';
 import type { JsonValue } from './json.ts';
 
 /** Full-JSON settings values: nested objects and arrays round-trip untouched. */
@@ -78,6 +79,14 @@ export type UiEvent = {
     imageUrl?: string;
   };
   likeCount?: number;
+  /**
+   * Emote metadata for a chat comment, when the producer supplies it. Optional
+   * and absent from the current native pipeline: the automation contract
+   * cannot project repeated protobuf messages yet, so this stays a
+   * forward-compatible slot rather than a field the host always fills.
+   * Renderers must fall back to the raw `text` when it is missing.
+   */
+  emotes?: LiveEmote[];
   /** Stable TikTok message identity (string: snowflake ids exceed JS safe ints). */
   msgId?: string;
   /** True when TikTok replays the message as room history (reconnect replay). */

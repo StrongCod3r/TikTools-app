@@ -206,6 +206,19 @@
   background: rgba(255,255,255,0.94);
 }
 
+/* Inline chat emotes. The `em` box keeps the row height stable when an image
+   replaces a shortcode, and `vertical-align` matches the text baseline. */
+.chat-emote {
+  display: inline-block;
+  width: 1.4em;
+  height: 1.4em;
+  vertical-align: -0.25em;
+  object-fit: contain;
+  flex-shrink: 0;
+  margin: 0 1px;
+  border-radius: 3px;
+}
+
 .tt-gift-icon {
   display: inline-flex;
   align-items: center;

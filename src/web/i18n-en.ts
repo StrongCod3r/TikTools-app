@@ -500,6 +500,7 @@ export const english = {
   detailPoints: 'Points earned',
   detailTime: 'Time',
   detailMessageId: 'Message ID',
+  detailRawComment: 'Original comment',
   kindChat: 'Chat',
   kindGift: 'Gift',
   kindLike: 'Like',

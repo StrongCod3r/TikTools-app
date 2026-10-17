@@ -4,6 +4,7 @@ import type { DisplayEvent } from '../types.ts';
 import { t, type Locale } from '../i18n.ts';
 import { avatarFallbackColor } from '../features/avatar-color.ts';
 import { formatEventTime, localizedEventText } from '../features/event-text.ts';
+import { ChatRichText } from './chat-rich-text.vue';
 import { IconGift, IconHeart, IconUsers } from './icons.vue';
 import { UserAvatar } from './user-avatar.vue';
 
@@ -55,6 +56,12 @@ function renderEventCard({
 
   const text = localizedEventText(event, locale);
   const timeLabel = formatEventTime(locale, event.receivedAt);
+
+  // Emote resolution only applies to chat rows that could actually contain an
+  // emote: the event supplies metadata, or the comment has a bracketed token.
+  // Every other row keeps the plain string path, so the hot feed is unchanged.
+  const richText =
+    event.kind === 'chat' && ((event.emotes?.length ?? 0) > 0 || text.includes('['));
 
   const giftImage =
     event.kind === 'gift' && imagesEnabled && event.giftDetails?.imageUrl ? (
@@ -134,7 +141,13 @@ function renderEventCard({
             <IconUsers />
           </span>
         ) : null}
-        <span class={`tt-text tt-${event.kind}-text`}>{text}</span>
+        <span class={`tt-text tt-${event.kind}-text`}>
+          {richText ? (
+            <ChatRichText text={text} emotes={event.emotes} imagesEnabled={imagesEnabled} />
+          ) : (
+            text
+          )}
+        </span>
       </button>
 
       <time class="tt-timestamp" datetime={new Date(event.receivedAt).toISOString()}>

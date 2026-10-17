@@ -4,6 +4,7 @@ import type { DisplayEvent } from '../types.ts';
 import { avatarFallbackColor } from '../features/avatar-color.ts';
 import { eventKindLabelKey, formatEventStamp, localizedEventText } from '../features/event-text.ts';
 import { defineVueComponent } from '../vue/component.ts';
+import { ChatRichText } from './chat-rich-text.vue';
 import { Button } from './ui/Button.vue';
 import { UserAvatar } from './user-avatar.vue';
 import type { EventAuthor } from './event-card.vue';
@@ -37,6 +38,8 @@ function renderFeedEventDetails({ event, locale, imagesEnabled = true, onOpenUse
   const displayName =
     event.nickname && event.nickname !== cleanHandle ? event.nickname : `@${cleanHandle}`;
   const text = localizedEventText(event, locale);
+  const richText =
+    event.kind === 'chat' && ((event.emotes?.length ?? 0) > 0 || text.includes('['));
 
   const rows: Array<{ key: string; label: string; value: string }> = [
     { key: 'kind', label: t(locale, 'detailKind'), value: t(locale, eventKindLabelKey(event.kind)) },
@@ -75,6 +78,11 @@ function renderFeedEventDetails({ event, locale, imagesEnabled = true, onOpenUse
   if (event.msgId) {
     rows.push({ key: 'msgId', label: t(locale, 'detailMessageId'), value: event.msgId });
   }
+  // When a comment contains emotes the rendered form shows artwork; keep the
+  // original text visible too so the panel is never a lossy view.
+  if (richText) {
+    rows.push({ key: 'rawComment', label: t(locale, 'detailRawComment'), value: text });
+  }
 
   return (
     <div class="feed-details">
@@ -100,7 +108,13 @@ function renderFeedEventDetails({ event, locale, imagesEnabled = true, onOpenUse
         </div>
       </div>
 
-      <p class="feed-details__text">{text}</p>
+      <p class="feed-details__text" title={text}>
+        {richText ? (
+          <ChatRichText text={text} emotes={event.emotes} imagesEnabled={imagesEnabled} />
+        ) : (
+          text
+        )}
+      </p>
 
       <dl class="feed-details__rows">
         {rows.map((row) => (
