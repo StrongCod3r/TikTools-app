@@ -476,6 +476,8 @@ export const english = {
   ptsEarned: '+{amount} pts',
   userCardSubscriber: 'Subscriber',
   userCardNoStats: 'No stats recorded yet',
+  userCardRecentMessages: 'Recent messages',
+  userCardNoMessages: 'No messages from this viewer in this LIVE yet.',
   userCardFirstSeen: 'First seen {time}',
   userCardLastSeen: 'Last seen {time}',
   userCardShares: 'Shares',

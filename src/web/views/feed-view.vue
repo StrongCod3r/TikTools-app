@@ -225,6 +225,7 @@ function renderFeedView({
           locale={locale}
           imagesEnabled={imagesEnabled}
           state={asideState}
+          events={events}
           event={selectedEvent}
           user={selectedUser}
           topViewers={topViewers}
@@ -235,6 +236,7 @@ function renderFeedView({
           onShowDetails={onShowDetails}
           onShowProfile={onShowProfile}
           onOpenUser={onOpenUser}
+          onSelectMessage={onSelectEvent}
         />
       </div>
 

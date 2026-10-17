@@ -1,14 +1,19 @@
 <script lang="tsx">
 import { onUnmounted, ref } from 'vue';
 import { t, type Locale } from '../i18n.ts';
-import type { UserCardUser } from '../types.ts';
+import type { DisplayEvent, UserCardUser } from '../types.ts';
 import { defineVueComponent } from '../vue/component.ts';
 import { IconBolt, IconClose } from './icons.vue';
 import { UserAvatar } from './user-avatar.vue';
+import { ChatRichText } from './chat-rich-text.vue';
+import { formatEventTime, localizedEventText } from '../features/event-text.ts';
 
 type UserCardProps = {
   user: UserCardUser;
   locale: Locale;
+  imagesEnabled?: boolean;
+  messages?: DisplayEvent[];
+  onSelectMessage?: (event: DisplayEvent) => void;
   onClose: () => void;
   /**
    * When false the card is embedded in a host panel (the shared feed aside)
@@ -29,10 +34,10 @@ function formatStamp(locale: Locale, value: number): string {
 /**
  * Closable profile card for a feed user. Closes via the X button,
  * Escape, or a press outside the card. Stats come from the leaderboard
- * when the viewer is tracked; untracked viewers show identity only.
+ * when the viewer is tracked; the retained live feed provides recent messages.
  */
 export const UserCard = defineVueComponent<UserCardProps>(
-  ['user', 'locale', 'onClose', 'dismissable'],
+  ['user', 'locale', 'imagesEnabled', 'messages', 'onSelectMessage', 'onClose', 'dismissable'],
   (props) => {
     const cardRef = ref<HTMLElement | null>(null);
     const dismissable = (): boolean => props.dismissable !== false;
@@ -57,7 +62,7 @@ export const UserCard = defineVueComponent<UserCardProps>(
     }
 
     return () => {
-      const { user, locale } = props;
+      const { user, locale, imagesEnabled = true, messages = [] } = props;
       const cleanHandle = user.uniqueId.replace(/^@+/, '');
       const displayName =
         user.nickname && user.nickname !== cleanHandle ? user.nickname : `@${cleanHandle}`;
@@ -81,7 +86,7 @@ export const UserCard = defineVueComponent<UserCardProps>(
             <UserAvatar
               uniqueId={cleanHandle}
               nickname={user.nickname}
-              avatarUrl={user.avatarUrl}
+              avatarUrl={imagesEnabled ? user.avatarUrl : undefined}
               imgClass="tt-user-card__avatar"
               fallbackClass="tt-user-card__avatar fallback"
             />
@@ -123,6 +128,48 @@ export const UserCard = defineVueComponent<UserCardProps>(
           ) : (
             <p class="tt-user-card__empty">{t(locale, 'userCardNoStats')}</p>
           )}
+
+          <section class="tt-user-card__history" aria-label={t(locale, 'userCardRecentMessages')}>
+            <div class="tt-user-card__history-head">
+              <h3 class="tt-user-card__history-title">{t(locale, 'userCardRecentMessages')}</h3>
+              <span class="tt-user-card__history-count">{messages.length}</span>
+            </div>
+            {messages.length > 0 ? (
+              <ol class="tt-user-card__messages">
+                {messages.map((event) => {
+                  const text = localizedEventText(event, locale);
+                  const richText = (event.emotes?.length ?? 0) > 0 || text.includes('[');
+                  return (
+                    <li key={event.id}>
+                      <button
+                        type="button"
+                        class="tt-user-card__message"
+                        title={text}
+                        aria-label={`${t(locale, 'openEventDetails', { user: displayName })}: ${text}`}
+                        onClick={() => props.onSelectMessage?.(event)}
+                      >
+                        <span class="tt-user-card__message-text">
+                          {richText ? (
+                            <ChatRichText text={text} emotes={event.emotes} imagesEnabled={imagesEnabled} />
+                          ) : (
+                            text
+                          )}
+                        </span>
+                        <time
+                          class="tt-user-card__message-time"
+                          datetime={new Date(event.receivedAt).toISOString()}
+                        >
+                          {formatEventTime(locale, event.receivedAt)}
+                        </time>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ol>
+            ) : (
+              <p class="tt-user-card__history-empty">{t(locale, 'userCardNoMessages')}</p>
+            )}
+          </section>
 
           <footer class="tt-user-card__foot">
             {typeof user.firstSeen === 'number' ? (

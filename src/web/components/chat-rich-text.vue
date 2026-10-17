@@ -6,7 +6,7 @@ import { resolveChatSegments, type ChatSegment, type LiveEmote } from '../../sha
 type ChatRichTextProps = {
   /** The already-localized comment text to render. */
   text: string;
-  /** Optional emote metadata from the event; absent today. */
+  /** Optional structured emote metadata supplied by the live event. */
   emotes?: LiveEmote[];
   imagesEnabled?: boolean;
 };

@@ -480,6 +480,8 @@ export const spanish: Record<TranslationKey, string> = {
   ptsEarned: '+{amount} pts',
   userCardSubscriber: 'Suscriptor',
   userCardNoStats: 'Sin estadísticas aún',
+  userCardRecentMessages: 'Mensajes recientes',
+  userCardNoMessages: 'Aún no hay mensajes de este usuario en este LIVE.',
   userCardFirstSeen: 'Primera vez {time}',
   userCardLastSeen: 'Última vez {time}',
   userCardShares: 'Compartidos',

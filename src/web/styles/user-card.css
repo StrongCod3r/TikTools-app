@@ -133,6 +133,91 @@
   color: var(--text-muted);
 }
 
+.tt-user-card__history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.tt-user-card__history-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.tt-user-card__history-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tt-user-card__history-count {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tt-user-card__messages {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-height: 320px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tt-user-card__message {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--input-bg);
+  color: var(--text-secondary);
+  font: inherit;
+  text-align: left;
+  white-space: normal;
+  cursor: pointer;
+}
+
+.tt-user-card__message:hover {
+  transform: none;
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--line-focus);
+}
+
+.tt-user-card__message-text {
+  display: block;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.tt-user-card__message-time {
+  align-self: flex-end;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tt-user-card__history-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+
 .tt-user-card__foot {
   display: flex;
   flex-direction: column;

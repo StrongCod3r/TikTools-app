@@ -12,6 +12,8 @@ type FeedAsideProps = {
   locale: Locale;
   imagesEnabled?: boolean;
   state: FeedAsideState;
+  /** Retained events from the current LIVE session. */
+  events?: DisplayEvent[];
   /** Selected event, resolved by the view from its scoped id. */
   event?: DisplayEvent | null;
   /** Selected user, enriched by the view from the leaderboard. */
@@ -24,7 +26,14 @@ type FeedAsideProps = {
   onShowDetails: () => void;
   onShowProfile: () => void;
   onOpenUser: (user: EventAuthor) => void;
+  onSelectMessage: (event: DisplayEvent) => void;
 };
+
+const PROFILE_MESSAGE_HISTORY_LIMIT = 20;
+
+function normalizeHandle(value: string): string {
+  return value.replace(/^@+/, '').trim().toLowerCase();
+}
 
 /**
  * One shared contextual panel for the feed: current viewers, the selected
@@ -36,6 +45,7 @@ function renderFeedAside({
   locale,
   imagesEnabled = true,
   state,
+  events = [],
   event = null,
   user = null,
   topViewers = [],
@@ -46,10 +56,18 @@ function renderFeedAside({
   onShowDetails,
   onShowProfile,
   onOpenUser,
+  onSelectMessage,
 }: FeedAsideProps) {
   const open = state.kind !== 'closed';
   const hasEvent = event !== null;
   const hasUser = user !== null || hasEvent;
+  const selectedHandle = state.kind === 'user' && user ? normalizeHandle(user.uniqueId) : '';
+  const recentMessages = state.kind === 'user' && user
+    ? events
+        .filter((entry) => entry.kind === 'chat' && normalizeHandle(entry.author) === selectedHandle)
+        .slice(-PROFILE_MESSAGE_HISTORY_LIMIT)
+        .reverse()
+    : [];
 
   const tabs: Array<{ key: 'viewers' | 'event' | 'user'; label: string; disabled: boolean; onSelect: () => void }> = [
     { key: 'viewers', label: t(locale, 'contextViewers'), disabled: false, onSelect: onShowViewers },
@@ -139,7 +157,15 @@ function renderFeedAside({
           ) : null}
           {state.kind === 'user' ? (
             user ? (
-              <UserCard user={user} locale={locale} dismissable={false} onClose={onClose} />
+              <UserCard
+                user={user}
+                locale={locale}
+                imagesEnabled={imagesEnabled}
+                messages={recentMessages}
+                dismissable={false}
+                onClose={onClose}
+                onSelectMessage={onSelectMessage}
+              />
             ) : (
               <p class="feed-aside__empty">{t(locale, 'contextEmptyUser')}</p>
             )
@@ -156,6 +182,7 @@ export const FeedAside = defineVueComponent<FeedAsideProps>(
     'locale',
     'imagesEnabled',
     'state',
+    'events',
     'event',
     'user',
     'topViewers',
@@ -166,6 +193,7 @@ export const FeedAside = defineVueComponent<FeedAsideProps>(
     'onShowDetails',
     'onShowProfile',
     'onOpenUser',
+    'onSelectMessage',
   ],
   (props) => () => renderFeedAside(props),
 );
