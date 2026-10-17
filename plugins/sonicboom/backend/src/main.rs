@@ -36,7 +36,8 @@
 //!   the voice catalog request and again before the speech POST.
 //! - A 2xx response means the endpoint *accepted* the request; it does not
 //!   prove audible playback. Counters and logs say `accepted`, never
-//!   "played".
+//!   "played". When `/api/tts/play` returns its queue `id`, the log carries
+//!   `server_id=…` for correlation; absence of an id is not a failure.
 //! - A watchdog flags a stalled worker (`degraded`) after a bounded period
 //!   without progression. Recovery is stop/restart only; a stale generation
 //!   is cancelled and joined before a replacement starts.
@@ -107,6 +108,17 @@ enum SpeakFailure {
     Disconnected,
     Transport,
     Status(u16),
+}
+
+/// A 2xx `POST /api/tts/play`: the line was accepted into the server
+/// playback queue. `server_job_id` is the server's queue id when the body
+/// parsed, useful for correlating with server logs/queue status. It never
+/// proves the line was actually heard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SpeakAccepted {
+    server_job_id: Option<String>,
+    chars: usize,
+    voice: String,
 }
 
 impl SpeakFailure {
@@ -421,7 +433,7 @@ impl SpeechEngine {
         voice: &str,
         provider: &str,
         language: &str,
-    ) -> Result<String, SpeakFailure> {
+    ) -> Result<SpeakAccepted, SpeakFailure> {
         // Mirrors the declarative speak action: POST
         // `/api/tts/play?voice=…&lang=…` with a text/plain body. The
         // observer never interrupts (`play_now` stays a manual control).
@@ -451,7 +463,25 @@ impl SpeechEngine {
         if !status.is_success() {
             return Err(SpeakFailure::Status(status.as_u16()));
         }
-        Ok(format!("{} chars as {voice}", text.chars().count()))
+        // `/api/tts/play` returns `{"success":true,"message":…,"id":…}`. The
+        // id correlates with the server playback queue; a 2xx still only
+        // proves the line was accepted/queued, never that it was heard. A
+        // missing/malformed body is accepted without an id, not failed.
+        let server_job_id = response
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|body| {
+                body.get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty() && id.len() <= 128)
+                    .map(str::to_owned)
+            });
+        Ok(SpeakAccepted {
+            server_job_id,
+            chars: text.chars().count(),
+            voice: voice.to_owned(),
+        })
     }
 
     /// One full job. Counters are the single source of truth for the
@@ -544,9 +574,18 @@ impl SpeechEngine {
             )
             .await
         {
-            Ok(summary) => {
+            Ok(accepted) => {
                 self.stats.accepted.fetch_add(1, Ordering::Relaxed);
-                eprintln!("sonicboom: job {job_id} accepted {summary} event={event_ref}");
+                match accepted.server_job_id.as_deref() {
+                    Some(server_id) => eprintln!(
+                        "sonicboom: job {job_id} accepted server_id={server_id} {} chars as {} event={event_ref}",
+                        accepted.chars, accepted.voice
+                    ),
+                    None => eprintln!(
+                        "sonicboom: job {job_id} accepted server_id=- {} chars as {} event={event_ref}",
+                        accepted.chars, accepted.voice
+                    ),
+                }
             }
             Err(failure) => {
                 self.stats.failed.fetch_add(1, Ordering::Relaxed);
@@ -1014,9 +1053,11 @@ mod tests {
                         .as_bytes(),
                     );
                 } else if line.starts_with("POST /api/tts/play") {
+                    let payload = r#"{"success":true,"message":"Added to queue","id":"srv-1"}"#;
                     let _ = stream.write_all(
                         format!(
-                            "HTTP/1.1 {play_status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                            "HTTP/1.1 {play_status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                            payload.len()
                         )
                         .as_bytes(),
                     );
@@ -1169,6 +1210,42 @@ mod tests {
         assert_eq!(stats.started.load(Ordering::Relaxed), 1);
         assert_eq!(stats.accepted.load(Ordering::Relaxed), 1);
         assert_eq!(stats.failed.load(Ordering::Relaxed), 0);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepted_speak_exposes_server_queue_id_for_correlation() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = serve_voices_and_plays(listener, 1, "200 OK");
+        let engine = SpeechEngine::default();
+        let accepted = engine
+            .speak(&url, "", "hello", "supertonic:M1", "supertonic", "en")
+            .await
+            .unwrap();
+        assert_eq!(accepted.server_job_id.as_deref(), Some("srv-1"));
+        assert_eq!(accepted.chars, 5);
+        server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepted_speak_without_json_body_is_still_accepted() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut raw = [0_u8; 1024];
+            let _ = stream.read(&mut raw);
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        });
+        let engine = SpeechEngine::default();
+        let accepted = engine
+            .speak(&url, "", "hello", "supertonic:M1", "supertonic", "en")
+            .await
+            .unwrap();
+        assert_eq!(accepted.server_job_id, None);
         server.join().unwrap();
     }
 
