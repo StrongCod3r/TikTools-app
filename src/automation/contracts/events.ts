@@ -1,6 +1,7 @@
 /** Built-in event types published by the host automation boundary. */
 export const BUILTIN_EVENT_TYPES = [
   'tiktok.chat',
+  'tiktok.emote_chat',
   'tiktok.gift',
   'tiktok.like',
   'tiktok.follow',
@@ -19,6 +20,7 @@ export type AutomationEventType = typeof BUILTIN_EVENT_TYPES[number];
 /** Data contract selected for each built-in event envelope. */
 export const BUILTIN_EVENT_CONTRACTS: Record<AutomationEventType, string> = {
   'tiktok.chat': 'ChatAutomationData',
+  'tiktok.emote_chat': 'EmoteChatAutomationData',
   'tiktok.gift': 'GiftAutomationData',
   'tiktok.like': 'LikeAutomationData',
   'tiktok.follow': 'SocialAutomationData',

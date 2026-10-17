@@ -36,14 +36,31 @@ export interface AutomationUser {
 
 export interface ChatAutomationData {
   "comment": string;
+  "emotes"?: { "id": string; "shortcode": string | null; "imageUrl": string | null; "index": number | null; "emoteType": number | null; "packageId": string | null }[];
   "method": string;
   "msgId": string;
   "isHistory": boolean;
 }
 
+export interface ChatAutomationEmote {
+  "id": string;
+  "shortcode"?: string | null;
+  "imageUrl"?: string | null;
+  "index"?: number | null;
+  "emoteType"?: number | null;
+  "packageId"?: string | null;
+}
+
 export interface ConnectionAutomationData {
   "uniqueId": string;
   "roomId": string;
+}
+
+export interface EmoteChatAutomationData {
+  "emotes"?: { "id": string; "shortcode": string | null; "imageUrl": string | null; "index": number | null; "emoteType": number | null; "packageId": string | null }[];
+  "method": string;
+  "msgId": string;
+  "isHistory": boolean;
 }
 
 export interface EventIntel {

@@ -3,15 +3,15 @@
  * segments and TTS-safe text.
  *
  * Resolution priority (highest first):
- *   1. explicit protobuf emote metadata whose token appears in the comment;
+ *   1. explicit shortcode metadata or a unique, validated protobuf index hit;
  *   2. the verified shortcode catalog;
  *   3. plain text — the original shortcode, never a fabricated image.
  *
- * Matching is token-based rather than index-based. `EmoteWithIndex.index`
- * semantics are unverified (bytes, code points, or UTF-16 are all plausible),
- * and slicing on a wrong unit would corrupt any comment containing non-BMP
- * text, so the index is carried as metadata only. This is the safe textual
- * fallback the plan calls for, and it never loses the original text.
+ * The signer preserves `EmoteWithIndex.index` without choosing a unit. The UI
+ * tries UTF-8, Unicode code point, and UTF-16 offsets, and uses the index only
+ * when exactly one interpretation lands on a complete bracket token. It
+ * never slices or rewrites the comment, so ambiguous offsets fall back to
+ * shortcode/catalog matching and the original text stays intact.
  */
 
 import {
@@ -25,11 +25,13 @@ export const MAX_EMOTES_PER_EVENT = 64;
 
 /** Longest image URL that will be accepted. */
 export const MAX_EMOTE_URL_LENGTH = 2048;
+const MAX_EMOTE_ID_LENGTH = 128;
 
 type NormalizedEmote = {
   id: string;
-  shortcode: string;
+  shortcode?: string;
   imageUrl?: string;
+  index?: number;
 };
 
 /**
@@ -69,21 +71,105 @@ export function normalizeEmotes(
   emotes: readonly LiveEmote[] | undefined,
 ): Map<string, NormalizedEmote> {
   const byToken = new Map<string, NormalizedEmote>();
-  if (!emotes?.length) return byToken;
-  let accepted = 0;
-  for (const emote of emotes) {
-    if (accepted >= MAX_EMOTES_PER_EVENT) break;
-    if (!emote || typeof emote.id !== 'string') continue;
-    const id = emote.id.trim();
-    if (!id || id.length > MAX_EMOTE_TOKEN_LENGTH) continue;
-    const shortcode = normalizeShortcode(emote.shortcode) ?? `[${id}]`;
-    const imageUrl = isSafeEmoteImageUrl(emote.imageUrl) ? emote.imageUrl.trim() : undefined;
-    const entry: NormalizedEmote = { id, shortcode, imageUrl };
-    const key = shortcode.slice(1, -1).toLowerCase();
-    if (!byToken.has(key)) byToken.set(key, entry);
-    accepted += 1;
+  for (const entry of normalizeEmoteList(emotes)) {
+    const keys = new Set<string>();
+    if (entry.shortcode) keys.add(entry.shortcode.slice(1, -1).toLowerCase());
+    // Some signer events have opaque numeric ids and no shortcode. The
+    // catalog is the only authority for treating a bare id as a token name.
+    const catalogEntry = catalogEmoteById(entry.id);
+    if (catalogEntry) keys.add(catalogEntry.id);
+    for (const key of keys) {
+      const catalogShortcode = catalogEntry?.shortcode;
+      const normalized = catalogShortcode
+        ? { ...entry, shortcode: catalogShortcode }
+        : entry;
+      if (!byToken.has(key)) byToken.set(key, normalized);
+    }
   }
   return byToken;
+}
+
+function normalizeEmoteList(emotes: readonly LiveEmote[] | undefined): NormalizedEmote[] {
+  if (!emotes?.length) return [];
+  const normalized: NormalizedEmote[] = [];
+  for (const emote of emotes) {
+    if (normalized.length >= MAX_EMOTES_PER_EVENT) break;
+    if (!emote || typeof emote.id !== 'string') continue;
+    const rawId = emote.id.trim();
+    const shortcode = normalizeShortcode(emote.shortcode);
+    const imageUrl = isSafeEmoteImageUrl(emote.imageUrl) ? emote.imageUrl.trim() : undefined;
+    if (!rawId && !shortcode && !imageUrl) continue;
+    if (rawId.length > MAX_EMOTE_ID_LENGTH) continue;
+    normalized.push({
+      id: rawId || shortcode?.slice(1, -1) || 'emote',
+      shortcode,
+      imageUrl,
+      ...(Number.isInteger(emote.index) && (emote.index ?? -1) >= 0
+        ? { index: emote.index }
+        : {}),
+    });
+  }
+  return normalized;
+}
+
+function possibleOffsets(comment: string, index: number): Set<number> {
+  const offsets = new Set<number>();
+  if (index <= comment.length) offsets.add(index); // UTF-16 code units.
+
+  let codePointOffset = 0;
+  let codePointCount = 0;
+  let utf8Offset = 0;
+  for (const character of comment) {
+    if (codePointCount === index) offsets.add(codePointOffset);
+    if (utf8Offset === index) offsets.add(codePointOffset);
+    codePointOffset += character.length;
+    utf8Offset += utf8ByteLength(character.codePointAt(0) ?? 0);
+    codePointCount += 1;
+  }
+  if (codePointCount === index) offsets.add(codePointOffset);
+  if (utf8Offset === index) offsets.add(codePointOffset);
+  return offsets;
+}
+
+function utf8ByteLength(codePoint: number): number {
+  if (codePoint <= 0x7f) return 1;
+  if (codePoint <= 0x7ff) return 2;
+  if (codePoint <= 0xffff) return 3;
+  return 4;
+}
+
+function bracketTokenAt(comment: string, offset: number): string | undefined {
+  if (comment[offset] !== '[') return undefined;
+  const close = comment.indexOf(']', offset + 1);
+  if (close < 0) return undefined;
+  return normalizeShortcode(comment.slice(offset, close + 1));
+}
+
+function indexMatches(
+  comment: string,
+  emotes: readonly NormalizedEmote[],
+): Map<number, NormalizedEmote> {
+  const byOffset = new Map<number, NormalizedEmote>();
+  const ambiguous = new Set<number>();
+  for (const emote of emotes) {
+    if (emote.index === undefined) continue;
+    const matches = [...possibleOffsets(comment, emote.index)].filter((offset) => {
+      const token = bracketTokenAt(comment, offset);
+      return Boolean(token && (!emote.shortcode || token.toLowerCase() === emote.shortcode.toLowerCase()));
+    });
+    if (matches.length !== 1) continue;
+    const offset = matches[0];
+    if (offset === undefined) continue;
+    if (ambiguous.has(offset)) continue;
+    const existing = byOffset.get(offset);
+    if (existing && existing.id !== emote.id) {
+      byOffset.delete(offset);
+      ambiguous.add(offset);
+      continue;
+    }
+    byOffset.set(offset, emote);
+  }
+  return byOffset;
 }
 
 function lookupEmote(
@@ -108,8 +194,21 @@ export function resolveChatSegments(
   comment: string,
   emotes?: readonly LiveEmote[],
 ): ChatSegment[] {
-  if (!comment) return [];
+  const emoteList = normalizeEmoteList(emotes);
+  if (!comment) {
+    return emoteList.flatMap((emote) => {
+      if (!emote.imageUrl && !emote.shortcode) return [];
+      return [{
+        type: 'emote' as const,
+        id: emote.id,
+        shortcode: emote.shortcode,
+        imageUrl: emote.imageUrl,
+        fallbackText: emote.shortcode ?? '',
+      }];
+    });
+  }
   const metadata = normalizeEmotes(emotes);
+  const byIndex = indexMatches(comment, emoteList);
   const segments: ChatSegment[] = [];
   let buffer = '';
   let index = 0;
@@ -134,7 +233,7 @@ export function resolveChatSegments(
       break;
     }
     const token = comment.slice(open, close + 1);
-    const match = lookupEmote(comment.slice(open + 1, close), metadata);
+    const match = byIndex.get(open) ?? lookupEmote(comment.slice(open + 1, close), metadata);
     if (match) {
       flush();
       segments.push({

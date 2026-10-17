@@ -32,6 +32,7 @@ export function fieldsWithOptions(uiHints?: JsonObject): Array<{ key: string; so
 
 export const TRIGGER_LABELS: Record<AutomationEventType, I18nText> = {
   "tiktok.chat": { default: "Someone comments", i18key: "behavior.trigger.tiktok.chat" },
+  "tiktok.emote_chat": { default: "Someone sends an emote", i18key: "behavior.trigger.tiktok.emote_chat" },
   "tiktok.gift": { default: "Someone sends a gift", i18key: "behavior.trigger.tiktok.gift" },
   "tiktok.like": { default: "Someone likes", i18key: "behavior.trigger.tiktok.like" },
   "tiktok.follow": { default: "Someone follows", i18key: "behavior.trigger.tiktok.follow" },

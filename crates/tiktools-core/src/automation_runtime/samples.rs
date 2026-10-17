@@ -46,7 +46,24 @@ fn sample_data_for(event_type: &str) -> (Value, Option<Value>) {
         "tiktok.chat" => (
             sample_data(ChatAutomationData {
                 comment: "Hello there".to_owned(),
+                emotes: Vec::new(),
                 method: method(),
+                msg_id: msg_id(),
+                is_history: false,
+            }),
+            user(),
+        ),
+        "tiktok.emote_chat" => (
+            sample_data(crate::contracts::EmoteChatAutomationData {
+                emotes: vec![crate::contracts::ChatAutomationEmote {
+                    id: "sample-emote".to_owned(),
+                    shortcode: None,
+                    image_url: Some("https://example.com/emote.webp".to_owned()),
+                    index: None,
+                    emote_type: None,
+                    package_id: None,
+                }],
+                method: "WebcastEmoteChatMessage".to_owned(),
                 msg_id: msg_id(),
                 is_history: false,
             }),

@@ -16,6 +16,8 @@ pub enum SourceTransform {
     NonzeroToBoolean,
     /// Signed protobuf integer clamped at zero into an unsigned count.
     NormalizedUnsigned,
+    /// Repeated protobuf messages normalized into a bounded DTO array.
+    NormalizedMessageArray,
 }
 
 impl SourceTransform {
@@ -27,6 +29,7 @@ impl SourceTransform {
             Self::IntegerToString => "integer-to-string",
             Self::NonzeroToBoolean => "nonzero-to-boolean",
             Self::NormalizedUnsigned => "normalized-unsigned",
+            Self::NormalizedMessageArray => "normalized-message-array",
         }
     }
 }
@@ -60,6 +63,22 @@ pub(super) const PROJECTIONS: &[Projection] = &[
         path: "content",
         transform: SourceTransform::Native,
         json_type: "string",
+    },
+    Projection {
+        contract: "ChatAutomationData",
+        field: "emotes",
+        method: live_method::CHAT,
+        path: "emotes",
+        transform: SourceTransform::NormalizedMessageArray,
+        json_type: "array",
+    },
+    Projection {
+        contract: "EmoteChatAutomationData",
+        field: "emotes",
+        method: live_method::EMOTE_CHAT,
+        path: "emote_list",
+        transform: SourceTransform::NormalizedMessageArray,
+        json_type: "array",
     },
     // GiftAutomationData <- WebcastGiftMessage
     Projection {

@@ -7,6 +7,7 @@ import type {
   AutomationUser,
   ChatAutomationData,
   ConnectionAutomationData,
+  EmoteChatAutomationData,
   GiftAutomationData,
   LikeAutomationData,
   MemberAutomationData,
@@ -20,6 +21,7 @@ export type {
   AutomationUser,
   ChatAutomationData,
   ConnectionAutomationData,
+  EmoteChatAutomationData,
   GiftAutomationData,
   LikeAutomationData,
   MemberAutomationData,
@@ -104,6 +106,15 @@ export interface ChatAutomationEvent {
   creator?: AutomationCreatorLike | null;
   user?: AutomationUser | null;
   data: ChatAutomationData;
+}
+
+export interface EmoteChatAutomationEvent {
+  id: string;
+  type: 'tiktok.emote_chat';
+  timestamp: number;
+  creator?: AutomationCreatorLike | null;
+  user?: AutomationUser | null;
+  data: EmoteChatAutomationData;
 }
 
 export interface ShareAutomationEvent {

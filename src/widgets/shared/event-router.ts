@@ -5,6 +5,7 @@
 
 import {
   CHAT_EVENT_TYPE,
+  EMOTE_CHAT_EVENT_TYPE,
   FOLLOW_EVENT_TYPE,
   GIFT_EVENT_TYPE,
   JOIN_EVENT_TYPE,
@@ -13,6 +14,7 @@ import {
 } from './config.ts';
 import {
   isChatEvent,
+  isEmoteChatEvent,
   isDomainEventEnvelope,
   isFollowEvent,
   isGiftEvent,
@@ -22,6 +24,7 @@ import {
 } from './event-parser.ts';
 import type {
   ChatAutomationEvent,
+  EmoteChatAutomationEvent,
   FollowAutomationEvent,
   GiftAutomationEvent,
   JoinAutomationEvent,
@@ -31,7 +34,7 @@ import type {
 export type RoutedLiveEvent =
   | { kind: 'follow'; event: FollowAutomationEvent }
   | { kind: 'gift'; event: GiftAutomationEvent }
-  | { kind: 'chat'; event: ChatAutomationEvent }
+  | { kind: 'chat'; event: ChatAutomationEvent | EmoteChatAutomationEvent }
   | { kind: 'share'; event: ShareAutomationEvent }
   | { kind: 'subscribe'; event: JoinAutomationEvent };
 
@@ -52,6 +55,9 @@ export function routeLiveEvent(value: unknown): RoutedLiveEvent | null {
     return { kind: 'gift', event };
   }
   if (event.type === CHAT_EVENT_TYPE && isChatEvent(event)) {
+    return { kind: 'chat', event };
+  }
+  if (event.type === EMOTE_CHAT_EVENT_TYPE && isEmoteChatEvent(event)) {
     return { kind: 'chat', event };
   }
   if (event.type === SHARE_EVENT_TYPE && isShareEvent(event)) {

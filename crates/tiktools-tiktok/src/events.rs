@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use crate::GiftInfo;
 
 pub use ttl_live_events::{
-    ChatEvent, EventUser, GiftEvent, LikeEvent, LiveEvent as CanonicalLiveEvent, MemberEvent,
-    RoomUserEvent, SocialEvent, TopViewer,
+    ChatEvent, EmoteChatEvent, EventUser, GiftEvent, LikeEvent, LiveEmote,
+    LiveEvent as CanonicalLiveEvent, MemberEvent, RoomUserEvent, SocialEvent, TopViewer,
 };
 
 pub use ttl_live_events::social::SocialKind;

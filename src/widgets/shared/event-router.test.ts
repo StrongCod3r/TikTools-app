@@ -31,7 +31,9 @@ describe('event router', () => {
     expect(chat?.kind).toBe('chat');
     if (chat?.kind === 'chat') {
       expect(chat.event.type).toBe('tiktok.chat');
-      expect(chat.event.data.comment).toBe('hello');
+      if (chat.event.type === 'tiktok.chat') {
+        expect(chat.event.data.comment).toBe('hello');
+      }
     }
     const share = routeLiveEvent(makeTestShareEnvelope());
     expect(share?.kind).toBe('share');

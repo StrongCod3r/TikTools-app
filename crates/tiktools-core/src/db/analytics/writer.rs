@@ -415,6 +415,7 @@ mod tests {
                         avatar_url: None,
                     },
                     comment: "synthetic fixture".into(),
+                    ..Default::default()
                 },
             ),
             metadata: tiktools_tiktok::events::EventMetadata {

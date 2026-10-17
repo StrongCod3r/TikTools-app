@@ -18,6 +18,7 @@ export const DEFAULT_TOPICS: readonly string[] = [LIVE_EVENT_TOPIC, EVENT_GAP_TO
 export const FOLLOW_EVENT_TYPE = 'tiktok.follow';
 export const GIFT_EVENT_TYPE = 'tiktok.gift';
 export const CHAT_EVENT_TYPE = 'tiktok.chat';
+export const EMOTE_CHAT_EVENT_TYPE = 'tiktok.emote_chat';
 export const SHARE_EVENT_TYPE = 'tiktok.share';
 export const JOIN_EVENT_TYPE = 'tiktok.join';
 

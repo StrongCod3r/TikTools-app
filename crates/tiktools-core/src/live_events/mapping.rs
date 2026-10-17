@@ -1,5 +1,22 @@
 use crate::*;
 
+#[cfg(feature = "native-tiktok")]
+fn automation_emotes(
+    emotes: &[tiktools_tiktok::events::LiveEmote],
+) -> Vec<crate::contracts::ChatAutomationEmote> {
+    emotes
+        .iter()
+        .map(|emote| crate::contracts::ChatAutomationEmote {
+            id: emote.id.clone(),
+            shortcode: emote.shortcode.clone(),
+            image_url: emote.image_url.clone(),
+            index: emote.index,
+            emote_type: emote.emote_type,
+            package_id: emote.package_id.clone(),
+        })
+        .collect()
+}
+
 impl AppCore {
     #[cfg(feature = "native-tiktok")]
     pub(crate) fn ui_event_and_points(
@@ -21,12 +38,31 @@ impl AppCore {
                     "author": unique_id,
                     "nickname": user.nickname,
                     "text": chat.comment,
+                    "emotes": serde_json::to_value(&chat.emotes)
+                        .expect("chat emotes must serialize"),
                     "i18nKey": "chatMessage",
                     "i18nParams": {"comment": chat.comment}
                 }),
                 PointAction::Chat,
                 base_options(),
                 "chat",
+            )),
+            tiktools_tiktok::events::CanonicalLiveEvent::EmoteChat(chat) => Some((
+                json!({
+                    "kind": "chat",
+                    "author": unique_id,
+                    "nickname": user.nickname,
+                    "text": "",
+                    "emotes": serde_json::to_value(&chat.emotes)
+                        .expect("emote chat metadata must serialize"),
+                    "i18nKey": "chatMessage",
+                    "i18nParams": {"comment": ""}
+                }),
+                // Emote-only messages are visible chat activity but do not
+                // qualify for comment points.
+                PointAction::Manual,
+                base_options(),
+                "emote_chat",
             )),
             tiktools_tiktok::events::CanonicalLiveEvent::Gift(gift) => {
                 let gift_name = event.gift_name().unwrap_or("Gift");
@@ -155,11 +191,23 @@ impl AppCore {
                 "tiktok.chat",
                 serde_json::to_value(crate::contracts::ChatAutomationData {
                     comment: chat.comment.clone(),
+                    emotes: automation_emotes(&chat.emotes),
                     method: event.method().to_owned(),
                     msg_id: event.msg_id().to_string(),
                     is_history: event.is_history(),
                 })
                 .expect("chat automation data must serialize"),
+                Some(user_value(&chat.user)),
+            ),
+            tiktools_tiktok::events::CanonicalLiveEvent::EmoteChat(chat) => (
+                "tiktok.emote_chat",
+                serde_json::to_value(crate::contracts::EmoteChatAutomationData {
+                    emotes: automation_emotes(&chat.emotes),
+                    method: event.method().to_owned(),
+                    msg_id: event.msg_id().to_string(),
+                    is_history: event.is_history(),
+                })
+                .expect("emote chat automation data must serialize"),
                 Some(user_value(&chat.user)),
             ),
             tiktools_tiktok::events::CanonicalLiveEvent::Gift(gift) => (

@@ -115,7 +115,7 @@ describe('event registry', () => {
   });
 
   test('registry version tracks the protobuf-provenance shape', () => {
-    expect(EVENT_REGISTRY_VERSION).toBe(8);
+    expect(EVENT_REGISTRY_VERSION).toBe(9);
   });
 
   test('chat comment traces back to the vendor content field', () => {

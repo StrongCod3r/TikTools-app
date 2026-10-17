@@ -12,6 +12,8 @@ import type {
   ConnectionAutomationData,
   ConnectionAutomationEvent,
   DomainEventEnvelope,
+  EmoteChatAutomationData,
+  EmoteChatAutomationEvent,
   EventGapData,
   FollowAutomationEvent,
   GatewayControlMessage,
@@ -47,6 +49,21 @@ function isNumber(value: unknown): value is number {
 
 function isBoolean(value: unknown): value is boolean {
   return typeof value === 'boolean';
+}
+
+function isChatEmote(value: unknown): boolean {
+  if (!isRecord(value) || typeof value['id'] !== 'string') return false;
+  return (
+    (value['shortcode'] === undefined || value['shortcode'] === null || typeof value['shortcode'] === 'string') &&
+    (value['imageUrl'] === undefined || value['imageUrl'] === null || typeof value['imageUrl'] === 'string') &&
+    (value['index'] === undefined || value['index'] === null || isNumber(value['index'])) &&
+    (value['emoteType'] === undefined || value['emoteType'] === null || isNumber(value['emoteType'])) &&
+    (value['packageId'] === undefined || value['packageId'] === null || typeof value['packageId'] === 'string')
+  );
+}
+
+function isEmoteList(value: unknown): boolean {
+  return value === undefined || (Array.isArray(value) && value.every(isChatEmote));
 }
 
 export function isDomainEventEnvelope(value: unknown): value is DomainEventEnvelope {
@@ -109,6 +126,17 @@ function isChatAutomationData(value: unknown): value is ChatAutomationData {
   if (!isRecord(value)) return false;
   return (
     typeof value['comment'] === 'string' &&
+    isEmoteList(value['emotes']) &&
+    typeof value['method'] === 'string' &&
+    typeof value['msgId'] === 'string' &&
+    isBoolean(value['isHistory'])
+  );
+}
+
+function isEmoteChatAutomationData(value: unknown): value is EmoteChatAutomationData {
+  if (!isRecord(value)) return false;
+  return (
+    isEmoteList(value['emotes']) &&
     typeof value['method'] === 'string' &&
     typeof value['msgId'] === 'string' &&
     isBoolean(value['isHistory'])
@@ -216,6 +244,10 @@ export function isGiftEvent(event: AutomationEventLike): event is GiftAutomation
 
 export function isChatEvent(event: AutomationEventLike): event is ChatAutomationEvent {
   return event.type === 'tiktok.chat' && isChatAutomationData(event.data);
+}
+
+export function isEmoteChatEvent(event: AutomationEventLike): event is EmoteChatAutomationEvent {
+  return event.type === 'tiktok.emote_chat' && isEmoteChatAutomationData(event.data);
 }
 
 export function isShareEvent(event: AutomationEventLike): event is ShareAutomationEvent {

@@ -9,6 +9,7 @@ import { DEFAULT_CHAT_MESSAGE_LIMIT, DEFAULT_RECENT_IDS_CAPACITY } from './confi
 import { RecentEventIds } from './alert-queue.ts';
 import { routeLiveEvent } from './event-router.ts';
 import { displayNameFor, eventIdentity, handleFor } from './event-types.ts';
+import type { LiveEmote } from '../../shared/emotes/types.ts';
 
 export interface ChatMessageView {
   id: string;
@@ -16,6 +17,8 @@ export interface ChatMessageView {
   uniqueId: string;
   avatarUrl: string | null;
   text: string;
+  emotes?: LiveEmote[];
+  emoteOnly?: boolean;
 }
 
 export interface ChatControllerHandlers {
@@ -52,8 +55,18 @@ export class ChatController {
     const { event } = routed;
     if (event.data.isHistory) return 'history';
     if (!this.recentIds.add(eventIdentity(event))) return 'duplicate';
-    const text = event.data.comment.trim();
-    if (!text) return 'ignored';
+    const emoteOnly = event.type === 'tiktok.emote_chat';
+    const text = event.type === 'tiktok.chat' ? event.data.comment.trim() : '';
+    const emotes = (event.data.emotes ?? []).map((emote) => ({
+      id: emote.id,
+      ...(typeof emote.shortcode === 'string' ? { shortcode: emote.shortcode } : {}),
+      ...(typeof emote.imageUrl === 'string' ? { imageUrl: emote.imageUrl } : {}),
+      ...(typeof emote.index === 'number' ? { index: emote.index } : {}),
+      ...(typeof emote.emoteType === 'number' ? { emoteType: emote.emoteType } : {}),
+      ...(typeof emote.packageId === 'string' ? { packageId: emote.packageId } : {}),
+    }));
+    const hasRenderableEmote = emotes.some((emote) => emote.imageUrl || emote.shortcode);
+    if (!text && !hasRenderableEmote) return 'ignored';
     this.messages = [
       ...this.messages,
       {
@@ -62,6 +75,8 @@ export class ChatController {
         uniqueId: handleFor(event.user),
         avatarUrl: event.user?.avatarUrl ?? null,
         text,
+        ...(emotes.length > 0 ? { emotes } : {}),
+        ...(emoteOnly ? { emoteOnly: true } : {}),
       },
     ].slice(-this.limit);
     this.handlers.onMessages([...this.messages]);

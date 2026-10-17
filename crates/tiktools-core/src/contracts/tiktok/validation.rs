@@ -106,26 +106,44 @@ pub(super) fn validate_projection(
         .and_then(Value::as_str)
         .unwrap_or("<missing>");
     // A repeated source is an array on the wire; projecting it as a scalar
-    // would misrepresent the shape, and no transform maps over arrays.
+    // would misrepresent the shape. Message arrays need an explicit normalizer
+    // because signer DTOs do not expose the generated protobuf message shape.
     if source.cardinality == FieldCardinality::Repeated {
-        if transform != SourceTransform::Native {
-            return Err(format!(
-                "{} cannot project repeated protobuf {} (only native array projection is supported)",
-                transform.as_str(),
-                protobuf_type_name(source.value_kind)
-            ));
-        }
         if output != "array" {
             return Err(format!(
                 "repeated protobuf {} must project to an array, not {output}",
                 protobuf_type_name(source.value_kind)
             ));
         }
-        let items = property
-            .get("items")
+        let items_schema = property.get("items");
+        let items = items_schema
             .and_then(|items| items.get("type"))
             .and_then(Value::as_str)
             .unwrap_or("<missing>");
+        if transform == SourceTransform::NormalizedMessageArray {
+            if !matches!(source.value_kind, FieldValueKind::Message(_)) {
+                return Err(format!(
+                    "normalized-message-array needs repeated protobuf messages, not {}",
+                    protobuf_type_name(source.value_kind)
+                ));
+            }
+            return if items == "object"
+                || items_schema.is_some_and(|items| items.get("$ref").is_some())
+            {
+                Ok(())
+            } else {
+                Err(format!(
+                    "normalized-message-array renders objects, not {items}"
+                ))
+            };
+        }
+        if transform != SourceTransform::Native {
+            return Err(format!(
+                "{} cannot project repeated protobuf {}",
+                transform.as_str(),
+                protobuf_type_name(source.value_kind)
+            ));
+        }
         return validate_native_element(source.value_kind, items).map_err(|reason| {
             format!(
                 "repeated protobuf {}: {reason}",
@@ -185,6 +203,9 @@ pub(super) fn validate_projection(
                 );
             }
             Ok(())
+        }
+        SourceTransform::NormalizedMessageArray => {
+            Err("normalized-message-array needs a repeated protobuf message source".to_owned())
         }
     }
 }

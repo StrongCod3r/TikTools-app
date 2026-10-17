@@ -22,6 +22,9 @@
     "chat": {
       "$ref": "#/$defs/ChatAutomationData"
     },
+    "emoteChat": {
+      "$ref": "#/$defs/EmoteChatAutomationData"
+    },
     "gift": {
       "$ref": "#/$defs/GiftAutomationData"
     },
@@ -54,6 +57,7 @@
     "automationEvent",
     "automationIntel",
     "chat",
+    "emoteChat",
     "gift",
     "like",
     "social",
@@ -831,6 +835,23 @@
             "transform": "native"
           }
         },
+        "emotes": {
+          "description": "Structured artwork metadata for inline LIVE emotes. Missing on older\nevents and omitted from JSON when the signer found none.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChatAutomationEmote"
+          },
+          "x-native-source": {
+            "method": "WebcastChatMessage",
+            "path": "emotes",
+            "jsonPath": "emotes",
+            "fieldNumber": 13,
+            "protobufType": "message",
+            "cardinality": "repeated",
+            "transform": "normalized-message-array",
+            "messageType": "webcast.model.base.emoji.EmoteWithIndex"
+          }
+        },
         "method": {
           "type": "string"
         },
@@ -848,6 +869,85 @@
         "isHistory"
       ],
       "x-native-method": "WebcastChatMessage"
+    },
+    "ChatAutomationEmote": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "shortcode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "imageUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "index": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "emoteType": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "packageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ]
+    },
+    "EmoteChatAutomationData": {
+      "type": "object",
+      "properties": {
+        "emotes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChatAutomationEmote"
+          },
+          "x-native-source": {
+            "method": "WebcastEmoteChatMessage",
+            "path": "emote_list",
+            "jsonPath": "emoteList",
+            "fieldNumber": 3,
+            "protobufType": "message",
+            "cardinality": "repeated",
+            "transform": "normalized-message-array",
+            "messageType": "webcast.model.base.emoji.EmoteModel"
+          }
+        },
+        "method": {
+          "type": "string"
+        },
+        "msgId": {
+          "type": "string"
+        },
+        "isHistory": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "method",
+        "msgId",
+        "isHistory"
+      ],
+      "x-native-method": "WebcastEmoteChatMessage"
     },
     "GiftAutomationData": {
       "type": "object",

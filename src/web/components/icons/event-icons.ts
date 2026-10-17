@@ -15,6 +15,7 @@ export type EventPresentation = {
  */
 export const EVENT_PRESENTATION: Record<AutomationEventType, EventPresentation> = {
   'tiktok.chat': { icon: 'chat', label: { default: 'Chat message', i18key: 'workflow.event.tiktok.chat' } },
+  'tiktok.emote_chat': { icon: 'chat', label: { default: 'Emote message', i18key: 'workflow.event.tiktok.emote_chat' } },
   'tiktok.gift': { icon: 'gift', label: { default: 'Gift received', i18key: 'workflow.event.tiktok.gift' } },
   'tiktok.like': { icon: 'heart', label: { default: 'Likes', i18key: 'workflow.event.tiktok.like' } },
   'tiktok.follow': { icon: 'follow', label: { default: 'New follower', i18key: 'workflow.event.tiktok.follow' } },

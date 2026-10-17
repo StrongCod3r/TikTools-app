@@ -12,6 +12,7 @@ import type {
   ChatAutomationEvent,
   ConnectionAutomationEvent,
   DomainEventEnvelope,
+  EmoteChatAutomationEvent,
   FollowAutomationEvent,
   GiftAutomationEvent,
   JoinAutomationEvent,
@@ -137,6 +138,30 @@ export function makeTestChatEvent(overrides: TestChatOverrides = {}): ChatAutoma
   };
 }
 
+export function makeTestEmoteChatEvent(
+  overrides: Pick<TestChatOverrides, 'id' | 'user' | 'msgId' | 'isHistory'> = {},
+): EmoteChatAutomationEvent {
+  return {
+    id: overrides.id ?? nextId('tiktok-emote-chat'),
+    type: 'tiktok.emote_chat',
+    timestamp: Date.now(),
+    user: overrides.user === null ? null : makeTestUser(overrides.user),
+    data: {
+      emotes: [{
+        id: 'sample-emote',
+        shortcode: null,
+        imageUrl: 'https://example.com/emote.webp',
+        index: null,
+        emoteType: null,
+        packageId: null,
+      }],
+      method: 'WebcastEmoteChatMessage',
+      msgId: overrides.msgId ?? nextId('msg-emote-chat'),
+      isHistory: overrides.isHistory ?? false,
+    },
+  };
+}
+
 export interface TestShareOverrides {
   id?: string;
   user?: TestUserOverrides | null;
@@ -201,6 +226,12 @@ export function makeTestGiftEnvelope(overrides?: TestGiftOverrides): DomainEvent
 
 export function makeTestChatEnvelope(overrides?: TestChatOverrides): DomainEventEnvelope {
   return toLiveEnvelope(makeTestChatEvent(overrides));
+}
+
+export function makeTestEmoteChatEnvelope(
+  overrides?: Pick<TestChatOverrides, 'id' | 'user' | 'msgId' | 'isHistory'>,
+): DomainEventEnvelope {
+  return toLiveEnvelope(makeTestEmoteChatEvent(overrides));
 }
 
 export function makeTestShareEnvelope(overrides?: TestShareOverrides): DomainEventEnvelope {
@@ -420,6 +451,7 @@ export function makeTestPluginEmitEnvelope(overrides?: TestPluginEmitOverrides):
 /** Every built-in trigger the test hook can emulate. */
 export const TEST_EMULATABLE_TYPES = [
   'tiktok.chat',
+  'tiktok.emote_chat',
   'tiktok.gift',
   'tiktok.like',
   'tiktok.follow',
@@ -463,6 +495,9 @@ export function makeTestEnvelopeFor(
       break;
     case 'tiktok.chat':
       envelope = makeTestChatEnvelope(identity);
+      break;
+    case 'tiktok.emote_chat':
+      envelope = makeTestEmoteChatEnvelope(identity);
       break;
     case 'tiktok.share':
       envelope = makeTestShareEnvelope(identity);

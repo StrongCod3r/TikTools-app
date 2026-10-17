@@ -81,9 +81,39 @@ pub use tiktools_plugin_api::intel::{
 #[serde(rename_all = "camelCase")]
 pub struct ChatAutomationData {
     pub comment: String,
+    /// Structured artwork metadata for inline LIVE emotes. Missing on older
+    /// events and omitted from JSON when the signer found none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emotes: Vec<ChatAutomationEmote>,
     pub method: String,
     pub msg_id: String,
     pub is_history: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EmoteChatAutomationData {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emotes: Vec<ChatAutomationEmote>,
+    pub method: String,
+    pub msg_id: String,
+    pub is_history: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatAutomationEmote {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emote_type: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -183,6 +213,7 @@ pub struct AutomationContracts {
     pub automation_event: AutomationEvent,
     pub automation_intel: EventIntel,
     pub chat: ChatAutomationData,
+    pub emote_chat: EmoteChatAutomationData,
     pub gift: GiftAutomationData,
     pub like: LikeAutomationData,
     pub social: SocialAutomationData,

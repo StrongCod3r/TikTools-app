@@ -569,6 +569,7 @@ mod tests {
             CanonicalLiveEvent::Chat(ChatEvent {
                 user: user(),
                 comment: "hello".to_owned(),
+                ..Default::default()
             }),
             None,
         )

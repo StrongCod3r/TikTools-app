@@ -171,6 +171,7 @@ export const BEHAVIOR_UI_TRANSLATIONS: TranslationCatalog = {
     }),
     ...ns("behavior.trigger.tiktok.", {
       chat: "Someone comments",
+      emote_chat: "Someone sends an emote",
       gift: "Someone sends a gift",
       like: "Someone likes",
       follow: "Someone follows",
@@ -273,6 +274,7 @@ export const BEHAVIOR_UI_TRANSLATIONS: TranslationCatalog = {
     }),
     ...ns("workflow.event.tiktok.", {
       chat: "Chat message",
+      emote_chat: "Emote message",
       gift: "Gift received",
       like: "Likes",
       follow: "New follower",
@@ -451,6 +453,7 @@ export const BEHAVIOR_UI_TRANSLATIONS: TranslationCatalog = {
     }),
     ...ns("behavior.trigger.tiktok.", {
       chat: "Alguien comenta",
+      emote_chat: "Alguien envía un emoticono",
       gift: "Alguien envía un regalo",
       like: "Alguien da me gusta",
       follow: "Alguien te sigue",
@@ -553,6 +556,7 @@ export const BEHAVIOR_UI_TRANSLATIONS: TranslationCatalog = {
     }),
     ...ns("workflow.event.tiktok.", {
       chat: "Mensaje de chat",
+      emote_chat: "Mensaje con emoticono",
       gift: "Regalo recibido",
       like: "Likes",
       follow: "Nuevo seguidor",

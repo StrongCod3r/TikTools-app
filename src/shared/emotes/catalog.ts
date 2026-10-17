@@ -7,11 +7,9 @@
  * app — so the list is duplicated, and `catalog.test.ts` reads the plugin file
  * and fails if the two ever disagree.
  *
- * No `imageUrl` is set on purpose. Inventing artwork URLs is forbidden, so a
- * catalog-only emote resolves to its original shortcode text until real
- * protobuf metadata (or a verified mapping) supplies a URL. See the
- * implementation report: acceptance for "verified emoji codes display as
- * images" is blocked on that verification.
+ * No `imageUrl` is set on purpose. The signer can supply artwork per event;
+ * catalog-only entries stay plain text until an ID-to-artwork mapping is
+ * verified against captured LIVE traffic.
  */
 
 export type CatalogEmote = {

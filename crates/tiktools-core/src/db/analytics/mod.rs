@@ -238,7 +238,9 @@ impl AnalyticsEventRecord {
                     | tiktools_tiktok::events::SocialKind::Unknown => return None,
                 }
             }
-            CanonicalLiveEvent::RoomUser(_) | CanonicalLiveEvent::Unknown { .. } => return None,
+            CanonicalLiveEvent::EmoteChat(_)
+            | CanonicalLiveEvent::RoomUser(_)
+            | CanonicalLiveEvent::Unknown { .. } => return None,
         }
         Some(record)
     }

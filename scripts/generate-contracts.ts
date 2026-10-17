@@ -355,7 +355,7 @@ function intelSampleFor(schema: JsonRecord, curated: boolean): unknown {
   return curated ? deepMergeSample(generated, INTEL_SAMPLE_EVENT) : generated;
 }
 
-const EVENT_REGISTRY_VERSION = 8;
+const EVENT_REGISTRY_VERSION = 9;
 
 // Sentinels replaced with shared sample references after stringifying, so
 // the identical `intel` sample is emitted once instead of per event. The

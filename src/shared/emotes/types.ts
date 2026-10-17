@@ -1,11 +1,9 @@
 /**
  * Normalized LIVE emote values and the segment model the renderers consume.
  *
- * These types are the app-side mirror of the `LiveEmote` shape the
- * `tiktok-signer` event contracts will carry. Nothing here is generated: the
- * automation contract cannot express a repeated message projection yet (see
- * `crates/tiktools-core/src/contracts/tiktok/validation.rs`), so the emote
- * path is defined by hand and stays optional end to end.
+ * These types mirror the `LiveEmote` shape carried by the pinned
+ * `tiktok-signer` events. Automation payload types are generated from the
+ * Rust contracts; this app-side type also supports UI events and rendering.
  */
 
 /**
@@ -15,16 +13,16 @@
 export type EmoteSource = 'protobuf' | 'catalog' | 'unknown';
 
 export interface LiveEmote {
-  /** Stable emote identifier. Required; an emote without an id is dropped. */
+  /** Original signer identifier; it may be empty when artwork is available. */
   id: string;
   /** Bracketed token as it appears in the comment, e.g. `[laughcry]`. */
   shortcode?: string;
   /** HTTPS image URL supplied by the event. Validated before it is used. */
   imageUrl?: string;
   /**
-   * Original protobuf position. Preserved verbatim and never used to slice
-   * text: the unit (bytes, code points, UTF-16) is unverified, so slicing on
-   * it could corrupt non-BMP text. Matching is token-based instead.
+   * Original protobuf position. The renderer tries common byte/code point/
+   * UTF-16 interpretations and uses it only when exactly one lands at a complete
+   * bracket token. It never slices or rewrites the source comment.
    */
   index?: number;
   emoteType?: number;
@@ -45,8 +43,8 @@ export type EmoteSegment = {
   /** Validated HTTPS URL, when the event or catalog supplied one. */
   imageUrl?: string;
   /**
-   * Plain text to show when there is no usable image. Always the original
-   * shortcode so the comment never loses information.
+   * Plain text fallback, kept as the original shortcode when the event has
+   * one. Emote-only messages may have no textual fallback.
    */
   fallbackText: string;
 };

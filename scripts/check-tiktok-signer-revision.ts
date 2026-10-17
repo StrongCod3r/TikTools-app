@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-const expectedRevision = 'bcab9dcb7a6d060d111329bc3b531a7206e4e5f8';
+const expectedRevision = '4f9d0b63799c3e23cf20be717779ece507b9eed4';
 const cargo = await readFile(resolve(import.meta.dir, '..', 'Cargo.toml'), 'utf8');
 const requiredCrates = [
   'ttl-sign-core',

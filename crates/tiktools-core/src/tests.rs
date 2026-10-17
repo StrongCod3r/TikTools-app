@@ -295,6 +295,7 @@ async fn native_live_event_reaches_the_domain_boundary() {
                     avatar_url: None,
                 },
                 comment: "hello".to_owned(),
+                ..Default::default()
             },
         ),
         metadata: tiktools_tiktok::events::EventMetadata {
@@ -368,6 +369,7 @@ async fn native_avatar_reaches_ui_points_and_room_tops() {
     let chat = wrap(CanonicalLiveEvent::Chat(ChatEvent {
         user: user(),
         comment: "hello".to_owned(),
+        ..Default::default()
     }));
     let (ui_event, _, options, _) = core.ui_event_and_points(&chat).expect("chat maps");
     assert_eq!(ui_event["avatarUrl"], AVATAR);

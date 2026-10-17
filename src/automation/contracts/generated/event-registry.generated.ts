@@ -1,6 +1,6 @@
 // THIS FILE IS GENERATED. Run bun run contracts:generate.
 
-export const EVENT_REGISTRY_VERSION = 8 as const;
+export const EVENT_REGISTRY_VERSION = 9 as const;
 
 const INTEL_SAMPLE_CHAT = {
   "comment": {
@@ -241,7 +241,7 @@ const INTEL_SAMPLE_DEFAULT = {
 } as const;
 
 export const GENERATED_EVENT_REGISTRY = {
-  "version": 8,
+  "version": 9,
   "generatedBy": "tiktools-core automation contracts",
   "generatedFrom": [
     "crates/tiktools-core/src/contracts",
@@ -264,6 +264,7 @@ export const GENERATED_EVENT_REGISTRY = {
         },
         "data": {
           "comment": "Hello there",
+          "emotes": [],
           "method": "WebcastSampleMessage",
           "msgId": "1",
           "isHistory": false
@@ -367,6 +368,28 @@ export const GENERATED_EVENT_REGISTRY = {
           "sourceJsonPath": "content",
           "sourceProtoType": "string",
           "sourceCardinality": "optional"
+        },
+        {
+          "path": "event.data.emotes",
+          "tsType": "{ \"id\": string; \"shortcode\": string | null; \"imageUrl\": string | null; \"index\": number | null; \"emoteType\": number | null; \"packageId\": string | null }[]",
+          "kind": "array",
+          "optional": true,
+          "label": {
+            "en": "Emotes",
+            "es": "Emotes"
+          },
+          "hint": {
+            "en": "ChatAutomationData.emotes",
+            "es": "ChatAutomationData.emotes"
+          },
+          "sample": [],
+          "sourceField": "emotes",
+          "sourceMethod": "WebcastChatMessage",
+          "sourcePath": "emotes",
+          "sourceTransform": "normalized-message-array",
+          "sourceJsonPath": "emotes",
+          "sourceProtoType": "message",
+          "sourceCardinality": "repeated"
         },
         {
           "path": "event.data.method",
@@ -1609,6 +1632,11 @@ export const GENERATED_EVENT_REGISTRY = {
           "optional": false
         },
         {
+          "name": "emotes",
+          "tsType": "{ \"id\": string; \"shortcode\": string | null; \"imageUrl\": string | null; \"index\": number | null; \"emoteType\": number | null; \"packageId\": string | null }[]",
+          "optional": true
+        },
+        {
           "name": "method",
           "tsType": "string",
           "optional": false
@@ -1625,6 +1653,424 @@ export const GENERATED_EVENT_REGISTRY = {
         }
       ],
       "note": "Generated from ChatAutomationData JSON Schema."
+    },
+    "tiktok.emote_chat": {
+      "dataInterface": "EmoteChatAutomationData",
+      "sourceInterface": "WebcastEmoteChatMessage",
+      "sampleEvent": {
+        "id": "sample-event",
+        "type": "tiktok.emote_chat",
+        "timestamp": 0,
+        "user": {
+          "userId": "1",
+          "uniqueId": "usuario_demo",
+          "nickname": "Viewer Demo",
+          "secUid": "",
+          "avatarUrl": "sample"
+        },
+        "data": {
+          "emotes": [],
+          "method": "WebcastSampleMessage",
+          "msgId": "1",
+          "isHistory": false
+        },
+        "intel": INTEL_SAMPLE_DEFAULT
+      },
+      "fields": [
+        {
+          "path": "event.user.userId",
+          "tsType": "string | null",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "User Id",
+            "es": "User Id"
+          },
+          "hint": {
+            "en": "AutomationUser.userId",
+            "es": "AutomationUser.userId"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.user.uniqueId",
+          "tsType": "string",
+          "kind": "string",
+          "optional": false,
+          "label": {
+            "en": "Unique Id",
+            "es": "Unique Id"
+          },
+          "hint": {
+            "en": "AutomationUser.uniqueId",
+            "es": "AutomationUser.uniqueId"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.user.nickname",
+          "tsType": "string",
+          "kind": "string",
+          "optional": false,
+          "label": {
+            "en": "Nickname",
+            "es": "Nickname"
+          },
+          "hint": {
+            "en": "AutomationUser.nickname",
+            "es": "AutomationUser.nickname"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.user.secUid",
+          "tsType": "string",
+          "kind": "string",
+          "optional": false,
+          "label": {
+            "en": "Sec Uid",
+            "es": "Sec Uid"
+          },
+          "hint": {
+            "en": "AutomationUser.secUid",
+            "es": "AutomationUser.secUid"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.user.avatarUrl",
+          "tsType": "string | null",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Avatar Url",
+            "es": "Avatar Url"
+          },
+          "hint": {
+            "en": "AutomationUser.avatarUrl",
+            "es": "AutomationUser.avatarUrl"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.data.emotes",
+          "tsType": "{ \"id\": string; \"shortcode\": string | null; \"imageUrl\": string | null; \"index\": number | null; \"emoteType\": number | null; \"packageId\": string | null }[]",
+          "kind": "array",
+          "optional": true,
+          "label": {
+            "en": "Emotes",
+            "es": "Emotes"
+          },
+          "hint": {
+            "en": "EmoteChatAutomationData.emotes",
+            "es": "EmoteChatAutomationData.emotes"
+          },
+          "sample": [],
+          "sourceField": "emotes",
+          "sourceMethod": "WebcastEmoteChatMessage",
+          "sourcePath": "emote_list",
+          "sourceTransform": "normalized-message-array",
+          "sourceJsonPath": "emoteList",
+          "sourceProtoType": "message",
+          "sourceCardinality": "repeated"
+        },
+        {
+          "path": "event.data.method",
+          "tsType": "string",
+          "kind": "string",
+          "optional": false,
+          "label": {
+            "en": "Method",
+            "es": "Method"
+          },
+          "hint": {
+            "en": "EmoteChatAutomationData.method",
+            "es": "EmoteChatAutomationData.method"
+          },
+          "sample": "WebcastSampleMessage",
+          "sourceField": "method"
+        },
+        {
+          "path": "event.data.msgId",
+          "tsType": "string",
+          "kind": "string",
+          "optional": false,
+          "label": {
+            "en": "Msg Id",
+            "es": "Msg Id"
+          },
+          "hint": {
+            "en": "EmoteChatAutomationData.msgId",
+            "es": "EmoteChatAutomationData.msgId"
+          },
+          "sample": "1",
+          "sourceField": "msgId"
+        },
+        {
+          "path": "event.data.isHistory",
+          "tsType": "boolean",
+          "kind": "boolean",
+          "optional": false,
+          "label": {
+            "en": "Is History",
+            "es": "Is History"
+          },
+          "hint": {
+            "en": "EmoteChatAutomationData.isHistory",
+            "es": "EmoteChatAutomationData.isHistory"
+          },
+          "sample": false,
+          "sourceField": "isHistory"
+        },
+        {
+          "path": "event.intel.user.nickname.normalized",
+          "tsType": "string | null",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Normalized",
+            "es": "Normalized"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.normalized",
+            "es": "EventIntel.user.nickname.normalized"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.intel.user.nickname.language.top",
+          "tsType": "string",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Top",
+            "es": "Top"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.language.top",
+            "es": "EventIntel.user.nickname.language.top"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.intel.user.nickname.language.confidence",
+          "tsType": "number",
+          "kind": "number",
+          "optional": true,
+          "label": {
+            "en": "Confidence",
+            "es": "Confidence"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.language.confidence",
+            "es": "EventIntel.user.nickname.language.confidence"
+          },
+          "sample": 1
+        },
+        {
+          "path": "event.intel.user.nickname.language.candidates",
+          "tsType": "JsonValue[] | null",
+          "kind": "array",
+          "optional": true,
+          "label": {
+            "en": "Candidates",
+            "es": "Candidates"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.language.candidates",
+            "es": "EventIntel.user.nickname.language.candidates"
+          },
+          "sample": []
+        },
+        {
+          "path": "event.intel.user.nickname.tts.text",
+          "tsType": "string",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Text",
+            "es": "Text"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.text",
+            "es": "EventIntel.user.nickname.tts.text"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.intel.user.nickname.tts.language",
+          "tsType": "string | null",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Language",
+            "es": "Language"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.language",
+            "es": "EventIntel.user.nickname.tts.language"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.intel.user.nickname.tts.confidence",
+          "tsType": "number | null",
+          "kind": "number",
+          "optional": true,
+          "label": {
+            "en": "Confidence",
+            "es": "Confidence"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.confidence",
+            "es": "EventIntel.user.nickname.tts.confidence"
+          },
+          "sample": 1
+        },
+        {
+          "path": "event.intel.user.nickname.tts.source",
+          "tsType": "string | null",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Source",
+            "es": "Source"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.source",
+            "es": "EventIntel.user.nickname.tts.source"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.intel.user.nickname.tts.speak",
+          "tsType": "boolean",
+          "kind": "boolean",
+          "optional": true,
+          "label": {
+            "en": "Speak",
+            "es": "Speak"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.speak",
+            "es": "EventIntel.user.nickname.tts.speak"
+          },
+          "sample": false
+        },
+        {
+          "path": "event.intel.user.nickname.tts.reason",
+          "tsType": "string | null",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Reason",
+            "es": "Reason"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.reason",
+            "es": "EventIntel.user.nickname.tts.reason"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.intel.user.nickname.tts.pronunciation.ipa",
+          "tsType": "string | null",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Ipa",
+            "es": "Ipa"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.pronunciation.ipa",
+            "es": "EventIntel.user.nickname.tts.pronunciation.ipa"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.intel.user.nickname.tts.pronunciation.language",
+          "tsType": "string | null",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Language",
+            "es": "Language"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.pronunciation.language",
+            "es": "EventIntel.user.nickname.tts.pronunciation.language"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.intel.user.nickname.tts.pronunciation.dialect",
+          "tsType": "string | null",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Dialect",
+            "es": "Dialect"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.pronunciation.dialect",
+            "es": "EventIntel.user.nickname.tts.pronunciation.dialect"
+          },
+          "sample": "sample"
+        },
+        {
+          "path": "event.intel.user.nickname.tts.pronunciation.confidence",
+          "tsType": "number | null",
+          "kind": "number",
+          "optional": true,
+          "label": {
+            "en": "Confidence",
+            "es": "Confidence"
+          },
+          "hint": {
+            "en": "EventIntel.user.nickname.tts.pronunciation.confidence",
+            "es": "EventIntel.user.nickname.tts.pronunciation.confidence"
+          },
+          "sample": 1
+        },
+        {
+          "path": "event.intel.processing.status",
+          "tsType": "string",
+          "kind": "string",
+          "optional": true,
+          "label": {
+            "en": "Status",
+            "es": "Status"
+          },
+          "hint": {
+            "en": "EventIntel.processing.status",
+            "es": "EventIntel.processing.status"
+          },
+          "sample": "sample"
+        }
+      ],
+      "sourceFields": [
+        {
+          "name": "emotes",
+          "tsType": "{ \"id\": string; \"shortcode\": string | null; \"imageUrl\": string | null; \"index\": number | null; \"emoteType\": number | null; \"packageId\": string | null }[]",
+          "optional": true
+        },
+        {
+          "name": "method",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "msgId",
+          "tsType": "string",
+          "optional": false
+        },
+        {
+          "name": "isHistory",
+          "tsType": "boolean",
+          "optional": false
+        }
+      ],
+      "note": "Generated from EmoteChatAutomationData JSON Schema."
     },
     "tiktok.gift": {
       "dataInterface": "GiftAutomationData",

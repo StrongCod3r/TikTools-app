@@ -30,13 +30,14 @@ function renderChatRichText({ text, emotes, imagesEnabled = true }: ChatRichText
     if (segment.type === 'text') return segment.value;
     const imageUrl = segment.imageUrl;
     if (imagesEnabled && imageUrl && !hasEmoteImageFailed(imageUrl)) {
+      const accessibleName = segment.fallbackText || 'TikTok emote';
       return (
         <img
           key={`emote-${index}`}
           class="chat-emote"
           src={imageUrl}
-          alt={segment.fallbackText}
-          title={segment.fallbackText}
+          alt={accessibleName}
+          title={accessibleName}
           loading="lazy"
           referrerpolicy="no-referrer"
           decoding="async"

@@ -100,6 +100,7 @@ impl LiveBenchmarkInput {
                 CanonicalLiveEvent::Chat(ChatEvent {
                     user,
                     comment: format!("benchmark message {index}"),
+                    ..Default::default()
                 }),
                 None,
             )

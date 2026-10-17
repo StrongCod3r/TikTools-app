@@ -80,11 +80,8 @@ export type UiEvent = {
   };
   likeCount?: number;
   /**
-   * Emote metadata for a chat comment, when the producer supplies it. Optional
-   * and absent from the current native pipeline: the automation contract
-   * cannot project repeated protobuf messages yet, so this stays a
-   * forward-compatible slot rather than a field the host always fills.
-   * Renderers must fall back to the raw `text` when it is missing.
+   * Emote metadata for a chat comment or emote-only message, when the signer
+   * supplies it. Renderers fall back to the raw `text` when it is missing.
    */
   emotes?: LiveEmote[];
   /** Stable TikTok message identity (string: snowflake ids exceed JS safe ints). */

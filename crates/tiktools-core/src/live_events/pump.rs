@@ -376,6 +376,7 @@ mod tests {
                         avatar_url: None,
                     },
                     comment: "hello".to_owned(),
+                    ..Default::default()
                 }),
                 metadata: EventMetadata {
                     method: "WebcastTest".to_owned(),

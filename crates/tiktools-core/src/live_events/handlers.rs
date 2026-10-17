@@ -219,11 +219,15 @@ impl AppCore {
         #[cfg(feature = "persistence")]
         self.record_analytics_event(&event).await;
 
-        let should_award = !matches!(
-            &event.base,
+        let should_award = match &event.base {
+            tiktools_tiktok::events::CanonicalLiveEvent::EmoteChat(_) => false,
             tiktools_tiktok::events::CanonicalLiveEvent::Gift(gift)
-                if event.gift_streakable() && !gift.repeat_end
-        );
+                if event.gift_streakable() && !gift.repeat_end =>
+            {
+                false
+            }
+            _ => true,
+        };
         let point_award = if should_award {
             let unique_id = ui_event["author"].as_str().unwrap_or("viewer").to_owned();
             match self

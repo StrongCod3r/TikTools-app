@@ -164,6 +164,7 @@ mod tests {
             base: CanonicalLiveEvent::Chat(ChatEvent {
                 user: user(),
                 comment: comment.to_owned(),
+                ..Default::default()
             }),
             metadata: EventMetadata {
                 method: "WebcastTest".to_owned(),
@@ -327,6 +328,7 @@ fn event_tag(base: &tiktools_tiktok::events::CanonicalLiveEvent) -> u8 {
     use tiktools_tiktok::events::CanonicalLiveEvent;
     match base {
         CanonicalLiveEvent::Chat(_) => 1,
+        CanonicalLiveEvent::EmoteChat(_) => 8,
         CanonicalLiveEvent::Gift(_) => 2,
         CanonicalLiveEvent::Like(_) => 3,
         CanonicalLiveEvent::Member(_) => 4,

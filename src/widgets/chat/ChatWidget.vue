@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import WidgetStage from '../sdk/WidgetStage.vue';
 import WidgetLayerStack from '../sdk/WidgetLayerStack.vue';
+import ChatRichText from '../../web/components/chat-rich-text.vue';
 import { canRenderLegacyLayers } from '../sdk/layers.ts';
 import { useWidgetText, useWidgetTextOrder, widgetDesignKey } from '../sdk/text.ts';
 const text = useWidgetText('chat');
@@ -52,7 +53,9 @@ function initialsFor(message: ChatMessageView): string {
         </div>
         <div class="chat-content">
           <span v-if="text('name', message)" class="chat-name" :style="{ order: order('name') }">{{ text('name', message) }}</span>
-          <span v-if="text('message', message)" class="chat-text" :style="{ order: order('message') }">{{ text('message', message) }}</span>
+          <span v-if="text('message', message) || message.emotes?.length" class="chat-text" :style="{ order: order('message') }">
+            <ChatRichText :text="text('message', message)" :emotes="message.emotes" />
+          </span>
         </div>
         </template>
       </div>
