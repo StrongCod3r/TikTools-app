@@ -8,6 +8,7 @@ import type {
   TtsSettings,
 } from './types.ts';
 import { TTS_LIMITS, normalizeHandle } from './settings.ts';
+import { isBlankTtsText, sanitizeTtsText } from './sanitizer.ts';
 import { chooseVoice } from './voice.ts';
 
 /** Applies the comment-mode filter and strips the command prefix when asked. */
@@ -152,6 +153,22 @@ export function decideTts(request: TtsRequest): TtsDecision {
       specialUser: eligibility.specialUser,
     };
   }
+  // Text processing runs after the trigger/eligibility filters (so command
+  // matching still sees the original comment) and before the points check (so
+  // an emote-only comment never charges the viewer for speech that will not
+  // happen). Nothing speakable means no synthesis request at all.
+  let spokenText = sanitizeTtsText(commentDecision.spokenText, settings.sanitizer);
+  if (isBlankTtsText(spokenText)) {
+    if (settings.sanitizer.skipEmptyMessages) {
+      return idle('Nothing remains to speak after removing emote codes.');
+    }
+    // The operator asked not to swallow empty results: fall back to the
+    // permitted text so the viewer still hears something.
+    spokenText = commentDecision.spokenText.trim();
+    if (isBlankTtsText(spokenText)) {
+      return idle('Empty comments are never spoken.');
+    }
+  }
   const pointsCost = settings.chargePoints ? Math.max(0, Math.round(settings.pointsCost)) : 0;
   if (pointsCost > 0 && !canAffordTts(author.points, settings)) {
     return {
@@ -174,7 +191,7 @@ export function decideTts(request: TtsRequest): TtsDecision {
   return {
     speak: true,
     reason: eligibility.reason,
-    spokenText: commentDecision.spokenText,
+    spokenText,
     voice,
     language: settings.language,
     pointsCost,

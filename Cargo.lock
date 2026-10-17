@@ -4110,6 +4110,7 @@ dependencies = [
  "serde_json",
  "tiktools-plugin-sdk",
  "tokio",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -5,9 +5,12 @@ import { fileURLToPath } from 'node:url';
 
 import { TtsDeduper } from './deduper.ts';
 import { decideTts } from './eligibility.ts';
+import { EMOTE_CATALOG, emoteById } from './emote-catalog.ts';
+import { sanitizeTtsText } from './sanitizer.ts';
 import { defaultTtsSettings } from './settings.ts';
 import * as barrel from './tts-policy.ts';
 import type {
+  EmoteCatalogEntry,
   SpecialTtsUser,
   TtsAuthor,
   TtsAuthorRoles,
@@ -16,17 +19,20 @@ import type {
   TtsDecision,
   TtsDeduperOptions,
   TtsEligibility,
+  TtsEmoteSpeechMode,
   TtsLogEntry,
   TtsRequest,
   TtsSettings,
+  TtsTextSanitizerSettings,
 } from './tts-policy.ts';
 import { chooseVoice } from './voice.ts';
 
 /**
  * The compatibility barrel must keep exporting the exact pre-split
- * `tts-policy.ts` API (18 values + 11 types). Value parity is checked at
- * runtime below; every type import above is referenced by
- * `BarrelTypeParity`, so removing a type export fails `bun run typecheck`.
+ * `tts-policy.ts` API plus the emote/sanitizer additions (39 values + 14
+ * types). Value parity is checked at runtime below; every type import above is
+ * referenced by `BarrelTypeParity`, so removing a type export fails
+ * `bun run typecheck`.
  */
 export type BarrelTypeParity = {
   author: TtsAuthor;
@@ -34,16 +40,22 @@ export type BarrelTypeParity = {
   decision: TtsDecision;
   deduperOptions: TtsDeduperOptions;
   eligibility: TtsEligibility;
+  emoteEntry: EmoteCatalogEntry;
+  emoteSpeechMode: TtsEmoteSpeechMode;
   log: TtsLogEntry;
   mode: TtsCommentMode;
   request: TtsRequest;
   roles: TtsAuthorRoles;
+  sanitizerSettings: TtsTextSanitizerSettings;
   settings: TtsSettings;
   special: SpecialTtsUser;
 };
 
 const EXPECTED_VALUES = [
   'DEFAULT_TTS_BUDGET_MS',
+  'EMOTE_CATALOG',
+  'EMOTE_CATALOG_VERSION',
+  'MAX_EMOTE_TOKEN_LENGTH',
   'MAX_TTS_BUDGET_MS',
   'PROVIDER_TTS_BUDGETS_MS',
   'TTS_LIMITS',
@@ -53,23 +65,36 @@ const EXPECTED_VALUES = [
   'chooseVoice',
   'clampNumber',
   'classifyTtsOutcomeOrigin',
+  'collapseTtsWhitespace',
   'decideTts',
+  'defaultTtsSanitizerSettings',
   'defaultTtsSettings',
+  'emoteById',
   'evaluateCommentFilter',
   'evaluateUserEligibility',
   'findSpecialUser',
   'firstAvailableVoice',
   'formatBudgetMs',
+  'isBlankTtsText',
+  'isEmojiGrapheme',
+  'isKnownEmoteId',
+  'isTtsWhitespace',
+  'isUnwantedInvisible',
   'normalizeHandle',
   'parseTtsSettings',
   'sanitizeTtsSettings',
+  'sanitizeTtsText',
   'serializeTtsSettings',
+  'stripKnownEmotes',
+  'stripUnicodeEmoji',
+  'stripUnwantedInvisible',
   'ttsBudgetMs',
   'ttsFingerprint',
   'ttsSettingsKey',
 ];
 
 const EXPECTED_TYPES = [
+  'EmoteCatalogEntry',
   'SpecialTtsUser',
   'TtsAuthor',
   'TtsAuthorRoles',
@@ -78,9 +103,11 @@ const EXPECTED_TYPES = [
   'TtsDecision',
   'TtsDeduperOptions',
   'TtsEligibility',
+  'TtsEmoteSpeechMode',
   'TtsLogEntry',
   'TtsRequest',
   'TtsSettings',
+  'TtsTextSanitizerSettings',
 ];
 
 /** Type names re-exported via `export type {…}` or inline `type X` items. */
@@ -114,4 +141,7 @@ test('split-module exports are the same bindings (no barrel drift)', () => {
   expect(barrel.defaultTtsSettings).toBe(defaultTtsSettings);
   expect(barrel.chooseVoice).toBe(chooseVoice);
   expect(barrel.TtsDeduper).toBe(TtsDeduper);
+  expect(barrel.sanitizeTtsText).toBe(sanitizeTtsText);
+  expect(barrel.EMOTE_CATALOG).toBe(EMOTE_CATALOG);
+  expect(barrel.emoteById).toBe(emoteById);
 });

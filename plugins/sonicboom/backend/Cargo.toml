@@ -14,3 +14,4 @@ serde_json.workspace = true
 tiktools-plugin-sdk = { path = "../../../crates/tiktools-plugin-sdk" }
 reqwest.workspace = true
 tokio.workspace = true
+unicode-segmentation.workspace = true

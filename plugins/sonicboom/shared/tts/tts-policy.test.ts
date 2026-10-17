@@ -304,3 +304,106 @@ describe('TtsDeduper', () => {
     expect(deduper.claim('a', 300)).toBe(true);
   });
 });
+
+describe('decideTts text processing', () => {
+  test('known emote codes are removed before speech', () => {
+    const decision = decideTts({
+      comment: 'Hello [laughcry][laughcry] everyone!',
+      author: { handle: 'ada' },
+      settings: settings(),
+      availableVoices: [],
+    });
+    expect(decision.speak).toBe(true);
+    expect(decision.spokenText).toBe('Hello everyone!');
+  });
+
+  test('an emote-only comment never speaks and never charges points', () => {
+    const decision = decideTts({
+      comment: '[laughcry][laughcry]',
+      author: { handle: 'ada', points: 500 },
+      settings: settings({ chargePoints: true, pointsCost: 50 }),
+      availableVoices: [],
+    });
+    expect(decision.speak).toBe(false);
+    expect(decision.pointsCost).toBe(0);
+    expect(decision.spokenText).toBe('');
+    expect(decision.reason).toMatch(/emote codes/i);
+  });
+
+  test('legitimate bracketed text survives sanitization', () => {
+    for (const comment of ['Array [1,2,3]', 'Test [debug]', '[username] joined']) {
+      const decision = decideTts({
+        comment,
+        author: { handle: 'ada' },
+        settings: settings(),
+        availableVoices: [],
+      });
+      expect(decision.speak).toBe(true);
+      expect(decision.spokenText).toBe(comment);
+    }
+  });
+
+  test('command stripping happens before emote removal', () => {
+    const decision = decideTts({
+      comment: '!tts hello [happy]',
+      author: { handle: 'ada' },
+      settings: settings({ commentMode: 'command', command: '!tts', stripCommand: true }),
+      availableVoices: [],
+    });
+    expect(decision.spokenText).toBe('hello');
+  });
+
+  test('skipEmptyMessages false falls back to the permitted text', () => {
+    const decision = decideTts({
+      comment: '[laughcry]',
+      author: { handle: 'ada' },
+      settings: settings({ sanitizer: { ...defaultTtsSettings().sanitizer, skipEmptyMessages: false } }),
+      availableVoices: [],
+    });
+    expect(decision.speak).toBe(true);
+    expect(decision.spokenText).toBe('[laughcry]');
+  });
+
+  test('describe mode speaks the catalog description', () => {
+    const decision = decideTts({
+      comment: 'Hello [happy] world',
+      author: { handle: 'ada' },
+      settings: settings({ sanitizer: { ...defaultTtsSettings().sanitizer, emoteSpeechMode: 'describe' } }),
+      availableVoices: [],
+    });
+    expect(decision.spokenText).toBe('Hello happy world');
+  });
+
+  test('sanitizer settings are coerced from persisted state', () => {
+    const clean = sanitizeTtsSettings({
+      sanitizer: { removeUnicodeEmoji: true, emoteSpeechMode: 'describe', collapseWhitespace: false },
+    });
+    expect(clean.sanitizer).toEqual({
+      ...defaultTtsSettings().sanitizer,
+      removeUnicodeEmoji: true,
+      emoteSpeechMode: 'describe',
+      collapseWhitespace: false,
+    });
+    expect(sanitizeTtsSettings(undefined).sanitizer).toEqual(defaultTtsSettings().sanitizer);
+    expect(sanitizeTtsSettings({ sanitizer: 'garbage' }).sanitizer).toEqual(
+      defaultTtsSettings().sanitizer,
+    );
+  });
+
+  test('unicode emoji removal is opt-in', () => {
+    const kept = decideTts({
+      comment: 'Hello 😂',
+      author: { handle: 'ada' },
+      settings: settings(),
+      availableVoices: [],
+    });
+    expect(kept.spokenText).toBe('Hello 😂');
+    const removed = decideTts({
+      comment: 'Hello 😂',
+      author: { handle: 'ada' },
+      settings: settings({ sanitizer: { ...defaultTtsSettings().sanitizer, removeUnicodeEmoji: true } }),
+      availableVoices: [],
+    });
+    expect(removed.spokenText).toBe('Hello');
+  });
+});

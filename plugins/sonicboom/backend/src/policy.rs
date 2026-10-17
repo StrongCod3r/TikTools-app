@@ -6,8 +6,19 @@
 //! decision order, same reason strings. The two copies are pinned by
 //! mirrored unit tests; they cannot share code across the language
 //! boundary, so any policy change must land in both.
+//!
+//! The decision order is: enabled → comment filter → user eligibility →
+//! text processing (`crate::sanitizer`, i.e. emote/emoji/invisible removal
+//! and whitespace collapse) → points check → voice. Text processing sits
+//! after the trigger filters so command matching sees the original comment,
+//! and before the points check so a comment that sanitizes to nothing is
+//! dropped without charging the viewer or requesting synthesis.
 
 use std::collections::HashMap;
+
+use crate::sanitizer::{
+    is_blank_tts_text, sanitize_tts_text, EmoteSpeechMode, TtsTextSanitizerSettings,
+};
 
 pub const MAX_COMMENT_LENGTH: usize = 4096;
 const MAX_VOICE_LENGTH: usize = 128;
@@ -61,6 +72,8 @@ pub struct TtsSettings {
     pub charge_points: bool,
     pub points_cost: i64,
     pub special_users: Vec<SpecialUser>,
+    /// Text processing applied to the permitted spoken text before synthesis.
+    pub sanitizer: TtsTextSanitizerSettings,
 }
 
 impl Default for TtsSettings {
@@ -91,6 +104,7 @@ impl Default for TtsSettings {
             charge_points: false,
             points_cost: 0,
             special_users: Vec::new(),
+            sanitizer: TtsTextSanitizerSettings::default(),
         }
     }
 }
@@ -189,6 +203,43 @@ fn to_special_users(value: Option<&serde_json::Value>) -> Vec<SpecialUser> {
     clean
 }
 
+/// Coerces persisted text-processing state; missing fields keep their default.
+fn to_sanitizer(value: Option<&serde_json::Value>) -> TtsTextSanitizerSettings {
+    let defaults = TtsTextSanitizerSettings::default();
+    let Some(record) = value.and_then(serde_json::Value::as_object) else {
+        return defaults;
+    };
+    TtsTextSanitizerSettings {
+        remove_known_emotes: to_bool(
+            record.get("removeKnownEmotes"),
+            defaults.remove_known_emotes,
+        ),
+        remove_unicode_emoji: to_bool(
+            record.get("removeUnicodeEmoji"),
+            defaults.remove_unicode_emoji,
+        ),
+        remove_invisible_characters: to_bool(
+            record.get("removeInvisibleCharacters"),
+            defaults.remove_invisible_characters,
+        ),
+        collapse_whitespace: to_bool(
+            record.get("collapseWhitespace"),
+            defaults.collapse_whitespace,
+        ),
+        emote_speech_mode: match record
+            .get("emoteSpeechMode")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("describe") => EmoteSpeechMode::Describe,
+            _ => EmoteSpeechMode::Remove,
+        },
+        skip_empty_messages: to_bool(
+            record.get("skipEmptyMessages"),
+            defaults.skip_empty_messages,
+        ),
+    }
+}
+
 /// Coerces unknown persisted state into valid settings with clamped numbers.
 pub fn sanitize_settings(input: Option<&serde_json::Value>) -> TtsSettings {
     let defaults = TtsSettings::default();
@@ -253,6 +304,7 @@ pub fn sanitize_settings(input: Option<&serde_json::Value>) -> TtsSettings {
         )
         .round() as i64,
         special_users: to_special_users(record.get("specialUsers")),
+        sanitizer: to_sanitizer(record.get("sanitizer")),
     }
 }
 
@@ -597,7 +649,8 @@ pub fn decide(
     if !settings.enabled {
         return idle("TTS is disabled.".to_owned());
     }
-    let (comment_allowed, spoken_text, comment_reason) = evaluate_comment_filter(comment, settings);
+    let (comment_allowed, permitted_text, comment_reason) =
+        evaluate_comment_filter(comment, settings);
     if !comment_allowed {
         return idle(comment_reason);
     }
@@ -614,6 +667,22 @@ pub fn decide(
             via,
             special_user,
         };
+    }
+    // Text processing runs after the trigger/eligibility filters (so command
+    // matching still sees the original comment) and before the points check
+    // (so an emote-only comment never charges the viewer for speech that will
+    // not happen). Nothing speakable means no synthesis request at all.
+    let mut spoken_text = sanitize_tts_text(&permitted_text, &settings.sanitizer);
+    if is_blank_tts_text(&spoken_text) {
+        if settings.sanitizer.skip_empty_messages {
+            return idle("Nothing remains to speak after removing emote codes.".to_owned());
+        }
+        // The operator asked not to swallow empty results: fall back to the
+        // permitted text so the viewer still hears something.
+        spoken_text = permitted_text.trim().to_owned();
+        if is_blank_tts_text(&spoken_text) {
+            return idle("Empty comments are never spoken.".to_owned());
+        }
     }
     let points_cost = if settings.charge_points {
         settings.points_cost.max(0)
@@ -884,5 +953,115 @@ mod tests {
         // Capacity is 2: the oldest fingerprint ("a") was evicted, so it
         // claims again even inside the window.
         assert!(deduper.claim("a", 2700));
+    }
+
+    #[test]
+    fn known_emote_codes_are_removed_before_speech() {
+        let settings = enabled();
+        let author = Author {
+            handle: "ada".to_owned(),
+            ..Author::default()
+        };
+        let decision = decide(
+            "Hello [laughcry][laughcry] everyone!",
+            &author,
+            &settings,
+            &[],
+            |_| 0,
+        );
+        assert!(decision.speak);
+        assert_eq!(decision.spoken_text, "Hello everyone!");
+    }
+
+    #[test]
+    fn emote_only_comment_never_speaks_or_charges_points() {
+        let settings = TtsSettings {
+            charge_points: true,
+            points_cost: 50,
+            ..enabled()
+        };
+        let rich = Author {
+            handle: "ada".to_owned(),
+            points: Some(500.0),
+            ..Author::default()
+        };
+        let decision = decide("[laughcry][laughcry]", &rich, &settings, &[], |_| 0);
+        assert!(!decision.speak);
+        assert_eq!(decision.points_cost, 0);
+        assert!(decision.spoken_text.is_empty());
+    }
+
+    #[test]
+    fn legitimate_bracketed_text_survives_sanitization() {
+        let settings = enabled();
+        let author = Author {
+            handle: "ada".to_owned(),
+            ..Author::default()
+        };
+        for comment in ["Array [1,2,3]", "Test [debug]", "[username] joined"] {
+            let decision = decide(comment, &author, &settings, &[], |_| 0);
+            assert!(decision.speak, "expected to speak: {comment}");
+            assert_eq!(decision.spoken_text, comment);
+        }
+    }
+
+    #[test]
+    fn skip_empty_messages_false_falls_back_to_the_permitted_text() {
+        let settings = TtsSettings {
+            sanitizer: TtsTextSanitizerSettings {
+                skip_empty_messages: false,
+                ..TtsTextSanitizerSettings::default()
+            },
+            ..enabled()
+        };
+        let author = Author {
+            handle: "ada".to_owned(),
+            ..Author::default()
+        };
+        let decision = decide("[laughcry]", &author, &settings, &[], |_| 0);
+        assert!(decision.speak);
+        assert_eq!(decision.spoken_text, "[laughcry]");
+    }
+
+    #[test]
+    fn sanitizer_settings_are_coerced_from_persisted_state() {
+        let settings = sanitize_settings(Some(&json!({
+            "sanitizer": {
+                "removeUnicodeEmoji": true,
+                "emoteSpeechMode": "describe",
+                "collapseWhitespace": false
+            }
+        })));
+        assert!(settings.sanitizer.remove_unicode_emoji);
+        assert_eq!(
+            settings.sanitizer.emote_speech_mode,
+            EmoteSpeechMode::Describe
+        );
+        assert!(!settings.sanitizer.collapse_whitespace);
+        // Unspecified fields keep the shipped defaults.
+        assert!(settings.sanitizer.remove_known_emotes);
+        assert!(settings.sanitizer.skip_empty_messages);
+        assert_eq!(
+            sanitize_settings(None).sanitizer,
+            TtsTextSanitizerSettings::default()
+        );
+    }
+
+    #[test]
+    fn describe_mode_speaks_the_catalog_description() {
+        let settings = TtsSettings {
+            sanitizer: TtsTextSanitizerSettings {
+                emote_speech_mode: EmoteSpeechMode::Describe,
+                ..TtsTextSanitizerSettings::default()
+            },
+            ..enabled()
+        };
+        let author = Author {
+            handle: "ada".to_owned(),
+            ..Author::default()
+        };
+        let decision = decide("Hello [happy] world", &author, &settings, &[], |_| 0);
+        assert!(decision.speak);
+        assert_eq!(decision.spoken_text, "Hello happy world");
     }
 }

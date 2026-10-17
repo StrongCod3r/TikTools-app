@@ -1,4 +1,9 @@
 import type { SpecialTtsUser, TtsCommentMode, TtsSettings } from './types.ts';
+import {
+  defaultTtsSanitizerSettings,
+  type TtsEmoteSpeechMode,
+  type TtsTextSanitizerSettings,
+} from './sanitizer.ts';
 
 export const TTS_LIMITS = {
   minSpeed: 0.25,
@@ -56,6 +61,8 @@ export function defaultTtsSettings(): TtsSettings {
     pointsCost: 0,
 
     specialUsers: [],
+
+    sanitizer: defaultTtsSanitizerSettings(),
   };
 }
 
@@ -140,6 +147,28 @@ function toCommentMode(value: unknown): TtsCommentMode {
   return value === 'dot' || value === 'slash' || value === 'command' ? value : 'any';
 }
 
+function toEmoteSpeechMode(value: unknown): TtsEmoteSpeechMode {
+  return value === 'describe' ? 'describe' : 'remove';
+}
+
+/** Coerces persisted text-processing state; missing fields keep their default. */
+function toSanitizer(value: unknown): TtsTextSanitizerSettings {
+  const defaults = defaultTtsSanitizerSettings();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return defaults;
+  const record = value as Record<string, unknown>;
+  return {
+    removeKnownEmotes: toBoolean(record.removeKnownEmotes, defaults.removeKnownEmotes),
+    removeUnicodeEmoji: toBoolean(record.removeUnicodeEmoji, defaults.removeUnicodeEmoji),
+    removeInvisibleCharacters: toBoolean(
+      record.removeInvisibleCharacters,
+      defaults.removeInvisibleCharacters,
+    ),
+    collapseWhitespace: toBoolean(record.collapseWhitespace, defaults.collapseWhitespace),
+    emoteSpeechMode: toEmoteSpeechMode(record.emoteSpeechMode),
+    skipEmptyMessages: toBoolean(record.skipEmptyMessages, defaults.skipEmptyMessages),
+  };
+}
+
 /** Coerces unknown persisted state into valid settings with clamped numbers. */
 export function sanitizeTtsSettings(input: unknown): TtsSettings {
   const defaults = defaultTtsSettings();
@@ -188,6 +217,8 @@ export function sanitizeTtsSettings(input: unknown): TtsSettings {
     ),
 
     specialUsers: toSpecialUsers(record.specialUsers),
+
+    sanitizer: toSanitizer(record.sanitizer),
   };
 }
 

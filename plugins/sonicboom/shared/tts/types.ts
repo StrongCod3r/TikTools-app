@@ -1,3 +1,5 @@
+import type { TtsTextSanitizerSettings } from './sanitizer.ts';
+
 export type TtsCommentMode = 'any' | 'dot' | 'slash' | 'command';
 
 export type SpecialTtsUser = {
@@ -38,6 +40,9 @@ export type TtsSettings = {
   pointsCost: number;
 
   specialUsers: SpecialTtsUser[];
+
+  /** Text processing applied to the permitted spoken text before synthesis. */
+  sanitizer: TtsTextSanitizerSettings;
 };
 
 /** Authoritative role flags for one chat author. Absent means unknown. */

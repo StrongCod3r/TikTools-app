@@ -43,7 +43,9 @@
 //!   is cancelled and joined before a replacement starts.
 
 mod config;
+mod emotes;
 mod policy;
+mod sanitizer;
 
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -1459,12 +1461,24 @@ mod tests {
     fn provider_budgets_are_bounded_and_unknown_providers_stay_conservative() {
         // Provider-aware synchronous budgets: Supertonic is fast, Pocket clones
         // are slower, Qwen GGUF autoregressive cloning is the slowest.
-        assert_eq!(provider_timeout_budget("supertonic"), Duration::from_secs(15));
-        assert_eq!(provider_timeout_budget("pocket-tts"), Duration::from_secs(60));
-        assert_eq!(provider_timeout_budget("qwen3-gguf"), Duration::from_secs(180));
+        assert_eq!(
+            provider_timeout_budget("supertonic"),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            provider_timeout_budget("pocket-tts"),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            provider_timeout_budget("qwen3-gguf"),
+            Duration::from_secs(180)
+        );
         // Unknown and empty providers never get a multi-minute wait.
         assert_eq!(provider_timeout_budget(""), Duration::from_secs(15));
-        assert_eq!(provider_timeout_budget("mystery-tts"), Duration::from_secs(15));
+        assert_eq!(
+            provider_timeout_budget("mystery-tts"),
+            Duration::from_secs(15)
+        );
         // The engine ceiling always bounds the effective deadline, so a larger
         // future table entry still saturates at the hard cap.
         let engine = SpeechEngine::default();

@@ -31,6 +31,30 @@ export type {
   TtsRequest,
   TtsSettings,
 } from './types.ts';
+export type {
+  TtsEmoteSpeechMode,
+  TtsTextSanitizerSettings,
+} from './sanitizer.ts';
+export {
+  collapseTtsWhitespace,
+  defaultTtsSanitizerSettings,
+  isBlankTtsText,
+  isEmojiGrapheme,
+  isTtsWhitespace,
+  isUnwantedInvisible,
+  sanitizeTtsText,
+  stripKnownEmotes,
+  stripUnicodeEmoji,
+  stripUnwantedInvisible,
+} from './sanitizer.ts';
+export {
+  EMOTE_CATALOG,
+  EMOTE_CATALOG_VERSION,
+  emoteById,
+  isKnownEmoteId,
+  MAX_EMOTE_TOKEN_LENGTH,
+  type EmoteCatalogEntry,
+} from './emote-catalog.ts';
 export {
   clampNumber,
   defaultTtsSettings,
