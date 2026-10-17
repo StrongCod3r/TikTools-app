@@ -28,6 +28,9 @@ function normalizeUsername(value: string): string {
   return value.trim().replace(/^@/, '');
 }
 
+/** Bounded native retry budget; mirrors the host's ReconnectPolicy (5). */
+const MAX_RECONNECT_ATTEMPTS = 5;
+
 /** Live connection state: connect form, status, and active creator. */
 export function useConnection(control: ControlClient, callbacks: ConnectionCallbacks) {
   const uniqueId = ref(getSavedUsername());
@@ -37,6 +40,10 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
   const recents = ref<string[]>(getRecentUsernames());
   const status = ref<ConnectionStatus>('idle');
   const error = ref('');
+  /** Retry attempt/delay carried by `live.reconnecting`, when the host can
+   *  observe them. Null means "reconnecting, unknown attempt". */
+  const reconnectAttempt = ref<number | null>(null);
+  const reconnectDelayMs = ref<number | null>(null);
   let revision = 0;
   let statusRefresh = 0;
   const unsubscribers: Array<() => void> = [];
@@ -63,23 +70,33 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     }
   };
 
-  subscribe<{ attempt: number; delayMs: number }>('live.reconnecting', () => {
+  const clearReconnect = (): void => {
+    reconnectAttempt.value = null;
+    reconnectDelayMs.value = null;
+  };
+
+  subscribe<{ attempt: number; delayMs: number }>('live.reconnecting', (data) => {
     revision += 1;
     status.value = 'retrying';
+    reconnectAttempt.value = Number.isFinite(data?.attempt) ? data.attempt : null;
+    reconnectDelayMs.value = Number.isFinite(data?.delayMs) ? data.delayMs : null;
   });
   subscribe<{ phase: string; message: string }>('live.error', (data) => {
     revision += 1;
     status.value = 'error';
     error.value = data.message;
+    clearReconnect();
   });
   subscribe<{ uniqueId?: string | null }>('live.connected', (data) => {
     revision += 1;
     status.value = 'connected';
+    clearReconnect();
     if (data.uniqueId) noteCreatorSeen(normalizeUsername(data.uniqueId), false);
   });
   subscribe('live.disconnected', () => {
     revision += 1;
     status.value = 'disconnected';
+    clearReconnect();
   });
 
   const requestConnect = async (target: string, sessionCookie: string): Promise<void> => {
@@ -104,8 +121,11 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
       return;
     }
     error.value = '';
-    callbacks.resetFeed();
+    // A reconnect to the same creator is not a new session, so the feed is
+    // preserved. Only a deliberate switch to another creator resets it.
+    if (target !== activeCreatorRef.value) callbacks.resetFeed();
     status.value = 'connecting';
+    clearReconnect();
     activeCreator.value = target;
     activeCreatorRef.value = target;
     // Write the normalized handle back so the input matches the pill
@@ -122,6 +142,7 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     error.value = '';
     callbacks.resetFeed();
     status.value = 'connecting';
+    clearReconnect();
     const previousCreator = activeCreatorRef.value;
     activeCreator.value = callbacks.translate('searchingRooms');
     callbacks.goFeed();
@@ -153,6 +174,7 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
       error.value = errorMessage(failure);
     });
     status.value = 'disconnected';
+    clearReconnect();
   };
 
   const handleReconnect = (): void => {
@@ -182,9 +204,11 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
       if (requestRevision !== revision || refresh !== statusRefresh) return;
       if (result.connected) {
         status.value = 'connected';
+        clearReconnect();
         if (result.uniqueId) noteCreatorSeen(normalizeUsername(result.uniqueId), false);
       } else {
         status.value = 'disconnected';
+        clearReconnect();
       }
     } catch (failure) {
       if (requestRevision === revision && refresh === statusRefresh) console.warn(`live status refresh failed: ${errorMessage(failure)}`);
@@ -198,6 +222,9 @@ export function useConnection(control: ControlClient, callbacks: ConnectionCallb
     recents,
     status,
     error,
+    reconnectAttempt,
+    reconnectDelayMs,
+    maxReconnectAttempts: MAX_RECONNECT_ATTEMPTS,
     noteCreatorSeen,
     mergeRecentNames,
     handleConnect,

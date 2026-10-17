@@ -278,3 +278,77 @@ test('older status refresh cannot overwrite a newer refresh', async () => {
   expect(connection.status.value).toBe('disconnected');
   connection.dispose();
 });
+
+describe('useConnection reconnect reporting', () => {
+  test('live.reconnecting surfaces the attempt and delay, and connected clears them', () => {
+    const topics = new Map<string, (data: never) => void>();
+    const control = stubControl({
+      onTopic: (<T,>(topic: string, handler: (data: T) => void): (() => void) => {
+        topics.set(topic, handler as (data: never) => void);
+        return () => {};
+      }) as ControlClient['onTopic'],
+    });
+    const connection = useConnection(control, callbacks);
+
+    topics.get('live.reconnecting')?.({ attempt: 2, delayMs: 4000 } as never);
+    expect(connection.status.value).toBe('retrying');
+    expect(connection.reconnectAttempt.value).toBe(2);
+    expect(connection.reconnectDelayMs.value).toBe(4000);
+
+    topics.get('live.connected')?.({ uniqueId: 'alice' } as never);
+    expect(connection.status.value).toBe('connected');
+    expect(connection.reconnectAttempt.value).toBeNull();
+    expect(connection.reconnectDelayMs.value).toBeNull();
+  });
+
+  test('a payload without numbers reports an unknown attempt, never NaN', () => {
+    const topics = new Map<string, (data: never) => void>();
+    const control = stubControl({
+      onTopic: (<T,>(topic: string, handler: (data: T) => void): (() => void) => {
+        topics.set(topic, handler as (data: never) => void);
+        return () => {};
+      }) as ControlClient['onTopic'],
+    });
+    const connection = useConnection(control, callbacks);
+
+    topics.get('live.reconnecting')?.({} as never);
+    expect(connection.status.value).toBe('retrying');
+    expect(connection.reconnectAttempt.value).toBeNull();
+    expect(connection.reconnectDelayMs.value).toBeNull();
+  });
+});
+
+describe('useConnection reconnect vs creator switch', () => {
+  test('a reconnect to the same creator does not reset the feed', () => {
+    let resets = 0;
+    const control = stubControl({
+      call: <T,>(): Promise<T> => Promise.resolve({ connected: false } as T),
+    });
+    const connection = useConnection(control, {
+      ...callbacks,
+      resetFeed: () => { resets += 1; },
+    });
+
+    connection.handleConnect('alice');
+    const afterFirstConnect = resets;
+    connection.handleReconnect();
+    expect(resets).toBe(afterFirstConnect);
+    connection.dispose();
+  });
+
+  test('switching to another creator resets the feed', () => {
+    let resets = 0;
+    const control = stubControl({
+      call: <T,>(): Promise<T> => Promise.resolve({ connected: false } as T),
+    });
+    const connection = useConnection(control, {
+      ...callbacks,
+      resetFeed: () => { resets += 1; },
+    });
+
+    connection.handleConnect('alice');
+    connection.handleConnect('bob');
+    expect(resets).toBe(2);
+    connection.dispose();
+  });
+});

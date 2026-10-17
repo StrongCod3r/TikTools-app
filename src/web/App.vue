@@ -77,6 +77,8 @@ const activePluginBackend = computed(() => {
       :theme="app.theme"
       :status="app.status"
       :active-creator="app.activeCreator"
+      :reconnect-attempt="app.reconnectAttempt"
+      :max-reconnect-attempts="app.maxReconnectAttempts"
       :on-theme-toggle="app.handleThemeToggle"
       :on-locale-toggle="app.handleLocaleToggle"
       :on-connect="() => (app.uniqueId || app.activeCreator ? app.handleConnect() : app.setActiveTab('connect'))"

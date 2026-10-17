@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { t, type Locale } from '../i18n.ts';
 import type { ConnectionStatus } from '../types.ts';
 import { Tooltip } from './ui/Tooltip.vue';
@@ -11,12 +12,34 @@ import {
 type ConnectButtonProps = {
   locale: Locale;
   status: ConnectionStatus;
+  /** Retry attempt reported by the host, when it can observe one. */
+  reconnectAttempt?: number | null;
+  maxReconnectAttempts?: number;
+  reconnectDelayMs?: number | null;
   onConnect: () => void;
   onDisconnect: () => void;
   onReconnect: () => void;
 };
 
 const props = defineProps<ConnectButtonProps>();
+
+const busyLabel = computed(() => {
+  if (props.status !== 'retrying') return `${t(props.locale, 'connecting')}…`;
+  if (typeof props.reconnectAttempt === 'number') {
+    return t(props.locale, 'reconnectingAttempt', {
+      attempt: props.reconnectAttempt,
+      max: props.maxReconnectAttempts ?? 5,
+    });
+  }
+  return `${t(props.locale, 'retrying')}…`;
+});
+
+const busyTitle = computed(() => {
+  if (props.status !== 'retrying' || typeof props.reconnectDelayMs !== 'number') return undefined;
+  return t(props.locale, 'reconnectInSeconds', {
+    seconds: Math.max(1, Math.round(props.reconnectDelayMs / 1000)),
+  });
+});
 </script>
 
 <template>
@@ -38,9 +61,15 @@ const props = defineProps<ConnectButtonProps>();
 
     <!-- Busy: disabled stateful button -->
     <template v-else-if="props.status === 'connecting' || props.status === 'retrying'">
-      <button class="ui-btn ui-btn--soft ui-btn--sm connect-btn is-busy" type="button" disabled>
+      <button
+        class="ui-btn ui-btn--soft ui-btn--sm connect-btn is-busy"
+        type="button"
+        :title="busyTitle"
+        aria-live="polite"
+        disabled
+      >
         <span class="connect-spinner" aria-hidden="true" />
-        <span>{{ t(props.locale, props.status === 'retrying' ? 'retrying' : 'connecting') }}…</span>
+        <span>{{ busyLabel }}</span>
       </button>
     </template>
 

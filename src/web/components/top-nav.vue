@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { t, type Locale } from '../i18n.ts';
 import type { Theme } from '../preferences.ts';
 import type { ConnectionStatus } from '../types.ts';
@@ -16,6 +17,9 @@ type TopNavProps = {
   theme: Theme;
   status: ConnectionStatus;
   activeCreator: string;
+  /** Retry attempt reported by the host, when it can observe one. */
+  reconnectAttempt?: number | null;
+  maxReconnectAttempts?: number;
   onThemeToggle: () => void;
   onLocaleToggle: () => void;
   onConnect: () => void;
@@ -24,6 +28,29 @@ type TopNavProps = {
 };
 
 const props = defineProps<TopNavProps>();
+
+/** Localized status text, including the retry attempt when known. */
+const statusLabel = computed(() => {
+  switch (props.status) {
+    case 'connected':
+      return t(props.locale, 'connected');
+    case 'connecting':
+      return t(props.locale, 'connecting');
+    case 'retrying':
+      return typeof props.reconnectAttempt === 'number'
+        ? t(props.locale, 'reconnectingAttempt', {
+            attempt: props.reconnectAttempt,
+            max: props.maxReconnectAttempts ?? 5,
+          })
+        : t(props.locale, 'retrying');
+    case 'error':
+      return t(props.locale, 'needsAttention');
+    case 'disconnected':
+      return t(props.locale, 'disconnected');
+    default:
+      return t(props.locale, 'waiting');
+  }
+});
 </script>
 
 <template>
@@ -37,10 +64,11 @@ const props = defineProps<TopNavProps>();
     </div>
 
     <div class="top-center">
-      <Tooltip v-if="props.activeCreator" :text="`Status: ${props.status}`" position="bottom">
+      <Tooltip v-if="props.activeCreator" :text="statusLabel" position="bottom">
         <div class="active-creator-pill">
           <span :class="['status-dot', props.status === 'connected' ? 'online' : props.status === 'connecting' || props.status === 'retrying' ? 'busy' : 'offline']" />
           <span>@{{ props.activeCreator.replace(/^@/, '') }}</span>
+          <span class="active-creator-status" aria-live="polite">{{ statusLabel }}</span>
         </div>
       </Tooltip>
     </div>
@@ -49,6 +77,8 @@ const props = defineProps<TopNavProps>();
       <ConnectButton
         :locale="props.locale"
         :status="props.status"
+        :reconnect-attempt="props.reconnectAttempt"
+        :max-reconnect-attempts="props.maxReconnectAttempts"
         :on-connect="props.onConnect"
         :on-reconnect="props.onReconnect"
         :on-disconnect="props.onDisconnect"

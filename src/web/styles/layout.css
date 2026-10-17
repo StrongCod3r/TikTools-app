@@ -102,6 +102,15 @@
   border-radius: 50%;
   background: var(--text-muted);
 }
+
+/* Localized status text beside the creator pill; announced politely so a
+   reconnect transition is heard without re-reading the whole nav. */
+.active-creator-status {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 11px;
+  white-space: nowrap;
+}
 .status-dot.online {
   background: var(--tt-green);
   box-shadow: 0 0 10px var(--tt-green);
