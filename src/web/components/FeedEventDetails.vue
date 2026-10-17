@@ -42,6 +42,9 @@ function renderFeedEventDetails({ event, locale, imagesEnabled = true, onOpenUse
     { key: 'kind', label: t(locale, 'detailKind'), value: t(locale, eventKindLabelKey(event.kind)) },
   ];
   if (event.kind === 'gift') {
+    if (event.giftDetails?.name) {
+      rows.push({ key: 'giftName', label: t(locale, 'detailGiftName'), value: event.giftDetails.name });
+    }
     rows.push({
       key: 'giftCount',
       label: t(locale, 'detailGiftCount'),

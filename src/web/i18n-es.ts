@@ -496,6 +496,7 @@ export const spanish: Record<TranslationKey, string> = {
   openEventDetails: 'Abrir los detalles del evento de {user}',
   valueNotAvailable: 'N/D',
   detailKind: 'Tipo',
+  detailGiftName: 'Regalo',
   detailGiftCount: 'Cantidad del regalo',
   detailGiftDiamonds: 'Diamantes',
   detailLikeCount: 'Likes',

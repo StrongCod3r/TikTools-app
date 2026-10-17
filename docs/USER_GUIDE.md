@@ -30,6 +30,26 @@ Treat the value as a password:
 
 Feed is the live event stream. It displays chat, gifts, likes, membership/follow activity, and social events. The filter controls, search, unread state, and auto-scroll behavior are local UI state for the current session.
 
+Rows stay deliberately compact: avatar, name, a small kind glyph, the message, and a timestamp. Level, points, gift cost, message IDs, and the exact time live in the context panel instead of on every row, so the stream stays readable under load.
+
+**Context panel.** The panel on the right has three modes:
+
+- **Viewers** — the current top contributors.
+- **Details** — the selected event, with everything the row hides.
+- **Profile** — the selected viewer's tracked stats.
+
+Click a row's message to open its details, or the avatar/name to open that user's profile. `Esc` or the close button dismisses the panel. On narrow windows the panel becomes a drawer over the stream rather than squeezing it. The panel never auto-opens on incoming events, and selecting an event does not pause the stream.
+
+#### Explore LIVE
+
+**Connect → Explore LIVE** browses rooms that are live right now. It is closed by default and only queries TikTok when you open it. Search is debounced, results are cached briefly, and each outcome is distinct: no matches, sign-in required, rate limited, or a transient failure with a retry button. **Connect** on a row connects to that specific room through the normal connection flow.
+
+**Choose randomly** samples uniformly from the rooms already listed (excluding the current creator when there is an alternative) and shows a preview — nothing connects until you press Connect. It never selects a room you have not seen.
+
+#### Connection status
+
+The top nav shows the current state: Connected, Connecting, Reconnecting, Offline, or Connection Error. When the host reports it, a reconnect shows the attempt and the retry delay. A reconnect to the same creator — manual or automatic — keeps the current feed; only switching to a different creator starts a new feed.
+
 ### Points
 
 Points are stored in SQLite and can be awarded for:

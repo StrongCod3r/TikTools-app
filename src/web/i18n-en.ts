@@ -492,6 +492,7 @@ export const english = {
   openEventDetails: 'Open event details for {user}',
   valueNotAvailable: 'N/A',
   detailKind: 'Type',
+  detailGiftName: 'Gift',
   detailGiftCount: 'Gift count',
   detailGiftDiamonds: 'Diamonds',
   detailLikeCount: 'Likes',
