@@ -60,12 +60,35 @@ const DEDUP_MAX_ENTRIES: usize = 500;
 const EVENT_ID_DEDUP_WINDOW_MS: u64 = 10 * 60_000;
 const EVENT_ID_DEDUP_MAX_ENTRIES: usize = 2_000;
 const VOICES_TTL_SECS: u64 = 300;
-/// Total speech request deadline (connect + transfer). A 2xx within this
-/// window means accepted, not played.
-const SPEAK_TIMEOUT_SECS: u64 = 15;
+/// Catalog fetch budget: never the synthesis budget; a slow catalog must not
+/// consume the speech window.
+const VOICE_CATALOG_TIMEOUT_SECS: u64 = 10;
 /// Separate connect budget so a black-holed host is distinguishable from a
 /// server that accepted but is slow to answer.
 const SPEAK_CONNECT_TIMEOUT_SECS: u64 = 5;
+/// Hard ceiling for the observer's synchronous request. This is the test seam
+/// ceiling and the largest configured provider budget; the effective deadline
+/// is the smaller of the provider budget and this value.
+const MAX_SPEAK_TIMEOUT_SECS: u64 = 180;
+/// Provider-aware synchronous speech budgets, mirrored host-side by the
+/// plugin's `timeoutByField` manifest policy and the shared TS
+/// `PROVIDER_TTS_BUDGETS_MS`. Supertonic is fast; Pocket clones are slower;
+/// Qwen3-GGUF autoregressive cloning is the slowest. These are honest
+/// starting hypotheses, not performance guarantees.
+const SPEAK_TIMEOUT_SUPERTONIC_SECS: u64 = 15;
+const SPEAK_TIMEOUT_POCKET_SECS: u64 = 60;
+const SPEAK_TIMEOUT_QWEN_GGUF_SECS: u64 = 180;
+
+/// Effective synchronous speech deadline for one provider. Unknown providers
+/// get the conservative Supertonic budget rather than a multi-minute wait.
+fn provider_timeout_budget(provider: &str) -> Duration {
+    let secs = match provider {
+        "pocket-tts" => SPEAK_TIMEOUT_POCKET_SECS,
+        "qwen3-gguf" => SPEAK_TIMEOUT_QWEN_GGUF_SECS,
+        _ => SPEAK_TIMEOUT_SUPERTONIC_SECS,
+    };
+    Duration::from_secs(secs)
+}
 /// Ordinary chat freshness: a job older than this is dropped before it can
 /// monopolize the worker. High-value/manual speech is out of the observer's
 /// scope (declarative actions bypass this queue entirely).
@@ -284,7 +307,7 @@ impl Default for SpeechEngine {
             voices_fetched_at_ms: 0,
             catalog_key: None,
             rng: now_millis().max(1),
-            request_timeout: Duration::from_secs(SPEAK_TIMEOUT_SECS),
+            request_timeout: Duration::from_secs(MAX_SPEAK_TIMEOUT_SECS),
             stats: Arc::new(SpeechStats::default()),
             runtime: Arc::new(SpeechRuntime::new(1)),
             epoch: Instant::now(),
@@ -391,7 +414,7 @@ impl SpeechEngine {
         let mut request = self
             .http
             .get(&url)
-            .timeout(Duration::from_secs(SPEAK_TIMEOUT_SECS));
+            .timeout(Duration::from_secs(VOICE_CATALOG_TIMEOUT_SECS));
         if !token.is_empty() {
             request = request.bearer_auth(token);
         }
@@ -446,7 +469,7 @@ impl SpeechEngine {
         let mut request = self
             .http
             .post(&url)
-            .timeout(self.request_timeout)
+            .timeout(provider_timeout_budget(provider).min(self.request_timeout))
             .header("Content-Type", "text/plain")
             .body(text.to_owned());
         if !token.is_empty() {
@@ -1432,6 +1455,25 @@ mod tests {
             "built UI entry must exist at {entry}"
         );
     }
+    #[test]
+    fn provider_budgets_are_bounded_and_unknown_providers_stay_conservative() {
+        // Provider-aware synchronous budgets: Supertonic is fast, Pocket clones
+        // are slower, Qwen GGUF autoregressive cloning is the slowest.
+        assert_eq!(provider_timeout_budget("supertonic"), Duration::from_secs(15));
+        assert_eq!(provider_timeout_budget("pocket-tts"), Duration::from_secs(60));
+        assert_eq!(provider_timeout_budget("qwen3-gguf"), Duration::from_secs(180));
+        // Unknown and empty providers never get a multi-minute wait.
+        assert_eq!(provider_timeout_budget(""), Duration::from_secs(15));
+        assert_eq!(provider_timeout_budget("mystery-tts"), Duration::from_secs(15));
+        // The engine ceiling always bounds the effective deadline, so a larger
+        // future table entry still saturates at the hard cap.
+        let engine = SpeechEngine::default();
+        for provider in ["supertonic", "pocket-tts", "qwen3-gguf", "unknown"] {
+            let effective = provider_timeout_budget(provider).min(engine.request_timeout);
+            assert!(effective <= Duration::from_secs(MAX_SPEAK_TIMEOUT_SECS));
+        }
+    }
+
     #[tokio::test]
     async fn catalog_cache_tracks_revision_provider_and_auth_even_with_explicit_default() {
         use std::io::{Read, Write};

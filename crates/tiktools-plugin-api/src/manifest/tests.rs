@@ -317,6 +317,40 @@ fn validates_optional_action_timeout_bounds() {
 }
 
 #[test]
+fn validates_provider_aware_action_timeout_table() {
+    let manifest = |spec: &str| {
+        format!(
+            r#"{{"schemaVersion":3,"id":"tts","name":"Tts","version":"1.0.0","runtime":"declarative","actionTypes":[{{"id":"tts.speak","http":{{"path":"/api/tts/play","timeoutByField":{spec}}}}}]}}"#
+        )
+    };
+    // The shipped SonicBoom table: Supertonic 15s, Pocket 60s, Qwen GGUF 180s.
+    // The slow-provider budget intentionally exceeds the 120s generic clamp.
+    assert!(PluginManifest::from_json_str(&manifest(
+        r#"{"field":"provider","defaultMs":15000,"values":{"supertonic":15000,"pocket-tts":60000,"qwen3-gguf":180000}}"#
+    ))
+    .is_ok());
+    // Shape errors and out-of-range candidates fail discovery so the resolved
+    // budget is always a bounded number.
+    for invalid in [
+        r#""nope""#,
+        r#"{"values":{"supertonic":15000}}"#,
+        r#"{"field":"provider"}"#,
+        r#"{"field":"provider","values":[]}"#,
+        r#"{"field":"provider","values":{}}"#,
+        r#"{"field":"  ","values":{"a":1000}}"#,
+        r#"{"field":"provider","values":{"a":50}}"#,
+        r#"{"field":"provider","values":{"a":180001}}"#,
+        r#"{"field":"provider","defaultMs":180001,"values":{"a":1000}}"#,
+        r#"{"field":"provider","values":{"a":"1000"}}"#,
+    ] {
+        assert!(
+            PluginManifest::from_json_str(&manifest(invalid)).is_err(),
+            "timeoutByField {invalid} should be rejected"
+        );
+    }
+}
+
+#[test]
 fn schema_v2_ignores_declarative_keys() {
     // A v2 manifest carrying v3 keys keeps historical behavior: the keys are
     // dropped, never validated, so old packages parse exactly as before.

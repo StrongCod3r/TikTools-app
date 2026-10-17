@@ -54,7 +54,7 @@ destination host must match the base host, otherwise the request is refused.
 | Key                   | Meaning                                                            |
 | --------------------- | ------------------------------------------------------------------ |
 | `baseUrl`             | Literal http(s) URL or `{{ settings.* }}` template (required).     |
-| `timeoutMs`           | Default timeout, 100–120000 (default 10000).                       |
+| `timeoutMs`           | Default timeout for option, health and manifest fetches, 100–120000 (default 10000). Action `http` blocks accept up to 180000 (see [Actions](#actions)). |
 | `allowPrivateNetwork` | Opt in to private LAN hosts (default false).                       |
 | `headers`             | Extra headers for every request (templates allowed).               |
 | `auth`                | `none`, `bearer`, `header`, or `query` (see below).                |
@@ -178,6 +178,39 @@ An action descriptor with an `http` block runs in the host; the
 `requiredCapabilities` gate still applies (`http.request`). Test runs
 describe the request without sending. `emitResponseAs` passes through to
 the HTTP engine.
+
+### Action request budgets
+
+An action's `http.timeoutMs` accepts 100–180000 ms. The wider ceiling exists
+because a local synthesizer — for example a Qwen3-GGUF voice-clone server —
+can legitimately take minutes. It applies only to plugin-declared actions:
+generic, user-authored `action.http` automation nodes stay capped at
+120000 ms, so no unrelated action inherits a multi-minute deadline.
+
+When one action serves several backends with different speeds, declare a
+provider-aware table instead of a single number. The host resolves
+`config.<field>` against `values`, falling back to `defaultMs`, so a fast
+provider is never forced to wait out a slow provider's budget:
+
+```json
+"http": {
+  "path": "/api/tts/play",
+  "timeoutMs": 15000,
+  "timeoutByField": {
+    "field": "provider",
+    "defaultMs": 15000,
+    "values": { "supertonic": 15000, "pocket-tts": 60000, "qwen3-gguf": 180000 }
+  }
+}
+```
+
+Resolution precedence, largest scope first: `timeoutByField` matched value →
+its `defaultMs` → the action's static `timeoutMs` → the manifest
+`http.timeoutMs` → 10000. Every candidate is validated at discovery (a bad
+shape or an out-of-range value fails the manifest), and the executor clamps
+the resolved budget again as defence in depth. The effective deadline is the
+smallest of this budget, the executor ceiling, and the server's own
+generation deadline.
 
 Host surfaces may also run actions immediately
 (`execute-plugin-action`): the TTS voice tester runs the speech action,

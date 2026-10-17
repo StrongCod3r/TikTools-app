@@ -54,6 +54,7 @@ impl crate::AppCore {
             extra_headers: block.get("headers").and_then(Value::as_object),
             body_template: block.get("body").and_then(Value::as_str),
             timeout_override_ms: block.get("timeoutMs").and_then(Value::as_u64),
+            timeout_by_field: block.get("timeoutByField").and_then(Value::as_object),
             scope: &scope,
             broker: &self.capabilities,
         })?;
@@ -87,6 +88,16 @@ impl crate::AppCore {
         fetch.insert(
             "timeoutMs".to_owned(),
             Value::Number(endpoint.timeout_ms.into()),
+        );
+        // Plugin actions may legitimately exceed the generic automation-node
+        // clamp; the executor honours this internal ceiling instead of its
+        // 120s default. It is set only by the declarative path, never by user
+        // workflow config.
+        fetch.insert(
+            "timeoutCeilingMs".to_owned(),
+            Value::Number(
+                tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS.into(),
+            ),
         );
         fetch.insert(
             "allowPrivateNetwork".to_owned(),
@@ -151,6 +162,7 @@ impl crate::AppCore {
             extra_headers: None,
             body_template: None,
             timeout_override_ms,
+            timeout_by_field: None,
             scope,
             broker: &self.capabilities,
         });

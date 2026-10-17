@@ -3,9 +3,12 @@ import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { defineVueComponent } from './vue/component.ts';
 
 import {
+  classifyTtsOutcomeOrigin,
   defaultTtsSettings,
   firstAvailableVoice,
+  formatBudgetMs,
   sanitizeTtsSettings,
+  ttsBudgetMs,
   type TtsLogEntry,
   type TtsSettings,
 } from '../../shared/tts/tts-policy.ts';
@@ -223,6 +226,8 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
     if (!voices.value.some(v => v.value === resolvedVoice)) return;
     activeSpeech += 1;
     speaking.value = true;
+    const budgetMs = ttsBudgetMs(current.providerId);
+    const startedAt = Date.now();
     void broker.getSettings().then(latest => {
       if (serverIdentity(latest) !== serverIdentity(fullSettings.value)) {
         catalogEpoch += 1; catalog.value = []; providers.value = []; refreshing.value = false;
@@ -240,25 +245,28 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
     })
       .then((outcome) => {
         const lines = outcome.logs.length > 0 ? ` ${outcome.logs.slice(0, 3).join(' · ')}` : '';
+        const reason = outcome.ok ? outcome.summary : (outcome.error ?? outcome.summary);
+        // Redacted diagnostics: selected provider, expected budget, actual
+        // elapsed time, and where a failure stopped. Never voice reference
+        // audio, tokens, or chat payloads beyond the tester's own text.
+        const diag = `provider=${current.providerId} budget=${formatBudgetMs(budgetMs)} elapsed=${outcome.durationMs}ms origin=${classifyTtsOutcomeOrigin(reason)}`;
         appendLog({
           ok: outcome.ok,
           source: 'tester',
           text: clean.slice(0, 160),
           voice: resolvedVoice,
-          summary: `${outcome.ok ? outcome.summary : (outcome.error ?? outcome.summary)}${lines}`.slice(
-            0,
-            500,
-          ),
+          summary: `${diag} · ${reason}${lines}`.slice(0, 500),
         });
       })
       .catch((failure: unknown) => {
         const message = failure instanceof Error ? failure.message : String(failure);
+        const diag = `provider=${current.providerId} budget=${formatBudgetMs(budgetMs)} elapsed=${Date.now() - startedAt}ms origin=${classifyTtsOutcomeOrigin(message)}`;
         appendLog({
           ok: false,
           source: 'tester',
           text: clean.slice(0, 160),
           voice: resolvedVoice,
-          summary: message.slice(0, 500),
+          summary: `${diag} · ${message}`.slice(0, 500),
         });
       })
       .finally(() => {

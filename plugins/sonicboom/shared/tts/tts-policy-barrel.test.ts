@@ -43,22 +43,28 @@ export type BarrelTypeParity = {
 };
 
 const EXPECTED_VALUES = [
+  'DEFAULT_TTS_BUDGET_MS',
+  'MAX_TTS_BUDGET_MS',
+  'PROVIDER_TTS_BUDGETS_MS',
   'TTS_LIMITS',
   'TTS_SPEED_PITCH_UNSUPPORTED',
   'TtsDeduper',
   'canAffordTts',
   'chooseVoice',
   'clampNumber',
+  'classifyTtsOutcomeOrigin',
   'decideTts',
   'defaultTtsSettings',
   'evaluateCommentFilter',
   'evaluateUserEligibility',
   'findSpecialUser',
   'firstAvailableVoice',
+  'formatBudgetMs',
   'normalizeHandle',
   'parseTtsSettings',
   'sanitizeTtsSettings',
   'serializeTtsSettings',
+  'ttsBudgetMs',
   'ttsFingerprint',
   'ttsSettingsKey',
 ];

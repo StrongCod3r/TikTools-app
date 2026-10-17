@@ -5,9 +5,13 @@ use crate::helpers::value_to_string;
 use crate::helpers::{is_loopback_host, is_private_host};
 use crate::services::capabilities::CapabilityBroker;
 use serde_json::{Map, Value};
+use tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS;
 use tiktools_plugin_api::PluginManifest;
 
 pub(crate) const DEFAULT_DECLARATIVE_TIMEOUT_MS: u64 = 10_000;
+
+/// Floor for any resolved request budget (mirrors the executor clamp).
+const MIN_DECLARATIVE_TIMEOUT_MS: u64 = 100;
 
 const MAX_RENDERED_URL_LEN: usize = 8_192;
 
@@ -48,8 +52,46 @@ pub(crate) struct DeclarativeBuild<'a> {
     pub extra_headers: Option<&'a Map<String, Value>>,
     pub body_template: Option<&'a str>,
     pub timeout_override_ms: Option<u64>,
+    /// Provider-aware budget table from the action's `http.timeoutByField`
+    /// descriptor. When present it takes precedence over `timeout_override_ms`
+    /// so a slow provider (Qwen GGUF) can request a larger budget than a fast
+    /// one (Supertonic) through a single declarative action.
+    pub timeout_by_field: Option<&'a Map<String, Value>>,
     pub scope: &'a Value,
     pub broker: &'a CapabilityBroker,
+}
+
+/// Resolves the effective action request budget.
+///
+/// Precedence (largest scope first):
+/// 1. `timeoutByField` matched against the rendered `config.<field>` value,
+///    falling back to its `defaultMs` when the provider is not listed;
+/// 2. the action block's static `timeoutMs`;
+/// 3. the manifest's `http.timeoutMs`;
+/// 4. [`DEFAULT_DECLARATIVE_TIMEOUT_MS`].
+///
+/// The result is clamped to `[MIN_DECLARATIVE_TIMEOUT_MS,
+/// MAX_DECLARATIVE_HTTP_TIMEOUT_MS]`; manifest validation already bounds the
+/// declared candidates, so the clamp is defence in depth.
+fn resolve_action_timeout(build: &DeclarativeBuild<'_>, http: &Map<String, Value>) -> u64 {
+    let from_field = build.timeout_by_field.and_then(|spec| {
+        let field = spec.get("field").and_then(Value::as_str)?;
+        let selected = build
+            .scope
+            .get("config")
+            .and_then(Value::as_object)
+            .and_then(|config| config.get(field))
+            .and_then(Value::as_str);
+        selected
+            .and_then(|value| spec.get("values").and_then(Value::as_object)?.get(value))
+            .and_then(Value::as_u64)
+            .or_else(|| spec.get("defaultMs").and_then(Value::as_u64))
+    });
+    from_field
+        .or(build.timeout_override_ms)
+        .or_else(|| http.get("timeoutMs").and_then(Value::as_u64))
+        .unwrap_or(DEFAULT_DECLARATIVE_TIMEOUT_MS)
+        .clamp(MIN_DECLARATIVE_TIMEOUT_MS, MAX_DECLARATIVE_HTTP_TIMEOUT_MS)
 }
 
 /// Renders and authorizes one declarative request without sending it.
@@ -250,11 +292,7 @@ pub(crate) fn build_declarative_request(
         ));
     }
 
-    let timeout_ms = build
-        .timeout_override_ms
-        .or_else(|| http.get("timeoutMs").and_then(Value::as_u64))
-        .unwrap_or(DEFAULT_DECLARATIVE_TIMEOUT_MS)
-        .clamp(100, 120_000);
+    let timeout_ms = resolve_action_timeout(build, http);
     Ok(DeclarativeEndpoint {
         method: build.method.to_ascii_uppercase(),
         url: url.to_string(),

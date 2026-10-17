@@ -5,6 +5,39 @@ use crate::*;
 #[cfg(feature = "http")]
 const MAX_HTTP_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
+/// Safety ceiling for generic, user-authored automation `action.http` nodes.
+/// Unrelated actions never inherit a longer deadline than this.
+#[cfg(feature = "http")]
+const MAX_HTTP_AUTOMATION_TIMEOUT_MS: u64 = 120_000;
+
+/// Lowest request budget accepted by the executor clamp.
+#[cfg(feature = "http")]
+const MIN_HTTP_TIMEOUT_MS: u64 = 100;
+
+/// Resolves one automation HTTP action's total request budget.
+///
+/// The action's `timeoutMs` (default 5s) is clamped to an effective ceiling.
+/// Ordinary, user-authored `action.http` nodes keep the generic
+/// [`MAX_HTTP_AUTOMATION_TIMEOUT_MS`] safety cap. The declarative plugin path
+/// injects `timeoutCeilingMs` so slow provider synthesis can finish, but that
+/// value is itself clamped to
+/// [`tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS`], so a
+/// forged ceiling can never widen the cap beyond the declarative maximum.
+#[cfg(feature = "http")]
+fn resolve_http_action_timeout_ms(config: &serde_json::Map<String, Value>) -> u64 {
+    let ceiling = number_value(config.get("timeoutCeilingMs"))
+        .map(|value| {
+            value.clamp(
+                MIN_HTTP_TIMEOUT_MS as f64,
+                tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS as f64,
+            ) as u64
+        })
+        .unwrap_or(MAX_HTTP_AUTOMATION_TIMEOUT_MS);
+    number_value(config.get("timeoutMs"))
+        .unwrap_or(5_000.0)
+        .clamp(MIN_HTTP_TIMEOUT_MS as f64, ceiling as f64) as u64
+}
+
 impl AppCore {
     #[cfg(feature = "http")]
     pub(crate) async fn execute_http_action(
@@ -103,9 +136,7 @@ impl AppCore {
             }
             return Ok(summary);
         }
-        let timeout_ms = number_value(config.get("timeoutMs"))
-            .unwrap_or(5_000.0)
-            .clamp(100.0, 120_000.0) as u64;
+        let timeout_ms = resolve_http_action_timeout_ms(config);
         let sent = self
             .send_hardened_http_request(
                 &HardenedHttpRequest {
@@ -313,5 +344,71 @@ impl AppCore {
         _configured_host: &str,
     ) -> Result<HardenedHttpResponse, String> {
         Err("HTTP action execution requires the host HTTP capability.".to_owned())
+    }
+}
+
+#[cfg(all(test, feature = "http"))]
+mod tests {
+    use super::{
+        resolve_http_action_timeout_ms, MAX_HTTP_AUTOMATION_TIMEOUT_MS, MIN_HTTP_TIMEOUT_MS,
+    };
+
+    fn config(value: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        value.as_object().cloned().unwrap_or_default()
+    }
+
+    #[test]
+    fn ordinary_actions_keep_the_generic_safety_cap() {
+        // A user-authored node cannot widen its own deadline.
+        assert_eq!(
+            resolve_http_action_timeout_ms(&config(serde_json::json!({"timeoutMs": 1_000_000}))),
+            MAX_HTTP_AUTOMATION_TIMEOUT_MS
+        );
+        // Absent budget keeps the historical 5s default.
+        assert_eq!(resolve_http_action_timeout_ms(&config(serde_json::json!({}))), 5_000);
+        // A modest budget is honoured verbatim.
+        assert_eq!(
+            resolve_http_action_timeout_ms(&config(serde_json::json!({"timeoutMs": 250}))),
+            250
+        );
+    }
+
+    #[test]
+    fn declarative_ceiling_permits_slow_synthesis_budgets() {
+        let ceiling = tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS;
+        // Qwen GGUF: 180s, well above the generic 120s automation cap.
+        assert_eq!(
+            resolve_http_action_timeout_ms(
+                &config(serde_json::json!({"timeoutMs": 180_000, "timeoutCeilingMs": ceiling}))
+            ),
+            180_000
+        );
+        // Pocket: 60s, above the old 15s hard deadline.
+        assert_eq!(
+            resolve_http_action_timeout_ms(
+                &config(serde_json::json!({"timeoutMs": 60_000, "timeoutCeilingMs": ceiling}))
+            ),
+            60_000
+        );
+    }
+
+    #[test]
+    fn a_forged_ceiling_cannot_exceed_the_declarative_maximum() {
+        assert_eq!(
+            resolve_http_action_timeout_ms(
+                &config(serde_json::json!({"timeoutMs": 10_000_000, "timeoutCeilingMs": 10_000_000}))
+            ),
+            tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn budgets_never_drop_below_the_floor() {
+        assert_eq!(
+            resolve_http_action_timeout_ms(
+                &config(serde_json::json!({"timeoutMs": 1, "timeoutCeilingMs": 0}))
+            ),
+            MIN_HTTP_TIMEOUT_MS
+        );
     }
 }

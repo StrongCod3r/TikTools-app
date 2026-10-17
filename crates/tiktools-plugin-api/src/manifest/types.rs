@@ -6,6 +6,16 @@ use serde_json::Value;
 pub const DEFAULT_PLUGIN_ACTION_TIMEOUT_MS: u64 = 30_000;
 pub const MAX_PLUGIN_ACTION_TIMEOUT_MS: u64 = 180_000;
 
+/// Upper bound for one declarative plugin action's HTTP request budget.
+///
+/// Slow local synthesis (Qwen3-GGUF voice cloning) can legitimately exceed the
+/// generic automation-node ceiling, so plugin-declared action requests get a
+/// separate, larger cap. This is *not* the generic automation HTTP action cap:
+/// user-authored workflow `action.http` nodes stay clamped lower
+/// (`MAX_HTTP_AUTOMATION_TIMEOUT_MS` in `tiktools-core`), so unrelated actions
+/// never silently inherit a multi-minute deadline.
+pub const MAX_DECLARATIVE_HTTP_TIMEOUT_MS: u64 = 180_000;
+
 /// Default deadline for one pre-filter processor call. Processors run on the
 /// live-message hot path and fail open, so the default stays far below the
 /// action timeout. Tune after benchmarking local processor latency.

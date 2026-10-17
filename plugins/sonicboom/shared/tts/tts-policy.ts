@@ -51,3 +51,11 @@ export {
 } from './eligibility.ts';
 export { chooseVoice, firstAvailableVoice } from './voice.ts';
 export { TtsDeduper, ttsFingerprint } from './deduper.ts';
+export {
+  DEFAULT_TTS_BUDGET_MS,
+  MAX_TTS_BUDGET_MS,
+  PROVIDER_TTS_BUDGETS_MS,
+  classifyTtsOutcomeOrigin,
+  formatBudgetMs,
+  ttsBudgetMs,
+} from './timeouts.ts';

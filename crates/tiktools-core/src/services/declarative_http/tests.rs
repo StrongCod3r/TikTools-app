@@ -174,6 +174,7 @@ fn loopback_is_trusted_without_permission_or_token() {
         extra_headers: None,
         body_template: Some("{{ event.data.comment }}"),
         timeout_override_ms: None,
+        timeout_by_field: None,
         scope: &scope,
         broker: &broker,
     })
@@ -201,6 +202,7 @@ fn remote_hosts_require_permission_and_token() {
         extra_headers: None,
         body_template: None,
         timeout_override_ms: None,
+        timeout_by_field: None,
         scope: &scope,
         broker: &broker,
     })
@@ -215,6 +217,7 @@ fn remote_hosts_require_permission_and_token() {
         extra_headers: None,
         body_template: None,
         timeout_override_ms: None,
+        timeout_by_field: None,
         scope: &scope,
         broker: &broker,
     })
@@ -261,6 +264,7 @@ fn remote_hosts_without_permission_are_rejected() {
         extra_headers: None,
         body_template: None,
         timeout_override_ms: None,
+        timeout_by_field: None,
         scope: &scope,
         broker: &broker,
     })
@@ -281,6 +285,7 @@ fn lan_hosts_require_the_manifest_opt_in() {
         extra_headers: None,
         body_template: None,
         timeout_override_ms: None,
+        timeout_by_field: None,
         scope: &scope,
         broker: &broker,
     })
@@ -304,6 +309,7 @@ fn rendered_paths_cannot_change_the_host() {
         extra_headers: None,
         body_template: None,
         timeout_override_ms: None,
+        timeout_by_field: None,
         scope: &scope,
         broker: &broker,
     })
@@ -430,6 +436,7 @@ fn builds_output_switch_post_with_bearer_auth() {
         extra_headers: Some(&headers),
         body_template: Some("{\"device\":\"{{ config.device }}\"}"),
         timeout_override_ms: Some(10_000),
+        timeout_by_field: None,
         scope: &scope,
         broker: &broker,
     })
@@ -589,4 +596,83 @@ async fn fetch_errors_never_carry_tokens() {
         error.contains(SECRET_SETTING_PLACEHOLDER),
         "token not redacted in error: {error}"
     );
+}
+
+/// Builds one endpoint from an action-style scope, mirroring how the host
+/// resolves a declarative action's HTTP block.
+fn build_action(
+    config: Value,
+    timeout_override_ms: Option<u64>,
+    timeout_by_field: Option<Value>,
+) -> Result<DeclarativeEndpoint, String> {
+    let http = json!({"baseUrl": "http://localhost:17842"});
+    let manifest = manifest(http.clone());
+    let scope = json!({"config": config});
+    build_declarative_request(&DeclarativeBuild {
+        manifest: &manifest,
+        http: &http,
+        method: "POST",
+        path_template: "/api/tts/play",
+        extra_headers: None,
+        body_template: None,
+        timeout_override_ms,
+        timeout_by_field: timeout_by_field.as_ref().and_then(Value::as_object),
+        scope: &scope,
+        broker: &broker(),
+    })
+}
+
+#[test]
+fn provider_aware_timeout_picks_a_slow_budget_above_the_generic_cap() {
+    let spec = json!({
+        "field": "provider",
+        "defaultMs": 15000,
+        "values": {"supertonic": 15000, "pocket-tts": 60000, "qwen3-gguf": 180000}
+    });
+    let build = |provider: &str| {
+        build_action(json!({"provider": provider}), Some(15000), Some(spec.clone()))
+            .unwrap()
+            .timeout_ms
+    };
+    assert_eq!(build("supertonic"), 15_000);
+    assert_eq!(build("pocket-tts"), 60_000);
+    // 180s exceeds the generic automation clamp (120s): the declarative
+    // action ceiling is intentionally larger so slow synthesis can finish.
+    assert_eq!(build("qwen3-gguf"), 180_000);
+    // An unlisted provider uses the declared default, never the largest value.
+    assert_eq!(build("mystery"), 15_000);
+}
+
+#[test]
+fn provider_aware_timeout_takes_precedence_over_static_timeout() {
+    // Static action timeout is 15s, but the provider table requests 180s.
+    let endpoint = build_action(
+        json!({"provider": "qwen3-gguf"}),
+        Some(15_000),
+        Some(json!({
+            "field": "provider",
+            "values": {"qwen3-gguf": 180_000}
+        })),
+    )
+    .unwrap();
+    assert_eq!(endpoint.timeout_ms, 180_000);
+    // With no provider value and no default, resolution falls back to the
+    // static action timeout rather than silently widening it.
+    let endpoint = build_action(
+        json!({"provider": "other"}),
+        Some(20_000),
+        Some(json!({"field": "provider", "values": {"qwen3-gguf": 180_000}})),
+    )
+    .unwrap();
+    assert_eq!(endpoint.timeout_ms, 20_000);
+}
+
+#[test]
+fn resolved_timeout_stays_bounded_and_defaults_without_a_table() {
+    // A static budget above the ceiling is clamped, never honoured verbatim.
+    let endpoint = build_action(json!({}), Some(1_000_000), None).unwrap();
+    assert_eq!(endpoint.timeout_ms, 180_000);
+    // No override and no table falls back to the built-in default.
+    let endpoint = build_action(json!({}), None, None).unwrap();
+    assert_eq!(endpoint.timeout_ms, 10_000);
 }

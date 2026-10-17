@@ -120,7 +120,16 @@
           "Content-Type": "text/plain"
         },
         "body": "{{ config.text }}",
-        "timeoutMs": 15000
+        "timeoutMs": 15000,
+        "timeoutByField": {
+          "field": "provider",
+          "defaultMs": 15000,
+          "values": {
+            "supertonic": 15000,
+            "pocket-tts": 60000,
+            "qwen3-gguf": 180000
+          }
+        }
       },
       "optionSources": {
         "voice": {
@@ -302,7 +311,7 @@
               },
               "body": "{{ event.data.comment }}",
               "bodyMode": "text",
-              "timeoutMs": 10000,
+              "timeoutMs": 120000,
               "responseType": "json",
               "allowPrivateNetwork": true
             }

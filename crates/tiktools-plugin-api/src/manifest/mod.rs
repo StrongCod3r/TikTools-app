@@ -18,8 +18,8 @@ pub use processor::{
 pub use types::{
     NativeAddonDeclaration, NativeLibDeclaration, NativeLibProvider, PluginManifest,
     PluginRuntimeKind, PluginSecurityModel, PluginTrust, DEFAULT_PLUGIN_ACTION_TIMEOUT_MS,
-    DEFAULT_PLUGIN_PROCESSOR_TIMEOUT_MS, MAX_PLUGIN_ACTION_TIMEOUT_MS,
-    MAX_PLUGIN_PROCESSOR_TIMEOUT_MS,
+    DEFAULT_PLUGIN_PROCESSOR_TIMEOUT_MS, MAX_DECLARATIVE_HTTP_TIMEOUT_MS,
+    MAX_PLUGIN_ACTION_TIMEOUT_MS, MAX_PLUGIN_PROCESSOR_TIMEOUT_MS,
 };
 pub use validation::{
     current_arch, current_napi_target, current_platform, current_target, declared_event_types,

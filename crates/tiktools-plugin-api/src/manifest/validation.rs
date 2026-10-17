@@ -1,7 +1,7 @@
 use serde_json::Value;
 use thiserror::Error;
 
-use super::types::MAX_PLUGIN_ACTION_TIMEOUT_MS;
+use super::types::{MAX_DECLARATIVE_HTTP_TIMEOUT_MS, MAX_PLUGIN_ACTION_TIMEOUT_MS};
 
 pub(crate) const PLUGIN_SCHEMA_VERSION: u32 = 3;
 /// Oldest schema the host still accepts. Schema v2 manifests parse exactly
@@ -16,9 +16,14 @@ pub(crate) const MAX_DESCRIPTOR_BYTES: usize = 64 * 1024;
 /// Long-form card copy rendered as markdown-lite in Details. Four times the
 /// short description: room for a paragraph plus a short list, still bounded.
 pub(crate) const MAX_LONG_DESCRIPTION_LEN: usize = 16 * 1024;
-/// Declarative HTTP timeouts stay inside the automation executor's clamp.
+/// Declarative fetch timeouts (catalogs, health, connection probes) stay
+/// inside the automation executor's generic clamp: none of these may hold a UI
+/// load for minutes.
 pub(crate) const MIN_HTTP_TIMEOUT_MS: u64 = 100;
-pub(crate) const MAX_HTTP_TIMEOUT_MS: u64 = 120_000;
+pub(crate) const MAX_HTTP_FETCH_TIMEOUT_MS: u64 = 120_000;
+/// Plugin-declared action requests may request a larger, bounded budget for
+/// slow synthesis fallbacks (see [`MAX_DECLARATIVE_HTTP_TIMEOUT_MS`]).
+pub(crate) const MAX_HTTP_ACTION_TIMEOUT_MS: u64 = MAX_DECLARATIVE_HTTP_TIMEOUT_MS;
 pub(crate) const MAX_HTTP_HEADERS: usize = 32;
 pub(crate) const MAX_BASE_URL_LEN: usize = 512;
 pub(crate) const MAX_HTTP_PATH_LEN: usize = 1_024;
@@ -128,7 +133,11 @@ fn validate_action_http(http: &Value) -> Result<(), ManifestError> {
         }
     }
     if let Some(timeout) = object.get("timeoutMs") {
-        validate_http_timeout(timeout).map_err(|_| ManifestError::InvalidField("actionTypes"))?;
+        validate_http_timeout(timeout, MAX_HTTP_ACTION_TIMEOUT_MS)
+            .map_err(|_| ManifestError::InvalidField("actionTypes"))?;
+    }
+    if let Some(spec) = object.get("timeoutByField") {
+        validate_timeout_by_field(spec).map_err(|_| ManifestError::InvalidField("actionTypes"))?;
     }
     if let Some(emit) = object.get("emitResponseAs") {
         let emit = emit
@@ -161,7 +170,8 @@ fn validate_option_source(source: &Value) -> Result<(), ManifestError> {
         }
     }
     if let Some(timeout) = object.get("timeoutMs") {
-        validate_http_timeout(timeout).map_err(|_| ManifestError::InvalidField("actionTypes"))?;
+        validate_http_timeout(timeout, MAX_HTTP_FETCH_TIMEOUT_MS)
+            .map_err(|_| ManifestError::InvalidField("actionTypes"))?;
     }
     Ok(())
 }
@@ -179,7 +189,8 @@ pub fn validate_http_config(http: &Value) -> Result<(), ManifestError> {
         .ok_or(ManifestError::InvalidField("http"))?;
     validate_base_url(base_url)?;
     if let Some(timeout) = object.get("timeoutMs") {
-        validate_http_timeout(timeout).map_err(|_| ManifestError::InvalidField("http"))?;
+        validate_http_timeout(timeout, MAX_HTTP_FETCH_TIMEOUT_MS)
+            .map_err(|_| ManifestError::InvalidField("http"))?;
     }
     if let Some(allow) = object.get("allowPrivateNetwork") {
         if !allow.is_boolean() {
@@ -202,7 +213,8 @@ pub fn validate_http_config(http: &Value) -> Result<(), ManifestError> {
             .ok_or(ManifestError::InvalidField("http"))?;
         validate_relative_path(path).map_err(|_| ManifestError::InvalidField("http"))?;
         if let Some(timeout) = health.get("timeoutMs") {
-            validate_http_timeout(timeout).map_err(|_| ManifestError::InvalidField("http"))?;
+            validate_http_timeout(timeout, MAX_HTTP_FETCH_TIMEOUT_MS)
+                .map_err(|_| ManifestError::InvalidField("http"))?;
         }
     }
     if let Some(provisioning) = object.get("tokenProvisioning") {
@@ -393,10 +405,44 @@ fn is_header_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn validate_http_timeout(timeout: &Value) -> Result<(), &'static str> {
+fn validate_http_timeout(timeout: &Value, max: u64) -> Result<(), &'static str> {
     let timeout = timeout.as_u64().ok_or("timeout must be a number")?;
-    if !(MIN_HTTP_TIMEOUT_MS..=MAX_HTTP_TIMEOUT_MS).contains(&timeout) {
+    if !(MIN_HTTP_TIMEOUT_MS..=max).contains(&timeout) {
         return Err("timeout out of range");
+    }
+    Ok(())
+}
+
+/// Validate the optional provider-aware `timeoutByField` action descriptor.
+///
+/// Shape errors fail discovery (the host cannot honour an unknown field shape),
+/// so the resolved budget is always a bounded number. Each candidate value is
+/// validated against the declarative action ceiling; the generic fetch clamp
+/// does not apply here.
+fn validate_timeout_by_field(spec: &Value) -> Result<(), &'static str> {
+    let object = spec.as_object().ok_or("timeoutByField must be an object")?;
+    let field = object
+        .get("field")
+        .and_then(Value::as_str)
+        .ok_or("timeoutByField.field must be a string")?;
+    if field.trim().is_empty() || field.len() > 128 {
+        return Err("timeoutByField.field out of range");
+    }
+    let values = object
+        .get("values")
+        .and_then(Value::as_object)
+        .ok_or("timeoutByField.values must be an object")?;
+    if values.is_empty() || values.len() > 32 {
+        return Err("timeoutByField.values out of range");
+    }
+    for (key, value) in values {
+        if key.trim().is_empty() || key.len() > 128 {
+            return Err("timeoutByField key out of range");
+        }
+        validate_http_timeout(value, MAX_HTTP_ACTION_TIMEOUT_MS)?;
+    }
+    if let Some(default) = object.get("defaultMs") {
+        validate_http_timeout(default, MAX_HTTP_ACTION_TIMEOUT_MS)?;
     }
     Ok(())
 }
