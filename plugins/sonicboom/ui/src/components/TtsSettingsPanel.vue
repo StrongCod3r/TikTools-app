@@ -14,6 +14,7 @@ import { voiceOptions } from './tts-voice-options.ts';
 import { TtsAllowedUsers } from './TtsAllowedUsers.vue';
 import { TtsOutputsCard } from './TtsOutputsCard.vue';
 import { TtsSpecialUsers } from './TtsSpecialUsers.vue';
+import { TtsTextProcessing } from './TtsTextProcessing.vue';
 import { TtsVoiceTester } from './TtsVoiceTester.vue';
 
 type TtsSettingsPanelProps = {
@@ -248,6 +249,12 @@ export const TtsSettingsPanel = defineVueComponent<TtsSettingsPanelProps>(
                 {t(locale, 'ttsStripCommand')}
               </label>
             </section>
+
+            <TtsTextProcessing
+              locale={locale}
+              settings={settings}
+              onSettingsChange={props.onSettingsChange}
+            />
 
             <section class="tts-card">
               <h4 class="tts-card__title">{t(locale, 'ttsChargePoints')}</h4>
