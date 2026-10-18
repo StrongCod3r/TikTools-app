@@ -118,3 +118,59 @@ test('REPO imports a token through the shared card without showing the secret', 
   await assertNoUnhandledCalls(page);
   capture.assertClean();
 });
+
+async function repoAutomaticState() {
+  const { baseHostState } = await import('./fixtures/tiktools-host.ts');
+  const { sonicboomStatus, sonicboomDescriptor } = await import('./fixtures/plugins.ts');
+  const manifest = JSON.parse(readFileSync(new URL('../../examples/repo-game/plugin.json', import.meta.url), 'utf8'));
+  const state = baseHostState();
+  state.automationSnapshot.plugins = [sonicboomStatus({ descriptor: sonicboomDescriptor({
+    id: manifest.id, name: { default: manifest.name }, supportsTokenProvisioning: false,
+    supportsTokenImport: true, supportsTokenDiscovery: true, actionTypeIds: [],
+  }) })];
+  state.automationSnapshot.pluginPages = [{ id: 'connection', pluginId: manifest.id,
+    title: { default: 'Connection' }, sections: [{ kind: 'connection' }], source: { kind: 'plugin', pluginId: manifest.id } }];
+  state.pluginSettings[manifest.id] = { schema: manifest.settings.schema, values: { serverUrl: 'http://127.0.0.1:17453' } };
+  state.pluginHealth[manifest.id] = { ok: false, latencyMs: 1, error: 'API token missing.' };
+  return state;
+}
+
+test('automatic REPO setup chooses a profile and distinguishes API availability from gameplay readiness', async ({ page }) => {
+  const state = await repoAutomaticState();
+  state.pluginTokenCandidates = { 'repo.game': [
+    { id: 'aabbccddeeff0011', label: 'Steam — Local installation' },
+    { id: '1122334455667788', label: 'Mod profile: Stream' },
+  ] };
+  state.pluginSetupEndpoints = { 'repo.game': 'http://127.0.0.1:18053' };
+  state.pluginSetupHealth = { 'repo.game': { ok: false, reachable: true, gameplayReady: false, latencyMs: 1, error: 'API reachable; gameplay unavailable.' } };
+  const capture = await installFakeHost(page, state);
+  await page.goto('/');
+  await openConnections(page);
+  await page.getByRole('button', { name: /R.E.P.O. Game/ }).click();
+  await page.getByRole('button', { name: 'Connect automatically', exact: true }).click();
+  await expect(page.getByText('Steam — Local installation')).toBeVisible();
+  await expect(page.getByText('Mod profile: Stream')).toBeVisible();
+  await expect(page.getByText('API token imported and saved.')).toHaveCount(0);
+  await page.getByRole('listitem').filter({ hasText: 'Mod profile: Stream' }).getByRole('button', { name: 'Use this configuration' }).click();
+  await expect(page.getByText('API token imported and saved.')).toBeVisible();
+  await expect(page.getByText('API connected · Gameplay not ready', { exact: true }).first()).toBeVisible();
+  await expect(page.locator('input[type="password"]')).toHaveValue('••••••••');
+  await expect(page.locator('.plg-connect input').first()).toHaveValue('http://127.0.0.1:18053');
+  await assertNoUnhandledCalls(page);
+  capture.assertClean();
+});
+
+test('REPO setup offers a folder picker when automatic discovery finds nothing', async ({ page }) => {
+  const state = await repoAutomaticState();
+  const capture = await installFakeHost(page, state);
+  await page.goto('/');
+  await openConnections(page);
+  await page.getByRole('button', { name: /R.E.P.O. Game/ }).click();
+  await page.getByRole('button', { name: 'Connect automatically', exact: true }).click();
+  await expect(page.getByText('No configuration found. Select the game folder.')).toBeVisible();
+  await page.getByRole('button', { name: 'Select game folder…' }).click();
+  await expect(page.getByText('API token imported and saved.')).toBeVisible();
+  await expect(page.getByText('Connected to http://127.0.0.1:17453').first()).toBeVisible();
+  await assertNoUnhandledCalls(page);
+  capture.assertClean();
+});

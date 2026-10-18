@@ -1,10 +1,30 @@
-//! User-selected local credential import. Plugins declare a parser, never a path.
-//! File bytes and extracted credentials stay inside the host.
-
+//! Host-owned credential setup. Discovery reads metadata; secrets are read only
+//! after the user chooses a discovered source or a native file/folder picker.
 use serde_json::Value;
 use std::{fs::File, io::Read, path::Path};
 use tiktools_plugin_api::PluginManifest;
+mod discovery;
+use discovery::{discover, folder_config, ImportCandidate};
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenImportCandidate {
+    pub id: String,
+    pub label: String,
+}
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenImportResult {
+    pub plugin_id: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<TokenImportCandidate>,
+}
+struct ImportedSettings {
+    token: String,
+    endpoint: Option<(String, String)>,
+}
 const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
 pub(crate) fn supports_token_import(manifest: &PluginManifest) -> bool {
@@ -23,38 +43,9 @@ pub(crate) fn supports_token_import(manifest: &PluginManifest) -> bool {
             .iter()
             .any(|key| key == setting)
 }
-
-fn read_token(path: &Path, spec: &Value) -> Result<String, String> {
-    // Reject special files before opening (e.g. a FIFO that could block).
-    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return Err("Select a regular configuration file.".to_owned());
-    }
-    // Recheck the opened handle and bound reads even if the file grows.
-    let file = File::open(path).map_err(|_| "Could not open the selected configuration file.")?;
-    let metadata = file
-        .metadata()
-        .map_err(|_| "Could not inspect the selected file.")?;
-    if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES {
-        return Err("Select a regular configuration file smaller than 64 KiB.".to_owned());
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_CONFIG_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Could not read the selected configuration file.")?;
-    if bytes.len() as u64 > MAX_CONFIG_BYTES {
-        return Err("Configuration file exceeds 64 KiB.".to_owned());
-    }
-    let text = std::str::from_utf8(&bytes).map_err(|_| "Configuration must be UTF-8 text.")?;
-    parse_ini_token(text, spec)
-}
-
-fn parse_ini_token(text: &str, spec: &Value) -> Result<String, String> {
-    let section = spec["section"]
-        .as_str()
-        .ok_or("Invalid token import section.")?;
-    let key = spec["key"].as_str().ok_or("Invalid token import key.")?;
+fn ini_value<'a>(text: &'a str, section: &str, key: &str) -> Result<Option<&'a str>, String> {
     let mut current = "";
-    let mut token = None;
+    let mut value = None;
     for line in text.trim_start_matches('\u{feff}').lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
@@ -67,78 +58,222 @@ fn parse_ini_token(text: &str, spec: &Value) -> Result<String, String> {
         if current != section {
             continue;
         }
-        if let Some((name, value)) = line.split_once('=') {
+        if let Some((name, entry)) = line.split_once('=') {
             if name.trim() == key {
-                if token.is_some() {
-                    return Err("The configuration has duplicate token entries; select an unambiguous file.".to_owned());
+                if value.is_some() {
+                    return Err(
+                        "The configuration has duplicate entries; select an unambiguous file."
+                            .to_owned(),
+                    );
                 }
-                token = Some(value.trim());
+                value = Some(entry.trim());
             }
         }
     }
-    let token = token.ok_or("Token entry was not found. Start the game/server once, then select its generated configuration file.")?;
-    let minimum = spec.get("minLength").and_then(Value::as_u64).unwrap_or(1) as usize;
-    if token.len() < minimum
+    Ok(value)
+}
+fn parse_ini_token(text: &str, spec: &Value) -> Result<String, String> {
+    let section = spec["section"]
+        .as_str()
+        .ok_or("Invalid token import section.")?;
+    let key = spec["key"].as_str().ok_or("Invalid token import key.")?;
+    let token = ini_value(text, section, key)?.ok_or(
+        "Token entry was not found. Start the game/server once to generate its configuration.",
+    )?;
+    let min = spec.get("minLength").and_then(Value::as_u64).unwrap_or(1) as usize;
+    if token.len() < min
         || token.len() > 4096
-        || token.chars().any(char::is_whitespace)
-        || token.chars().any(char::is_control)
+        || token.chars().any(|c| c.is_whitespace() || c.is_control())
     {
         return Err("The configuration contains an empty or invalid token. Start the game/server to generate one.".to_owned());
     }
     Ok(token.to_owned())
 }
+fn read_settings(path: &Path, spec: &Value) -> Result<ImportedSettings, String> {
+    if !std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.len() <= MAX_CONFIG_BYTES) {
+        return Err("Select a regular configuration file smaller than 64 KiB.".to_owned());
+    }
+    let file = File::open(path).map_err(|_| "Could not open the selected configuration.")?;
+    if !file
+        .metadata()
+        .is_ok_and(|m| m.is_file() && m.len() <= MAX_CONFIG_BYTES)
+    {
+        return Err("Select a regular configuration file smaller than 64 KiB.".to_owned());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Could not read the configuration.")?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err("Configuration exceeds 64 KiB.".to_owned());
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| "Configuration must be UTF-8 text.")?;
+    let token = parse_ini_token(text, spec)?;
+    let endpoint = if let Some(connection) = spec.get("connection") {
+        let section = connection["section"]
+            .as_str()
+            .ok_or("Invalid connection section.")?;
+        let host = ini_value(
+            text,
+            section,
+            connection["hostKey"].as_str().ok_or("Invalid host key.")?,
+        )?;
+        let port = ini_value(
+            text,
+            section,
+            connection["portKey"].as_str().ok_or("Invalid port key.")?,
+        )?;
+        match (host, port) {
+            (None, None) => None,
+            (Some(host), Some(port)) => {
+                let host = match host {
+                    "localhost" | "127.0.0.1" | "0.0.0.0" => "127.0.0.1",
+                    "::1" | "::" => "[::1]",
+                    _ => return Err("Only loopback or wildcard API listen addresses can be imported automatically.".to_owned()),
+                };
+                let port = port
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|p| *p != 0)
+                    .ok_or("The API port is invalid.")?;
+                Some((
+                    connection["setting"]
+                        .as_str()
+                        .ok_or("Invalid URL setting.")?
+                        .to_owned(),
+                    format!("http://{host}:{port}"),
+                ))
+            }
+            _ => return Err("The configuration must specify both API host and port.".to_owned()),
+        }
+    } else {
+        None
+    };
+    Ok(ImportedSettings { token, endpoint })
+}
+#[cfg(test)]
+fn read_token(path: &Path, spec: &Value) -> Result<String, String> {
+    read_settings(path, spec).map(|s| s.token)
+}
 
 impl crate::AppCore {
-    /// The native picker is the authorization boundary: no caller- or
-    /// manifest-supplied filesystem path is accepted by the control API.
+    /// Backward-compatible file import operation.
     pub async fn plugin_token_import(
         self: &std::sync::Arc<Self>,
         id: &str,
     ) -> Result<crate::control::PluginProvisionResult, crate::control::OperationError> {
-        use crate::control::{OperationError, PluginProvisionResult};
+        let result = self.plugin_token_setup(id, "file", None).await?;
+        Ok(crate::control::PluginProvisionResult {
+            plugin_id: result.plugin_id,
+            ok: result.ok,
+            error: result.error,
+        })
+    }
+    /// Auto returns source descriptors only. Candidate imports re-discover and
+    /// verify the opaque ID; callers cannot provide arbitrary filesystem paths.
+    pub async fn plugin_token_setup(
+        self: &std::sync::Arc<Self>,
+        id: &str,
+        mode: &str,
+        candidate_id: Option<&str>,
+    ) -> Result<TokenImportResult, crate::control::OperationError> {
+        use crate::control::OperationError;
         use tiktools_plugin_api::{MediaKind, MediaPickerMode, MediaPickerOptions};
         let plugin = self.require_discovered(id)?;
         let id = plugin.manifest.id.clone();
-        let failure = |message: &str| PluginProvisionResult {
+        let result = |ok, error| TokenImportResult {
             plugin_id: id.clone(),
-            ok: false,
-            error: Some(message.to_owned()),
+            ok,
+            error,
+            candidates: Vec::new(),
         };
+        let fail = |message: &str| result(false, Some(message.to_owned()));
         if !self.plugin_ready(&id) || !supports_token_import(&plugin.manifest) {
-            return Ok(failure(
-                "Enable a plugin declaring a supported secret token import first.",
+            return Ok(fail(
+                "Enable a plugin declaring supported secret token import first.",
+            ));
+        }
+        if !matches!(mode, "file" | "folder" | "auto" | "candidate") {
+            return Err(OperationError::invalid("Unknown token setup mode."));
+        }
+        if mode == "candidate"
+            && candidate_id
+                .is_none_or(|s| s.len() != 16 || !s.bytes().all(|b| b.is_ascii_hexdigit()))
+        {
+            return Err(OperationError::invalid(
+                "Invalid configuration candidate ID.",
             ));
         }
         static PICKER: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
         let Ok(_permit) = PICKER.try_acquire() else {
-            return Ok(failure("Another token import is already in progress."));
+            return Ok(fail("Another token import is already in progress."));
         };
         let spec = plugin.manifest.http.as_ref().unwrap()["tokenImport"].clone();
-        let file_name = spec["fileName"].as_str().unwrap_or("server configuration");
-        let selected = match self.media.open_picker(MediaPickerOptions {
-            mode: MediaPickerMode::File, kind: MediaKind::Other,
-            title: Some(format!("Import token — select {file_name}")),
-            extensions: vec!["cfg".to_owned(), "ini".to_owned(), "conf".to_owned()],
-            ..Default::default()
-        }).await {
-            Ok(Some(path)) => path,
-            Ok(None) => return Ok(PluginProvisionResult { plugin_id: id, ok: false, error: None }),
-            Err(_) => return Ok(failure("The native file picker is unavailable. Use the desktop app or enter the token manually.")),
+        if mode != "file" && spec.get("discovery").is_none() {
+            return Ok(fail(
+                "This plugin does not support automatic or folder setup.",
+            ));
+        }
+        let selected = if mode == "auto" || mode == "candidate" {
+            let scan_spec = spec.clone();
+            let found =
+                match tokio::task::spawn_blocking(move || discover(&scan_spec)).await {
+                    Ok(Ok(found)) => found,
+                    _ => return Ok(fail(
+                        "Could not search known game locations. Select the game folder instead.",
+                    )),
+                };
+            if mode == "auto" {
+                if found.is_empty() {
+                    return Ok(fail("No configuration found in known locations. Start the game once, then select its game or mod profile folder."));
+                }
+                return Ok(TokenImportResult {
+                    plugin_id: id,
+                    ok: false,
+                    error: None,
+                    candidates: found.iter().map(ImportCandidate::descriptor).collect(),
+                });
+            }
+            match found
+                .into_iter()
+                .find(|candidate| Some(candidate.id.as_str()) == candidate_id)
+            {
+                Some(candidate) => candidate.path,
+                None => return Ok(fail(
+                    "This configuration is no longer available. Search again or select its folder.",
+                )),
+            }
+        } else {
+            let folder = mode == "folder";
+            let name = spec["fileName"].as_str().unwrap_or("configuration");
+            let selected=match self.media.open_picker(MediaPickerOptions {
+                mode:if folder {MediaPickerMode::Directory} else {MediaPickerMode::File}, kind:MediaKind::Other,
+                title:Some(if folder {"Select the game installation or active mod profile folder".to_owned()} else {format!("Import token — select {name}")}),
+                extensions:if folder {Vec::new()} else {vec!["cfg".to_owned(),"ini".to_owned(),"conf".to_owned()]}, ..Default::default()
+            }).await {
+                Ok(Some(path))=>path,
+                Ok(None)=>return Ok(result(false,None)),
+                Err(_)=>return Ok(fail("The native file picker is unavailable. Use the desktop app or enter the token manually.")),
+            };
+            if folder {
+                match folder_config(&selected,&spec) {Some(path)=>path, None=>return Ok(fail("No configuration found in that folder. Select the game installation or active mod profile; start the game once to generate its configuration."))}
+            } else {
+                selected
+            }
         };
         let read_spec = spec.clone();
-        let token =
-            match tokio::task::spawn_blocking(move || read_token(&selected, &read_spec)).await {
-                Ok(Ok(token)) => token,
-                Ok(Err(error)) => return Ok(failure(&error)),
-                Err(_) => return Ok(failure("Could not read the selected configuration.")),
+        let imported =
+            match tokio::task::spawn_blocking(move || read_settings(&selected, &read_spec)).await {
+                Ok(Ok(settings)) => settings,
+                Ok(Err(error)) => return Ok(fail(&error)),
+                Err(_) => return Ok(fail("Could not read the selected configuration.")),
             };
-        // A dialog may remain open while a plugin is disabled or replaced.
         let current = self.require_discovered(&id)?;
         if !self.plugin_ready(&id)
             || current.manifest.http != plugin.manifest.http
             || !supports_token_import(&current.manifest)
         {
-            return Ok(failure(
+            return Ok(fail(
                 "Plugin configuration changed while selecting the file. Try importing again.",
             ));
         }
@@ -160,14 +295,27 @@ impl crate::AppCore {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        values.insert(setting.to_owned(), Value::String(token));
-        self.plugin_settings_save(&id, values)
-            .map_err(|_| OperationError::internal("Could not securely save the imported token."))?;
-        Ok(PluginProvisionResult {
-            plugin_id: id,
-            ok: true,
-            error: None,
-        })
+        values.insert(setting.to_owned(), Value::String(imported.token));
+        if let Some((setting, url)) = imported.endpoint {
+            let property = current
+                .manifest
+                .settings_schema
+                .as_ref()
+                .and_then(|s| s.get("properties"))
+                .and_then(|p| p.get(&setting));
+            if property
+                .and_then(|p| p.get("format"))
+                .and_then(Value::as_str)
+                != Some("uri")
+            {
+                return Ok(fail("The imported URL must target a declared URI setting."));
+            }
+            values.insert(setting, Value::String(url));
+        }
+        self.plugin_settings_save(&id, values).map_err(|_| {
+            OperationError::internal("Could not securely save the imported settings.")
+        })?;
+        Ok(result(true, None))
     }
 }
 
@@ -241,7 +389,9 @@ mod integration_tests {
     impl MediaHost for Picker {
         fn open_picker(&self, options: MediaPickerOptions) -> MediaHostFuture<Option<PathBuf>> {
             assert_eq!(options.kind, tiktools_plugin_api::MediaKind::Other);
-            assert!(options.title.unwrap().contains("org.repo.rest-api.cfg"));
+            if options.mode == tiktools_plugin_api::MediaPickerMode::File {
+                assert!(options.title.unwrap().contains("org.repo.rest-api.cfg"));
+            }
             self.calls.fetch_add(1, Ordering::SeqCst);
             let path = self.path.lock().unwrap().clone();
             Box::pin(async move { Ok(path) })
@@ -341,6 +491,25 @@ mod integration_tests {
                 .unwrap()["apiToken"],
             token
         );
+        std::fs::write(
+            &config,
+            format!("[HTTP]\nAuthenticationToken = {token}\nHost = 0.0.0.0\nPort = 18053\n"),
+        )
+        .unwrap();
+        *picker.path.lock().unwrap() = Some(root.clone());
+        let folder = core
+            .plugin_token_setup("repo.game", "folder", None)
+            .await
+            .unwrap();
+        assert!(folder.ok, "{folder:?}");
+        assert_eq!(
+            core.plugin_settings("repo.game").unwrap().values["serverUrl"],
+            "http://127.0.0.1:18053"
+        );
+        assert!(core
+            .plugin_token_setup("repo.game", "candidate", Some("../../secret"))
+            .await
+            .is_err());
         core.set_plugin_activation("repo.game", true, false);
         let before = picker.calls.load(Ordering::SeqCst);
         assert!(!core.plugin_token_import("repo.game").await.unwrap().ok);
@@ -352,6 +521,49 @@ mod integration_tests {
             &serde_json::json!({"section":"HTTP","key":"AuthenticationToken"})
         )
         .is_err());
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    #[test]
+    fn imports_loopback_ports_and_rejects_remote_endpoints_without_echoing_credentials() {
+        let root = std::env::temp_dir().join(format!("connection-import-{}", fastrand::u64(..)));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.cfg");
+        let spec = serde_json::json!({"section":"HTTP","key":"Token","connection":{"setting":"serverUrl","section":"HTTP","hostKey":"Host","portKey":"Port"}});
+        for (host, expected) in [
+            ("127.0.0.1", "http://127.0.0.1:19000"),
+            ("localhost", "http://127.0.0.1:19000"),
+            ("0.0.0.0", "http://127.0.0.1:19000"),
+            ("::", "http://[::1]:19000"),
+        ] {
+            std::fs::write(
+                &path,
+                format!("[HTTP]\nToken=test\nHost={host}\nPort=19000"),
+            )
+            .unwrap();
+            assert_eq!(
+                read_settings(&path, &spec).unwrap().endpoint.unwrap().1,
+                expected
+            );
+        }
+        for (host, port) in [
+            ("remote.example", "19000"),
+            ("127.0.0.1", "0"),
+            ("127.0.0.1", "65536"),
+            ("127.0.0.1", "abc"),
+        ] {
+            std::fs::write(
+                &path,
+                format!("[HTTP]\nToken=private-fixture\nHost={host}\nPort={port}"),
+            )
+            .unwrap();
+            let error = read_settings(&path, &spec).err().unwrap();
+            assert!(!error.contains("private-fixture"));
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 }

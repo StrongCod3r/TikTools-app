@@ -24,6 +24,10 @@ pub struct PluginConnectionResult {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    #[serde(default)]
+    pub reachable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gameplay_ready: Option<bool>,
 }
 
 // ------------------------------------------------------------------
@@ -161,6 +165,8 @@ impl AppCore {
             latency_ms: check.latency_ms,
             error: check.error,
             details: check.details,
+            reachable: check.reachable,
+            gameplay_ready: check.gameplay_ready,
         })
     }
 

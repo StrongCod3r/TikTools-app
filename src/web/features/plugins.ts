@@ -1,3 +1,4 @@
+import type { TokenSetupOptions, PluginCredentialState, TokenSetupCandidate } from '../../shared/token-import.ts';
 import { ownControlSubscriptions } from './control-owner.ts';
 import { ref } from 'vue';
 
@@ -30,6 +31,8 @@ export interface PluginOptionsResult {
 }
 
 export interface PluginConnectionResult {
+  reachable?: boolean;
+  gameplayReady?: boolean;
   details?: string;
   pluginId: string;
   ok: boolean;
@@ -38,6 +41,7 @@ export interface PluginConnectionResult {
 }
 
 export interface PluginProvisionResult {
+  candidates?: TokenSetupCandidate[];
   pluginId: string;
   ok: boolean;
   error?: string | null;
@@ -73,7 +77,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
   /** Server-reported selection per option source (option documents only). */
   const actionOptionSelected = ref<Record<string, string>>({});
   const pluginConnections = ref<Record<string, PluginConnectionState>>({});
-  const pluginProvision = ref<Record<string, { working: boolean; ok: boolean; message: string }>>(
+  const pluginProvision = ref<Record<string, PluginCredentialState>>(
     {},
   );
   const pluginInstallState = ref<PluginInstallState>(createInitialPluginInstallState());
@@ -252,6 +256,8 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
             latencyMs: result.latencyMs,
             error: result.error ?? undefined,
             details: result.details,
+            reachable: result.reachable,
+            gameplayReady: result.gameplayReady,
             at: Date.now(),
           },
         };
@@ -265,16 +271,17 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
       });
   };
 
-  const handleImportPluginToken = (id: string): void => {
+  const handleImportPluginToken = (id: string, options?: TokenSetupOptions): void => {
     if (pluginProvision.value[id]?.working) return;
     pluginProvision.value = { ...pluginProvision.value, [id]: { working: true, ok: false, message: '' } };
-    void control.call<PluginProvisionResult>('plugins.token.import', { pluginId: id })
+    void control.call<PluginProvisionResult>('plugins.token.import', { pluginId: id, ...options })
       .then((result) => {
         if (disposed) return;
         pluginProvision.value = {
           ...pluginProvision.value,
           [id]: { working: false, ok: result.ok, message: result.ok
-            ? callbacks.translate('pluginTokenImported') : (result.error ?? '') },
+            ? callbacks.translate('pluginTokenImported') : (result.error ?? ''),
+            ...(result.candidates?.length ? { candidates: result.candidates } : {}) },
         };
         if (result.ok) {
           handleGetPluginSettings(id);

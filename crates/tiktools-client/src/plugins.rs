@@ -6,7 +6,7 @@ use tiktools_control_api::modules::plugins::{
     PluginActionOutcome, PluginActionParams, PluginConnectionResult, PluginIdParams,
     PluginInstallParams, PluginInstallResult, PluginInstallSetParams, PluginListResult,
     PluginOptionsParams, PluginOptionsResult, PluginProvisionParams, PluginProvisionResult,
-    PluginResult,
+    PluginResult, PluginTokenImportParams,
 };
 use tiktools_control_api::modules::Empty;
 use tiktools_control_api::modules::OkResult;
@@ -55,6 +55,14 @@ impl TikToolsClient {
         &self,
         params: PluginIdParams,
     ) -> Result<PluginProvisionResult, ClientError> {
+        self.call(PLUGINS_TOKEN_IMPORT, params).await
+    }
+
+    /// Discover known configurations or import a selected source/folder.
+    pub async fn plugins_token_setup(
+        &self,
+        params: PluginTokenImportParams,
+    ) -> Result<tiktools_control_api::modules::plugins::TokenImportResult, ClientError> {
         self.call(PLUGINS_TOKEN_IMPORT, params).await
     }
 

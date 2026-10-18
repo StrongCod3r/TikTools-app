@@ -58,6 +58,11 @@ const activePluginSupportsTokenImport: ComputedRef<boolean> = computed(() => {
   const plugins: PluginStatus[] = controller.behavior.value.plugins;
   return plugins.find((plugin) => plugin.descriptor.id === id)?.descriptor.supportsTokenImport ?? false;
 });
+const activePluginSupportsTokenDiscovery: ComputedRef<boolean> = computed(() => {
+  const id = activePluginPage.value?.pluginId;
+  const plugins: PluginStatus[] = controller.behavior.value.plugins;
+  return plugins.find((plugin) => plugin.descriptor.id === id)?.descriptor.supportsTokenDiscovery ?? false;
+});
 const activePluginUi = computed(() => {
   const page = activePluginPage.value;
   if (!page) return undefined;
@@ -305,6 +310,7 @@ const activePluginBackend = computed(() => {
         :on-execute-action="(actionType, config) => app.executePluginAction(activePluginPage?.pluginId ?? '', actionType, config, true)"
         :supports-provisioning="activePluginSupportsProvisioning"
         :supports-token-import="activePluginSupportsTokenImport"
+        :supports-token-discovery="activePluginSupportsTokenDiscovery"
         :provision-state="app.pluginProvision[activePluginPage.pluginId]"
         :on-provision-token="app.handleProvisionPluginToken"
         :on-import-token="app.handleImportPluginToken"

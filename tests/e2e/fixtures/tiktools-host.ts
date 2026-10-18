@@ -32,7 +32,10 @@ export interface E2EHostState {
   /** `plugins.options` store, keyed by source id. */
   pluginOptions: Record<string, { options: Array<{ value: string; label: string }>; selected?: string | null }>;
   /** `plugins.health` results, keyed by plugin id. */
-  pluginHealth: Record<string, { ok: boolean; latencyMs: number; error?: string | null }>;
+  pluginHealth: Record<string, { ok: boolean; latencyMs: number; error?: string | null; reachable?: boolean; gameplayReady?: boolean }>;
+  pluginTokenCandidates?: Record<string, Array<{ id: string; label: string }>>;
+  pluginSetupEndpoints?: Record<string, string>;
+  pluginSetupHealth?: E2EHostState['pluginHealth'];
   /** `plugins.action.execute` results, keyed by action type. */
   actionOutcomes: Record<
     string,
@@ -215,9 +218,15 @@ const INIT_SCRIPT = `
     },
     'plugins.token.import': (params) => {
       const id = String(params.pluginId);
+      const candidates = state.pluginTokenCandidates?.[id] ?? [];
+      if (params.mode === 'auto') return { pluginId: id, ok: false, error: candidates.length ? null : 'No configuration found. Select the game folder.', candidates };
+      if (params.mode === 'candidate' && !candidates.some((candidate) => candidate.id === params.candidateId)) return { pluginId: id, ok: false, error: 'Configuration unavailable.' };
       const settings = state.pluginSettings[id];
-      if (settings) settings.values.apiToken = '••••••••';
-      state.pluginHealth[id] = { ok: true, latencyMs: 1 };
+      if (settings) {
+        settings.values.apiToken = '••••••••';
+        if (state.pluginSetupEndpoints?.[id]) settings.values.serverUrl = state.pluginSetupEndpoints[id];
+      }
+      state.pluginHealth[id] = state.pluginSetupHealth?.[id] ?? { ok: true, latencyMs: 1 };
       return { pluginId: id, ok: true, error: null };
     },
     'plugins.token.provision': (params) => ({ pluginId: params.pluginId, ok: true, error: null }),

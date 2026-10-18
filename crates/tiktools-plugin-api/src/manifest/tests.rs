@@ -1417,3 +1417,23 @@ fn token_import_validates_parser_options_and_never_accepts_a_manifest_file_path(
     missing_auth["http"]["auth"] = serde_json::json!({"type":"none"});
     assert!(PluginManifest::from_value(missing_auth).is_err());
 }
+
+#[test]
+fn token_discovery_rejects_traversal_and_invalid_endpoint_mapping() {
+    let original: Value =
+        serde_json::from_str(include_str!("../../../../examples/repo-game/plugin.json")).unwrap();
+    for (key, value) in [
+        ("relativePath", "../../private.cfg"),
+        ("relativePath", "/private.cfg"),
+        ("steamFolder", ".."),
+        ("modManagerGame", "../Other"),
+        ("relativePath", "BepInEx/config/other.cfg"),
+    ] {
+        let mut doc = original.clone();
+        doc["http"]["tokenImport"]["discovery"][key] = serde_json::json!(value);
+        assert!(PluginManifest::from_value(doc).is_err());
+    }
+    let mut doc = original;
+    doc["http"]["tokenImport"]["connection"]["portKey"] = serde_json::json!("");
+    assert!(PluginManifest::from_value(doc).is_err());
+}

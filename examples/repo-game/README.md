@@ -5,22 +5,31 @@ Run `bun run prepare:dev-plugins` for automatic development discovery, or instal
 this directory through the existing plugin installer. Enable `repo.game` and its
 HTTP capability. Configure the local URL in Connections. To set up the token:
 
-1. Start R.E.P.O. with REPOapi once so BepInEx generates the configuration.
-2. In TikTools, open **Connections → R.E.P.O. Game → Import token from configuration…**.
-3. Select `BepInEx/config/org.repo.rest-api.cfg` inside the game installation or
-   the active mod-manager profile. No copying or showing the token is needed.
+1. Start R.E.P.O. with REPOapi once so BepInEx generates its configuration.
+2. Open **Connections → R.E.P.O. Game → Connect automatically**.
+3. Choose the detected Steam installation or active mod profile and click
+   **Use this configuration**. TikTools imports the token and API port, then
+   tests the connection. Credentials remain hidden.
 
-TikTools reads `[HTTP] AuthenticationToken` inside the native host, saves it with
-its existing secret settings, and tests the connection automatically. The file
-is read only; cancelling or choosing an invalid file preserves existing settings.
-You can also paste a token manually. Import requires the desktop native picker;
-remote clients must choose a file on the machine running the TikTools host.
+The search checks known Steam locations (including configured additional
+libraries) and r2modman/Thunderstore profile folders. It does not scan the whole
+disk or read credentials before you choose a source. If nothing is found, use
+**Select game folder…** and select the installation or active mod-profile folder.
+Selecting its `BepInEx` or `config` subfolder also works.
+
+**Import token from configuration…** remains available as a fallback: select
+`BepInEx/config/org.repo.rest-api.cfg`. You can also paste the token manually.
+The source file is never changed. Cancellation, invalid configurations or
+unsupported remote addresses preserve existing settings. Import only accepts
+local/wildcard API listen addresses; wildcard addresses become loopback client
+URLs. Native file/folder selection requires the desktop host.
+
 There is no API login flow.
 The manifest uses the registered `terminal` icon (`gamepad` is not in the current host registry).
 Authentication may be disabled in REPOapi's local configuration; leave the token
 blank only when the server has been explicitly configured that way.
 
-Test connection queries `/health`. When gameplay readiness is false the banner
+Test connection queries `/health`. API reachability and gameplay readiness are reported separately. When gameplay readiness is false the banner
 reports API version, game-running, level, host and readiness state. An available
 HTTP server does not establish that commands can run. Join a level as host.
 

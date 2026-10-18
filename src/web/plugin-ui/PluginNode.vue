@@ -198,7 +198,8 @@ export const PluginNode = defineVueComponent<PluginNodeProps>(
           onTestConnection={() => context.connection.test()}
           onOpenMediaPicker={context.media.pick}
           supportsTokenImport={context.provisioning.supportsImport}
-          onImportToken={() => context.provisioning.importToken?.()}
+          supportsTokenDiscovery={context.provisioning.supportsDiscovery}
+          onImportToken={(_id, options) => context.provisioning.importToken?.(options)}
           supportsProvisioning={context.provisioning.supported}
           provisionState={context.provisioning.state}
           onProvisionToken={(_id, username, password) =>

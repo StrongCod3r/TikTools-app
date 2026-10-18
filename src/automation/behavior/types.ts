@@ -226,6 +226,7 @@ export interface PluginDescriptor {
   supportsTokenProvisioning?: boolean;
   /** Imports a secret from an explicitly selected local configuration file. */
   supportsTokenImport?: boolean;
+  supportsTokenDiscovery?: boolean;
 }
 
 export interface PluginStatus {

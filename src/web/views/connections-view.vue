@@ -1,4 +1,5 @@
 <script lang="tsx">
+import type { TokenSetupOptions, PluginCredentialState } from '../../shared/token-import.ts';
 import { ref, watch } from 'vue';
 import { defineVueComponent } from '../vue/component.ts';
 
@@ -38,7 +39,7 @@ type ConnectionsViewProps = {
   connections: Record<string, PluginConnectionState>;
   pluginSettings: Record<string, PluginSettingsState | undefined>;
   actionOptions: Record<string, ActionOptionItem[]>;
-  provisionStates: Record<string, { working: boolean; ok: boolean; message: string } | undefined>;
+  provisionStates: Record<string, PluginCredentialState | undefined>;
   onUniqueIdChange: (val: string) => void;
   onCookieChange: (val: string) => void;
   onConnect: () => void;
@@ -65,7 +66,7 @@ type ConnectionsViewProps = {
   onSaveSettings: (id: string, values: PluginSettingValues) => void;
   onGetActionOptions: (source: string) => void;
   onOpenMediaPicker?: OpenMediaPicker;
-  onImportToken?: (id: string) => void;
+  onImportToken?: (id: string, options?: TokenSetupOptions) => void;
   onProvisionToken?: (id: string, username: string, password: string) => void;
   onOpenPlugins: () => void;
 };
@@ -362,7 +363,7 @@ export const ConnectionsView = defineVueComponent<ConnectionsViewProps>(
                 const connectionHint = conn
                   ? conn.ok
                     ? t(locale, 'pluginConnectedIn', { ms: conn.latencyMs })
-                    : (conn.error || t(locale, 'pluginConnectionFailed'))
+                    : (conn.reachable && conn.gameplayReady === false ? t(locale, 'pluginApiNotReady') : (conn.error || t(locale, 'pluginConnectionFailed')))
                   : t(locale, 'pluginStatusNotConfigured');
                 const open = isServerOpen(id);
                 // The card stays mounted while collapsed so its auto-probe,
@@ -410,6 +411,7 @@ export const ConnectionsView = defineVueComponent<ConnectionsViewProps>(
                         onTestConnection={props.onTestConnection}
                         onOpenMediaPicker={props.onOpenMediaPicker}
                         supportsTokenImport={plugin.descriptor.supportsTokenImport}
+                        supportsTokenDiscovery={plugin.descriptor.supportsTokenDiscovery}
                         onImportToken={props.onImportToken}
                         supportsProvisioning={plugin.descriptor.supportsTokenProvisioning}
                         provisionState={props.provisionStates[id]}

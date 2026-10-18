@@ -33,7 +33,18 @@
       "fileName": "org.repo.rest-api.cfg",
       "section": "HTTP",
       "key": "AuthenticationToken",
-      "minLength": 43
+      "minLength": 43,
+      "discovery": {
+        "steamFolder": "REPO",
+        "modManagerGame": "REPO",
+        "relativePath": "BepInEx/config/org.repo.rest-api.cfg"
+      },
+      "connection": {
+        "setting": "serverUrl",
+        "section": "HTTP",
+        "hostKey": "Host",
+        "portKey": "Port"
+      }
     }
   },
   "settings": {
@@ -50,7 +61,7 @@
           "type": "string",
           "title": "API token",
           "secret": true,
-          "description": "Use Import token from configuration to select BepInEx/config/org.repo.rest-api.cfg from your game or active mod profile. You can also paste the token manually."
+          "description": "Use Connect automatically or select the game/profile folder. File import and manual token entry remain available."
         },
         "positionMode": {
           "type": "string",
@@ -100,7 +111,7 @@
         {
           "kind": "text",
           "text": {
-            "default": "Start R.E.P.O. with REPOapi once. Use Import token from configuration and select BepInEx/config/org.repo.rest-api.cfg inside your game folder or active mod-manager profile. Gameplay requires an active level and host authority."
+            "default": "Start R.E.P.O. with REPOapi once. Use Connect automatically and choose your Steam installation or active mod profile. If it is not found, select the game/profile folder. TikTools imports the token and API port without showing credentials. Gameplay requires an active level and host authority."
           }
         },
         {

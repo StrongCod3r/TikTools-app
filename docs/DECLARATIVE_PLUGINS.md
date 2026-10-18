@@ -455,9 +455,10 @@ parser support; plugins cannot supply executable readers.
 
 The `plugins.token.import` control operation accepts `{ "pluginId": "repo.game" }`
 and opens the existing host-owned native picker with configuration-file filters.
-It accepts no filesystem path or file contents from the caller. Only the file
-the operator selects is read, on a blocking worker; no directory scanning or
-credential discovery occurs. Only one import dialog may run at a time.
+It accepts no filesystem path or file contents from the caller. The default
+`file` mode reads only the file the operator selects, on a blocking worker. Plugins
+can additionally opt into the bounded discovery described below. Only one import
+dialog may run at a time.
 The result uses `{pluginId, ok, error}`: cancellation is `ok: false` with no error.
 File contents and extracted tokens stay inside the host. Existing settings are
 merged through the normal secret persistence, cache invalidation and change-event
@@ -471,3 +472,61 @@ admin login flow and Minecraft stays unchanged. A future plugin with an INI toke
 can opt in with its own filename/section/key and secret token setting, using the
 same connection UI and executor. Token import does not disable authentication or
 modify the source server configuration.
+
+### Automatic connection and game-folder setup
+
+An INI token import can declare where its local game configuration resides and
+how to import its endpoint:
+
+```json
+"discovery": {
+  "steamFolder": "REPO",
+  "modManagerGame": "REPO",
+  "relativePath": "BepInEx/config/org.repo.rest-api.cfg"
+},
+"connection": {
+  "setting": "serverUrl",
+  "section": "HTTP",
+  "hostKey": "Host",
+  "portKey": "Port"
+}
+```
+
+These keys live inside `http.tokenImport`. Paths must be relative, at most eight
+components, without traversal, and end in `fileName`. Steam/mod-manager game names
+must be single folder names. The URL destination must be a declared URI setting.
+Only R.E.P.O. opts in initially; SonicBoom's admin login and Minecraft are unchanged.
+
+`plugins.token.import` retains its file-picker default and supports:
+
+- `{pluginId, mode: "auto"}`: return `{pluginId, ok: false, error: null, candidates}`
+  with opaque IDs and installation/profile labels. Even a single match requires
+  selecting **Use this configuration**. Discovery never reads the token.
+- `{pluginId, mode: "candidate", candidateId}`: re-discover the allowlisted source
+  and import it. Stale/unknown IDs fail without writing settings; callers cannot
+  send filesystem paths.
+- `{pluginId, mode: "folder"}`: native folder picker for the installation or active
+  mod profile. Only the declared configuration suffix is checked; selecting its
+  intermediate BepInEx/config folder also works.
+- `{pluginId, mode: "file"}`: existing configuration-file picker.
+
+Known roots cover standard Linux/Windows/macOS Steam locations, Linux Steam
+Flatpak, `steamapps/libraryfolders.vdf`, and known r2modmanPlus-local / Thunderstore
+DataFolder profiles under user configuration directories. Custom roots can use the
+folder picker. There is no recursive disk search: scans cap libraries and profiles
+at 128 entries per root, candidates at 64, Steam metadata at 128 KiB and imported
+configurations at 64 KiB. Canonical paths must stay inside the installation/profile
+or selected folder; symlink escapes are rejected. No search runs on LIVE events.
+
+Token and endpoint are validated before one merged settings write. Ports must be
+1–65535. Hosts must be `localhost`, `127.0.0.1`, `::1`, `0.0.0.0` or `::`; wildcard
+listen addresses map to loopback client URLs, so importing never sends credentials
+to a remote address. Missing host and port together keep the existing URL; a
+partial or invalid endpoint fails without changing the token or URL. Other server
+settings, including authentication, remain untouched.
+
+The UI reloads masked settings and probes after import. `plugins.health` exposes
+`reachable` separately from optional `gameplayReady`; a reachable API with no ready
+level is explicitly labelled as connected but not gameplay-ready. Existing `ok`
+and error semantics remain compatible. The Rust SDK retains its file-import
+method and adds `plugins_token_setup` for the optional modes.

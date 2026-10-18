@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 pub use tiktools_core::control::{
     PluginActionOutcome, PluginConnectionResult, PluginInstallResult, PluginProvisionResult,
+    TokenImportResult,
 };
 use tiktools_core::AppCore;
 
@@ -18,6 +19,19 @@ use crate::{
 #[serde(rename_all = "camelCase")]
 pub struct PluginIdParams {
     pub plugin_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginTokenImportParams {
+    pub plugin_id: String,
+    #[serde(default = "default_import_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub candidate_id: Option<String>,
+}
+fn default_import_mode() -> String {
+    "file".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -246,14 +260,18 @@ pub fn register(router: &mut ControlRouter) {
             outcome.map_err(ApiError::from)
         },
     );
-    router.register_typed::<PluginIdParams, PluginProvisionResult, _, _>(
+    router.register_typed::<PluginTokenImportParams, TokenImportResult, _, _>(
         "plugins.token.import",
         "Imports a secret token from a user-selected local configuration via the native picker",
         true,
-        |core: Arc<AppCore>, params: PluginIdParams| async move {
-            core.plugin_token_import(&params.plugin_id)
-                .await
-                .map_err(|error| ApiError::from(error).scoped_not_found("plugin_not_found"))
+        |core: Arc<AppCore>, params: PluginTokenImportParams| async move {
+            core.plugin_token_setup(
+                &params.plugin_id,
+                &params.mode,
+                params.candidate_id.as_deref(),
+            )
+            .await
+            .map_err(|error| ApiError::from(error).scoped_not_found("plugin_not_found"))
         },
     );
     router.register_typed::<PluginProvisionParams, PluginProvisionResult, _, _>(
@@ -276,4 +294,21 @@ pub fn register(router: &mut ControlRouter) {
                 .map_err(|error| ApiError::from(error).scoped_not_found("plugin_not_found"))
         },
     );
+}
+
+#[cfg(test)]
+mod token_setup_params_tests {
+    use super::*;
+    #[test]
+    fn setup_defaults_to_file_and_rejects_client_filesystem_paths() {
+        let params: PluginTokenImportParams =
+            serde_json::from_value(serde_json::json!({"pluginId":"repo.game"})).unwrap();
+        assert_eq!(params.mode, "file");
+        assert!(serde_json::from_value::<PluginTokenImportParams>(
+            serde_json::json!({"pluginId":"repo.game","path":"/private/config"})
+        )
+        .is_err());
+        let params:PluginTokenImportParams=serde_json::from_value(serde_json::json!({"pluginId":"repo.game","mode":"candidate","candidateId":"0123456789abcdef"})).unwrap();
+        assert_eq!(params.candidate_id.as_deref(), Some("0123456789abcdef"));
+    }
 }

@@ -795,3 +795,31 @@ async fn repo_bursts_reject_excess_work_without_queueing() {
 
 #[cfg(feature = "http")]
 static REPO_EXECUTION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(feature = "http")]
+#[tokio::test]
+async fn health_reports_api_reachability_separately_from_gameplay_readiness() {
+    struct Emitter;
+    impl crate::HostEmitter for Emitter { fn emit(&self, _:crate::ipc::messages::HostMessage) {} }
+    let (address,server)=stub_server([
+        ("/not-ready".to_owned(),(200,json!({"status":"ready","gameRunning":true,"inLevel":false,"isHost":true,"gameplayReady":false,"apiVersion":"1.0.0"}).to_string())),
+        ("/ready".to_owned(),(200,json!({"status":"ready","gameRunning":true,"inLevel":true,"isHost":true,"gameplayReady":true,"apiVersion":"1.0.0"}).to_string())),
+    ].into()).await;
+    let root=std::env::temp_dir().join(format!("health-readiness-{}",fastrand::u64(..)));
+    for (id,path) in [("repo.not-ready","/not-ready"),("repo.ready","/ready")] {
+        std::fs::create_dir_all(root.join(id)).unwrap();
+        let mut document:Value=serde_json::from_str(include_str!("../../../../../examples/repo-game/plugin.json")).unwrap();
+        document["id"]=json!(id);document["actionTypes"]=json!([]);document["pages"]=json!([]);
+        document["http"]["baseUrl"]=json!(format!("http://{address}"));document["http"]["health"]["path"]=json!(path);
+        std::fs::write(root.join(id).join("plugin.json"),document.to_string()).unwrap();
+    }
+    let manager=tiktools_plugin_loader::PluginManager::new(vec![tiktools_plugin_loader::PluginRoot{path:root.clone(),source:tiktools_plugin_loader::PluginSource::Development}]);
+    manager.scan().unwrap();
+    let mut core=crate::AppCore::new(Arc::new(Emitter));core.plugins=Arc::new(manager);
+    let core=Arc::new(core);
+    let unavailable=core.plugin_connection_check("repo.not-ready").await.unwrap();
+    assert!(unavailable.reachable);assert!(!unavailable.ok);assert_eq!(unavailable.gameplay_ready,Some(false));
+    let ready=core.plugin_connection_check("repo.ready").await.unwrap();
+    assert!(ready.reachable&&ready.ok);assert_eq!(ready.gameplay_ready,Some(true));
+    server.abort();let _=std::fs::remove_dir_all(root);
+}

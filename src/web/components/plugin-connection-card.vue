@@ -1,4 +1,5 @@
 <script lang="tsx">
+import type { TokenSetupOptions, PluginCredentialState } from '../../shared/token-import.ts';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { defineVueComponent } from '../vue/component.ts';
 
@@ -50,8 +51,9 @@ type PluginConnectionCardProps = {
   onOpenMediaPicker?: OpenMediaPicker;
   supportsProvisioning?: boolean;
   supportsTokenImport?: boolean;
-  onImportToken?: (id: string) => void;
-  provisionState?: { working: boolean; ok: boolean; message: string };
+  supportsTokenDiscovery?: boolean;
+  onImportToken?: (id: string, options?: TokenSetupOptions) => void;
+  provisionState?: PluginCredentialState;
   onProvisionToken?: (id: string, username: string, password: string) => void;
   /** Stretch full-width (Connections tab) instead of the centered 720px page column. */
   inline?: boolean;
@@ -73,7 +75,7 @@ type SaveState = 'idle' | 'saving' | 'saved' | 'error';
  * script, or component indirection from the manifest.
  */
 export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps>(
-  ['locale', 'pluginId', 'pluginName', 'settingsState', 'connection', 'actionOptions', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onTestConnection', 'onOpenMediaPicker', 'supportsProvisioning', 'supportsTokenImport', 'onImportToken', 'provisionState', 'onProvisionToken', 'inline'],
+  ['locale', 'pluginId', 'pluginName', 'settingsState', 'connection', 'actionOptions', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onTestConnection', 'onOpenMediaPicker', 'supportsProvisioning', 'supportsTokenImport', 'supportsTokenDiscovery', 'onImportToken', 'provisionState', 'onProvisionToken', 'inline'],
   (props) => {
   const draft = ref<JsonObject | null>(null);
   const editing = ref(false);
@@ -311,30 +313,34 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
     );
   };
 
-  /** Native, user-selected token import; pending edits must be saved first. */
+  /** Discovery never imports before the operator chooses a source. */
   const renderTokenImport = () => {
     if (!props.supportsTokenImport || !props.onImportToken) return null;
     const working = props.provisionState?.working === true;
-    return (
+    const disabled = working || testing.value || dirty.value || saveState.value === 'saving' || !props.settingsState;
+    const start = (options?: TokenSetupOptions) => {
+      clearSaveTimers(); draft.value = null; lastSent.value = null;
+      lastSentJson.value = null; saveState.value = 'idle';
+      props.onImportToken?.(props.pluginId, options);
+    };
+    return <div>
       <div class="plg-connect__actions">
-        <button type="button" class="btn btn-sm"
-          disabled={working || testing.value || dirty.value || saveState.value === 'saving' || !props.settingsState}
-          onClick={() => {
-            clearSaveTimers();
-            draft.value = null;
-            lastSent.value = null;
-            lastSentJson.value = null;
-            saveState.value = 'idle';
-            props.onImportToken?.(props.pluginId);
-          }}>
-          {t(props.locale, working ? 'pluginImportingToken' : 'pluginImportToken')}
-        </button>
-        <p class="plg-note">{t(props.locale, 'pluginImportTokenHint')}</p>
-        {props.provisionState?.message && (
-          <div class="plg-alert" role="status">{props.provisionState.message}</div>
-        )}
+        {props.supportsTokenDiscovery && <>
+          <button type="button" class="btn btn-primary btn-sm" disabled={disabled} onClick={() => start({ mode: 'auto' })}>{t(props.locale, working ? 'pluginImportingToken' : 'pluginAutoConnect')}</button>
+          <button type="button" class="btn btn-sm" disabled={disabled} onClick={() => start({ mode: 'folder' })}>{t(props.locale, 'pluginSelectGameFolder')}</button>
+        </>}
+        <button type="button" class="btn btn-sm" disabled={disabled} onClick={() => start()}>{t(props.locale, working ? 'pluginImportingToken' : 'pluginImportToken')}</button>
       </div>
-    );
+      <p class="plg-note">{t(props.locale, props.supportsTokenDiscovery ? 'pluginAutoConnectHint' : 'pluginImportTokenHint')}</p>
+      {!!props.provisionState?.candidates?.length && <div>
+        <p>{t(props.locale, 'pluginChooseConfiguration')}</p>
+        <ul class="plg-list" style={{ maxHeight: '20rem', overflowY: 'auto' }}>{props.provisionState.candidates.map((candidate) => <li class="plg-list__row" key={candidate.id}>
+          <span style={{ minWidth: 0, overflowWrap: 'anywhere' }}>{candidate.label}</span>
+          <button type="button" class="btn btn-sm" disabled={disabled} onClick={() => start({ mode: 'candidate', candidateId: candidate.id })}>{t(props.locale, 'pluginUseConfiguration')}</button>
+        </li>)}</ul>
+      </div>}
+      {props.provisionState?.message && <div class="plg-alert" role="status">{props.provisionState.message}</div>}
+    </div>;
   };
 
   /** Existing admin-login provisioning remains independent of file import. */
@@ -385,6 +391,7 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
                 <span class="plg-connect__url">{t(locale, 'pluginConnectedTo', { url: urlValue.value })}</span>
               </span>
             </div>
+            {connection.gameplayReady !== undefined && <p class="plg-note">{t(locale, connection.gameplayReady ? 'pluginGameplayReady' : 'pluginApiNotReady')}</p>}
             {connection.details && <div class="plg-alert" role="status">{connection.details}</div>}
             {summaryRows.value.length > 0 && (
               <dl class="plg-connect__rows">
@@ -431,7 +438,9 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
       ? t(locale, 'pluginTestToVerify')
       : testing.value || !connection
         ? testing.value ? t(locale, 'pluginTestingConnection') : t(locale, 'pluginStatusNotConfigured')
-        : connection.ok
+        : connection.reachable && connection.gameplayReady === false
+          ? t(locale, 'pluginApiNotReady')
+          : connection.ok
           ? t(locale, 'pluginConnectedIn', { ms: connection.latencyMs })
           : t(locale, 'pluginConnectionFailed');
     return (
@@ -444,6 +453,7 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
             </span>
             {renderSaveState(locale)}
           </div>
+          {connection?.gameplayReady !== undefined && !dirty.value && <p class="plg-note">{t(locale, connection.gameplayReady ? 'pluginGameplayReady' : 'pluginApiNotReady')}</p>}
           {connection?.details && !dirty.value && (
             <div class="plg-alert" role="status">{connection.details}</div>
           )}

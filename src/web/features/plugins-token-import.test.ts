@@ -63,3 +63,26 @@ test('failed imports display safe errors and disposed requests cannot update UI'
   expect(disposed.calls).toHaveLength(1);
   expect(disposed.plugins.pluginProvision.value['repo.game']?.working).toBe(true);
 });
+
+test('automatic setup requires a source selection before import and never sends filesystem paths', async () => {
+  const candidates = [{ id: 'aabbccddeeff0011', label: 'Steam — REPO' }, { id: '1122334455667788', label: 'Mod profile: Stream' }];
+  const { plugins, calls } = harness(Promise.resolve({ pluginId: 'repo.game', ok: false, candidates }));
+  plugins.handleImportPluginToken('repo.game', { mode: 'auto' });
+  await flush();
+  expect(calls).toEqual([{ method: 'plugins.token.import', params: { pluginId: 'repo.game', mode: 'auto' } }]);
+  expect(plugins.pluginProvision.value['repo.game']?.candidates).toEqual(candidates);
+  plugins.handleImportPluginToken('repo.game', { mode: 'candidate', candidateId: '1122334455667788' });
+  await flush();
+  expect(calls[1]?.params).toEqual({ pluginId: 'repo.game', mode: 'candidate', candidateId: '1122334455667788' });
+  expect(plugins.pluginSettings.value).toEqual({});
+  plugins.dispose();
+});
+
+test('folder setup invokes the host picker and refreshes connection after importing', async () => {
+  const { plugins, calls } = harness(Promise.resolve({ pluginId: 'repo.game', ok: true }));
+  plugins.handleImportPluginToken('repo.game', { mode: 'folder' });
+  await flush();
+  expect(calls[0]).toEqual({ method: 'plugins.token.import', params: { pluginId: 'repo.game', mode: 'folder' } });
+  expect(calls.map((call) => call.method)).toEqual(['plugins.token.import', 'plugins.settings.get', 'plugins.health']);
+  plugins.dispose();
+});

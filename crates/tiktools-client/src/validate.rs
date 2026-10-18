@@ -160,9 +160,11 @@ pub fn validate_params(method: &str, params: &serde_json::Value) -> Result<(), C
         "plugins.action.execute" => PluginActionParams::deserialize(params)
             .map(|_| ())
             .map_err(invalid),
-        "plugins.token.import" => PluginIdParams::deserialize(params)
-            .map(|_| ())
-            .map_err(invalid),
+        "plugins.token.import" => {
+            tiktools_control_api::modules::plugins::PluginTokenImportParams::deserialize(params)
+                .map(|_| ())
+                .map_err(invalid)
+        }
         "plugins.token.provision" => PluginProvisionParams::deserialize(params)
             .map(|_| ())
             .map_err(invalid),

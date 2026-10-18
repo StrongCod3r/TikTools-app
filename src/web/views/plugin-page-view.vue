@@ -1,4 +1,5 @@
 <script lang="tsx">
+import type { TokenSetupOptions, PluginCredentialState } from '../../shared/token-import.ts';
 import { computed, ref } from 'vue';
 import { defineVueComponent } from '../vue/component.ts';
 
@@ -37,8 +38,9 @@ type PluginPageViewProps = {
   onExecuteAction?: (actionType: string, config: PluginSettingValues) => void;
   supportsProvisioning?: boolean;
   supportsTokenImport?: boolean;
-  onImportToken?: (id: string) => void;
-  provisionState?: { working: boolean; ok: boolean; message: string };
+  supportsTokenDiscovery?: boolean;
+  onImportToken?: (id: string, options?: TokenSetupOptions) => void;
+  provisionState?: PluginCredentialState;
   onProvisionToken?: (id: string, username: string, password: string) => void;
   /** Host-stamped `ui` descriptor for this plugin, when the snapshot carries one. */
   ui?: PluginUiDescriptor;
@@ -58,7 +60,7 @@ type PluginPageViewProps = {
  * adapter.
  */
 export const PluginPageView = defineVueComponent<PluginPageViewProps>(
-  ['locale', 'page', 'pluginName', 'settingsState', 'connection', 'actionOptions', 'actionOptionErrors', 'actionOptionSelected', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onTestConnection', 'onOpenMediaPicker', 'onExecuteAction', 'supportsProvisioning', 'supportsTokenImport', 'onImportToken', 'provisionState', 'onProvisionToken', 'ui', 'backend', 'subscribeTopic'],
+  ['locale', 'page', 'pluginName', 'settingsState', 'connection', 'actionOptions', 'actionOptionErrors', 'actionOptionSelected', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onTestConnection', 'onOpenMediaPicker', 'onExecuteAction', 'supportsProvisioning', 'supportsTokenImport', 'supportsTokenDiscovery', 'onImportToken', 'provisionState', 'onProvisionToken', 'ui', 'backend', 'subscribeTopic'],
   (props) => {
   const adapted = computed(() => adaptLegacyPage(props.page));
   const localState = ref<Record<string, string | number | boolean>>({});
@@ -94,7 +96,8 @@ export const PluginPageView = defineVueComponent<PluginPageViewProps>(
     },
     provisioning: {
       supportsImport: props.supportsTokenImport,
-      importToken: () => props.onImportToken?.(props.page.pluginId),
+      supportsDiscovery: props.supportsTokenDiscovery,
+      importToken: (options) => props.onImportToken?.(props.page.pluginId, options),
       supported: props.supportsProvisioning ?? false,
       state: props.provisionState,
       provision: (username, password) =>

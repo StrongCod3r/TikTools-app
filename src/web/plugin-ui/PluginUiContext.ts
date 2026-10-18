@@ -1,3 +1,4 @@
+import type { TokenSetupOptions, PluginCredentialState } from '../../shared/token-import.ts';
 /**
  * Typed context consumed by the generic declarative plugin UI renderer.
  *
@@ -47,9 +48,10 @@ export interface PluginUiMediaApi {
 
 export interface PluginUiProvisioningApi {
   supportsImport?: boolean;
-  importToken?(): void;
+  importToken?(options?: TokenSetupOptions): void;
+  supportsDiscovery?: boolean;
   supported: boolean;
-  state?: { working: boolean; ok: boolean; message: string };
+  state?: PluginCredentialState;
   provision(username: string, password: string): void;
 }
 

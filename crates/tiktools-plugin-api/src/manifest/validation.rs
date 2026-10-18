@@ -284,6 +284,44 @@ pub fn validate_http_config(http: &Value) -> Result<(), ManifestError> {
         {
             return Err(ManifestError::InvalidField("http"));
         }
+        if let Some(discovery) = spec.get("discovery") {
+            for key in ["steamFolder", "modManagerGame"] {
+                if discovery.get(key).and_then(Value::as_str).is_none_or(|s| {
+                    s.is_empty()
+                        || s.len() > 128
+                        || s == "."
+                        || s == ".."
+                        || s.contains(['/', '\\', ':'])
+                        || s.chars().any(char::is_control)
+                }) {
+                    return Err(ManifestError::InvalidField("http"));
+                }
+            }
+            let path = discovery
+                .get("relativePath")
+                .and_then(Value::as_str)
+                .ok_or(ManifestError::InvalidField("http"))?;
+            if path.len() > 256
+                || path.split('/').count() > 8
+                || path.contains(['\\', ':'])
+                || path.chars().any(char::is_control)
+                || path
+                    .split('/')
+                    .any(|s| s.is_empty() || s == "." || s == "..")
+                || path.rsplit('/').next() != spec.get("fileName").and_then(Value::as_str)
+            {
+                return Err(ManifestError::InvalidField("http"));
+            }
+        }
+        if let Some(connection) = spec.get("connection") {
+            for key in ["setting", "section", "hostKey", "portKey"] {
+                if connection.get(key).and_then(Value::as_str).is_none_or(|s| {
+                    s.trim().is_empty() || s.len() > 128 || s.chars().any(char::is_control)
+                }) {
+                    return Err(ManifestError::InvalidField("http"));
+                }
+            }
+        }
         if object
             .get("auth")
             .and_then(|auth| auth.get("tokenSetting"))

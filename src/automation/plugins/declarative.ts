@@ -481,6 +481,8 @@ export function isConnectionOnlyPage(page: { sections: readonly { kind: string }
 
 /** Connection probe result held per plugin id by the app controller. */
 export type PluginConnectionState = {
+  reachable?: boolean;
+  gameplayReady?: boolean;
   details?: string;
   ok: boolean;
   latencyMs: number;

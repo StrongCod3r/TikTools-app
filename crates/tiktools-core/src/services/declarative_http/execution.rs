@@ -288,6 +288,8 @@ pub(crate) struct PluginConnectionCheck {
     pub(crate) latency_ms: u64,
     pub(crate) error: Option<String>,
     pub(crate) details: Option<String>,
+    pub(crate) reachable: bool,
+    pub(crate) gameplay_ready: Option<bool>,
 }
 
 impl crate::AppCore {
@@ -301,6 +303,8 @@ impl crate::AppCore {
             latency_ms: crate::helpers::now_millis().saturating_sub(started),
             error: Some(error),
             details: None,
+            reachable: false,
+            gameplay_ready: None,
         };
         let plugin = self.plugins.get(id);
         let Some(plugin) = plugin else {
@@ -351,6 +355,8 @@ impl crate::AppCore {
             if body.get(field).and_then(Value::as_bool) != Some(true) {
                 let mut result = failed("API reachable; gameplay unavailable.".to_owned());
                 result.details = details;
+                result.reachable = true;
+                result.gameplay_ready = Some(false);
                 return result;
             }
         }
@@ -359,6 +365,11 @@ impl crate::AppCore {
             latency_ms: crate::helpers::now_millis().saturating_sub(started),
             error: None,
             details,
+            reachable: true,
+            gameplay_ready: health
+                .get("readinessField")
+                .and_then(Value::as_str)
+                .map(|field| body.get(field).and_then(Value::as_bool).unwrap_or(false)),
         }
     }
 
