@@ -263,3 +263,28 @@ test('external settings event reloads profiles even when token stays redacted', 
   await expect(page.locator('option[value="supertonic:M1"]')).toHaveCount(0);
   await expect(page.locator('#tts-default-voice option[value="supertonic:Other"]')).toHaveCount(1);
 });
+
+test('diagnostics consume host events without refreshing catalogs and manual interruption is optional', async ({ page }) => {
+  await installFakeBroker(page, baseFakeState());
+  await page.goto('/');
+  await expect(page.getByText('3 voices')).toBeVisible();
+  const before = (await readBrokerCalls(page)).filter(call => call.method === 'options.get').length;
+  await page.getByText('Speech diagnostics', { exact: true }).click();
+  await page.evaluate(() => {
+    const w = window as unknown as { __SONICBOOM_EMIT_DIAGNOSTIC__: (data: unknown) => void };
+    w.__SONICBOOM_EMIT_DIAGNOSTIC__({pluginId:'sonicboom.server',eventType:'sonicboom.speech-status',event:{stage:'running',connection:'running',queueDepth:3,lastResult:'Playback disposition pending.'}});
+  });
+  await expect(page.getByText('Backend: running · Queue depth: 3')).toBeVisible();
+  await expect(page.getByText('running · Playback disposition pending.')).toBeVisible();
+  expect((await readBrokerCalls(page)).filter(call => call.method === 'options.get')).toHaveLength(before);
+  await page.getByLabel('Text', { exact: true }).fill('manual check');
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect(page.getByRole('log')).toContainText('spoken');
+  let actions = (await readBrokerCalls(page)).filter(call => call.method === 'actions.execute');
+  expect(actions[0]?.params['config']).toMatchObject({playNow:false});
+  await page.getByLabel('Interrupt current speech for manual tests').check();
+  await page.getByRole('button', { name: 'Play', exact: true }).click();
+  await expect.poll(async () => (await readBrokerCalls(page)).filter(call => call.method === 'actions.execute').length).toBe(2);
+  actions = (await readBrokerCalls(page)).filter(call => call.method === 'actions.execute');
+  expect(actions[1]?.params['config']).toMatchObject({playNow:true});
+});

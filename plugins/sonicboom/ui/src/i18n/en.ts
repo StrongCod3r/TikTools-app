@@ -1,6 +1,13 @@
 /** SonicBoom plugin UI strings (moved from the main frontend
  * so no TTS copy ships in the TikTools web bundle). */
 export const english = {
+  ttsDiagnostics: 'Speech diagnostics',
+  ttsReady: 'Ready',
+  ttsNotReady: 'Not ready',
+  ttsBackend: 'Backend',
+  ttsQueueDepth: 'Queue depth',
+  ttsReloadDiagnostics: 'Reload voices and retry',
+  ttsManualInterrupt: 'Interrupt current speech for manual tests',
   ttsConnectionChanged: 'Connection changed. Reload voices.',
   ttsProviderChanged: 'Provider changed; voice overrides reset.',
   ttsCatalogUpdated: 'Voice catalog updated.',

@@ -31,13 +31,13 @@
 //!   enqueues a self-contained [`SpeechJob`] onto a bounded (64) FIFO. A
 //!   full queue is rejected with an exact counter and a rate-limited,
 //!   actionable log line; it never blocks ingestion, retries, or hides.
-//! - The single ordered worker owns voice lookup/selection, replay dedup,
-//!   freshness expiry, and the HTTP POST. An expired job is dropped before
-//!   the voice catalog request and again before the speech POST.
-//! - A 2xx response means the endpoint *accepted* the request; it does not
-//!   prove audible playback. Counters and logs say `accepted`, never
-//!   "played". When `/api/tts/play` returns its queue `id`, the log carries
-//!   `server_id=…` for correlation; absence of an id is not a failure.
+//! - The ordered dispatcher owns catalog lookup, replay dedup and admission
+//!   expiry. Supertonic keeps its short synchronous request. Cloned voices
+//!   use bounded tasks for idempotent job submission and playback tracking.
+//! - Queue admission, inference completion and playback disposition are
+//!   separate outcomes. A queued/started response never proves completion.
+//! - Disconnect/settings changes cancel outstanding jobs without resetting
+//!   message identity dedup. Shutdown joins tracking and retires queued work.
 //! - A watchdog flags a stalled worker (`degraded`) after a bounded period
 //!   without progression. Recovery is stop/restart only; a stale generation
 //!   is cancelled and joined before a replacement starts.
@@ -46,6 +46,7 @@ mod config;
 mod emotes;
 mod policy;
 mod sanitizer;
+mod transport;
 
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
@@ -94,6 +95,7 @@ fn provider_timeout_budget(provider: &str) -> Duration {
 /// Ordinary chat freshness: a job older than this is dropped before it can
 /// monopolize the worker. High-value/manual speech is out of the observer's
 /// scope (declarative actions bypass this queue entirely).
+#[cfg(test)]
 const MAX_WAIT_AGE_MS: u64 = 15_000;
 const SPEECH_QUEUE_CAPACITY: usize = 64;
 /// No progression for this long flips a running worker to `degraded`.
@@ -153,6 +155,7 @@ impl SpeakFailure {
             SpeakFailure::Timeout => "timeout",
             SpeakFailure::Disconnected => "disconnected",
             SpeakFailure::Transport => "transport",
+            SpeakFailure::Status(408) => "server_http_deadline",
             SpeakFailure::Status(429) => "rate_limited",
             SpeakFailure::Status(code) if *code >= 500 => "server_error",
             SpeakFailure::Status(_) => "client_error",
@@ -204,6 +207,13 @@ struct SpeechStats {
     accepted: AtomicU64,
     failed: AtomicU64,
     no_voice: AtomicU64,
+    generating: AtomicU64,
+    completed: AtomicU64,
+    playback_queued: AtomicU64,
+    playback_started: AtomicU64,
+    playback_failed: AtomicU64,
+    timed_out: AtomicU64,
+    provider_unavailable: AtomicU64,
     cancelled: AtomicU64,
 }
 
@@ -218,9 +228,16 @@ struct SpeechRuntime {
     queue_depth: AtomicI64,
     last_status_log_ms: AtomicU64,
     last_reject_log_ms: AtomicU64,
+    diagnostic: std::sync::Mutex<serde_json::Value>,
+    catalog_invalidation: AtomicU64,
 }
 
 impl SpeechRuntime {
+    fn diagnostic(&self, stage: &str, result: &str) {
+        let mut diagnostic = self.diagnostic.lock().unwrap_or_else(|e| e.into_inner());
+        diagnostic["stage"] = stage.into();
+        diagnostic["lastResult"] = result.into();
+    }
     fn new(generation: u64) -> Self {
         Self {
             state: AtomicU8::new(STATE_IDLE),
@@ -230,6 +247,8 @@ impl SpeechRuntime {
             queue_depth: AtomicI64::new(0),
             last_status_log_ms: AtomicU64::new(0),
             last_reject_log_ms: AtomicU64::new(0),
+            diagnostic: std::sync::Mutex::new(serde_json::json!({"stage":"idle"})),
+            catalog_invalidation: AtomicU64::new(0),
         }
     }
 }
@@ -286,6 +305,10 @@ struct SpeechEngine {
     event_ids: IdDeduper,
     voices: Vec<String>,
     voices_fetched_at_ms: u64,
+    catalog_retry_ms: u64,
+    catalog_failures: u32,
+    last_empty_diagnostic_at: u64,
+    catalog_generation: u64,
     catalog_key: Option<(String, u64, String, String)>,
     /// Time-seeded xorshift state for random voice picks (no rng dep for
     /// a cosmetic shuffle).
@@ -294,6 +317,9 @@ struct SpeechEngine {
     stats: Arc<SpeechStats>,
     runtime: Arc<SpeechRuntime>,
     epoch: Instant,
+    instance_id: u64,
+    tracking: tokio::task::JoinSet<()>,
+    tracking_cancel: tokio::sync::watch::Sender<bool>,
 }
 
 impl Default for SpeechEngine {
@@ -307,12 +333,19 @@ impl Default for SpeechEngine {
             event_ids: IdDeduper::new(EVENT_ID_DEDUP_WINDOW_MS, EVENT_ID_DEDUP_MAX_ENTRIES),
             voices: Vec::new(),
             voices_fetched_at_ms: 0,
+            catalog_retry_ms: 0,
+            catalog_failures: 0,
+            last_empty_diagnostic_at: 0,
+            catalog_generation: 0,
             catalog_key: None,
             rng: now_millis().max(1),
             request_timeout: Duration::from_secs(MAX_SPEAK_TIMEOUT_SECS),
             stats: Arc::new(SpeechStats::default()),
             runtime: Arc::new(SpeechRuntime::new(1)),
             epoch: Instant::now(),
+            instance_id: now_millis(),
+            tracking: tokio::task::JoinSet::new(),
+            tracking_cancel: tokio::sync::watch::channel(false).0,
         }
     }
 }
@@ -399,15 +432,19 @@ impl SpeechEngine {
             config.policy.provider_id.clone(),
             config.policy.voice_catalog_revision.clone(),
         );
-        if self.catalog_key.as_ref() != Some(&key) {
+        let generation = self.runtime.catalog_invalidation.load(Ordering::Relaxed);
+        if self.catalog_key.as_ref() != Some(&key) || generation != self.catalog_generation {
+            self.catalog_generation = generation;
             self.voices.clear();
             self.voices_fetched_at_ms = 0;
+            self.catalog_retry_ms = 0;
+            self.catalog_failures = 0;
             self.catalog_key = Some(key);
         }
         let server_url = &config.server_url;
         let token = &config.api_token;
         let now = now_millis();
-        if now.saturating_sub(self.voices_fetched_at_ms) < VOICES_TTL_SECS * 1000
+        if now.saturating_sub(self.voices_fetched_at_ms) < self.catalog_retry_ms
             && self.voices_fetched_at_ms != 0
         {
             return;
@@ -434,8 +471,14 @@ impl SpeechEngine {
                 );
                 None
             }
-            Err(_) => {
-                eprintln!("sonicboom: voice catalog request failed");
+            Err(error) => {
+                if error.is_timeout() {
+                    self.stats.timed_out.fetch_add(1, Ordering::Relaxed);
+                }
+                eprintln!(
+                    "sonicboom: voice catalog request failed stage={}",
+                    classify_request_error(&error).kind()
+                );
                 None
             }
         };
@@ -447,7 +490,18 @@ impl SpeechEngine {
                 .filter(|v| v.starts_with(&prefix))
                 .collect();
             self.voices_fetched_at_ms = now;
+            self.catalog_failures = 0;
+            self.catalog_retry_ms = if self.voices.is_empty() {
+                config.empty_catalog_retry_ms
+            } else {
+                VOICES_TTL_SECS * 1000
+            };
+        } else {
+            self.catalog_failures = self.catalog_failures.saturating_add(1);
+            self.catalog_retry_ms = (1000_u64 << self.catalog_failures.min(5)).min(30_000);
         }
+        // Backoff starts after completion, including slow failed requests.
+        self.voices_fetched_at_ms = now_millis();
     }
 
     async fn speak(
@@ -540,8 +594,52 @@ impl SpeechEngine {
             return;
         }
 
+        {
+            let mut diagnostic = self
+                .runtime
+                .diagnostic
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            diagnostic["provider"] = config.policy.provider_id.clone().into();
+            diagnostic["voice"] = config.policy.default_voice.clone().into();
+        }
         self.ensure_voices(&config).await;
         if self.voices.is_empty() {
+            if self.last_empty_diagnostic_at != self.voices_fetched_at_ms {
+                self.last_empty_diagnostic_at = self.voices_fetched_at_ms;
+                let response = self
+                    .http
+                    .get(format!("{}/api/tts/plugin/providers", config.server_url))
+                    .bearer_auth(&config.api_token)
+                    .timeout(Duration::from_secs(VOICE_CATALOG_TIMEOUT_SECS))
+                    .send()
+                    .await;
+                let state = match response {
+                    Ok(response) if response.status().is_success() => response
+                        .json::<serde_json::Value>()
+                        .await
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .as_array()
+                                .and_then(|items| {
+                                    items
+                                        .iter()
+                                        .find(|item| item["id"] == config.policy.provider_id)
+                                })
+                                .cloned()
+                        })
+                        .and_then(|provider| provider["state"].as_str().map(str::to_owned)),
+                    _ => None,
+                };
+                let reason = match state.as_deref() {
+                    Some("ready") => "Provider ready; no authorized compatible voice profiles. Create a profile with this API token and reload voices.",
+                    Some(_) => { self.stats.provider_unavailable.fetch_add(1, Ordering::Relaxed); "Provider not ready; load its selected model and retry." },
+                    None => "Provider readiness unknown; check server connection and token authorization.",
+                };
+                self.runtime.diagnostic("catalog", reason);
+                eprintln!("sonicboom: job {job_id} failed stage=catalog detail={reason}");
+            }
             self.stats.no_voice.fetch_add(1, Ordering::Relaxed);
             self.stats.failed.fetch_add(1, Ordering::Relaxed);
             eprintln!(
@@ -586,6 +684,91 @@ impl SpeechEngine {
             self.log_status_if_due();
             return;
         }
+        if matches!(
+            config.policy.provider_id.as_str(),
+            "pocket-tts" | "qwen3-gguf"
+        ) {
+            // Keep inference reservations bounded locally; SonicBoom remains
+            // authoritative and can reject admission with 429.
+            while self.tracking.try_join_next().is_some() {}
+            if self.tracking.len() >= config.max_inflight {
+                self.stats.rejected.fetch_add(1, Ordering::Relaxed);
+                eprintln!("sonicboom: job {job_id} rejected stage=inference_admission reason=local_capacity");
+                return;
+            }
+            let client = transport::JobsClient {
+                http: self.http.clone(),
+                server: config.server_url.clone(),
+                token: config.api_token.clone(),
+            };
+            let key = format!(
+                "tiktools-{}-{session_generation}-{job_id}",
+                self.instance_id
+            );
+            let diagnostic_runtime = Arc::clone(&self.runtime);
+            let stats = Arc::clone(&self.stats);
+            let cancelled = self.tracking_cancel.subscribe();
+            let budget = Duration::from_millis(if config.policy.provider_id == "pocket-tts" {
+                config.generation_timeout_ms.min(120_000)
+            } else {
+                config.generation_timeout_ms
+            });
+            let event_ref = event_ref.to_owned();
+            // Submission and polling share a bounded task. Dropping the
+            // dispatch future cannot abandon an accepted server job: shutdown
+            // joins this task, recovering the ID through idempotent retry.
+            self.tracking.spawn(async move {
+                let id = match client.submit(&config.policy.provider_id, &decision.voice,
+                    &decision.language, &decision.spoken_text, &key).await {
+                    Ok(id) => id,
+                    Err(error) => {
+                        stats.failed.fetch_add(1, Ordering::Relaxed);
+                        if error == transport::Failure::Http(503) { stats.provider_unavailable.fetch_add(1, Ordering::Relaxed); }
+                        diagnostic_runtime.catalog_invalidation.fetch_add(1, Ordering::Relaxed);
+                        diagnostic_runtime.diagnostic("submission", error.guidance());
+                        eprintln!("sonicboom: job {job_id} failed stage=submission reason={error:?} event={event_ref}");
+                        return;
+                    }
+                };
+                stats.started.fetch_add(1, Ordering::Relaxed);
+                diagnostic_runtime.diagnostic("submitted", "Synthesis accepted; playback pending.");
+                eprintln!("sonicboom: job {job_id} submitted synthesis_id={id} event={event_ref}");
+                let mut previous_stage = String::new();
+                let mut generating_seen = false;
+                match client.track_observed(&id, budget, cancelled, |stage| {
+                    if stage != previous_stage {
+                        previous_stage = stage.to_owned();
+                        if !generating_seen && !matches!(stage, "queued" | "completed" | "failed" | "cancelled") {
+                            generating_seen = true; stats.generating.fetch_add(1, Ordering::Relaxed); }
+                        if stage == "completed" { stats.completed.fetch_add(1, Ordering::Relaxed); }
+                        diagnostic_runtime.diagnostic(stage, "Playback disposition pending.");
+                    }
+                }).await {
+                    Ok((state, queue_id)) => {
+                        diagnostic_runtime.diagnostic("playback", &format!("{state}; completion unverified"));
+                        if state == "queued" { stats.playback_queued.fetch_add(1, Ordering::Relaxed); }
+                        if state == "started" { stats.playback_started.fetch_add(1, Ordering::Relaxed); }
+                        stats.accepted.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("sonicboom: job {job_id} synthesis_id={id} playback={state} queue_id={}", queue_id.as_deref().unwrap_or("-"));
+                    }
+                    Err(transport::Failure::Cancelled) => {
+                        stats.cancelled.fetch_add(1, Ordering::Relaxed);
+                        diagnostic_runtime.diagnostic("cancelled", transport::Failure::Cancelled.guidance());
+                        eprintln!("sonicboom: job {job_id} synthesis_id={id} cancelled stage=tracking");
+                    }
+                    Err(error) => {
+                        if error == transport::Failure::Playback { stats.playback_failed.fetch_add(1, Ordering::Relaxed); }
+                        if matches!(error, transport::Failure::Deadline | transport::Failure::RequestTimeout | transport::Failure::InferenceDeadline) { stats.timed_out.fetch_add(1, Ordering::Relaxed); }
+                        diagnostic_runtime.catalog_invalidation.fetch_add(1, Ordering::Relaxed);
+                        diagnostic_runtime.diagnostic("failed", error.guidance());
+                        stats.failed.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("sonicboom: job {job_id} synthesis_id={id} failed stage={error:?}");
+                    }
+                }
+            });
+            self.mark_progress();
+            return;
+        }
         self.stats.started.fetch_add(1, Ordering::Relaxed);
         self.mark_progress();
         match self
@@ -600,6 +783,11 @@ impl SpeechEngine {
             .await
         {
             Ok(accepted) => {
+                self.runtime.diagnostic(
+                    "playback",
+                    "Synchronous request accepted; audible completion unverified.",
+                );
+                self.stats.playback_queued.fetch_add(1, Ordering::Relaxed);
                 self.stats.accepted.fetch_add(1, Ordering::Relaxed);
                 match accepted.server_job_id.as_deref() {
                     Some(server_id) => eprintln!(
@@ -613,6 +801,20 @@ impl SpeechEngine {
                 }
             }
             Err(failure) => {
+                if matches!(
+                    failure,
+                    SpeakFailure::Timeout
+                        | SpeakFailure::ConnectTimeout
+                        | SpeakFailure::Status(408)
+                ) {
+                    self.stats.timed_out.fetch_add(1, Ordering::Relaxed);
+                }
+                if failure == SpeakFailure::Status(503) {
+                    self.stats
+                        .provider_unavailable
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                self.runtime.diagnostic(failure.kind(), &failure.message());
                 self.stats.failed.fetch_add(1, Ordering::Relaxed);
                 eprintln!(
                     "sonicboom: job {job_id} failed reason={} detail={} event={event_ref}",
@@ -706,6 +908,8 @@ struct SonicBoom {
     next_job_id: u64,
     jobs: Option<tokio::sync::mpsc::Sender<Box<SpeechJob>>>,
     cancel: tokio::sync::watch::Sender<bool>,
+    disconnect: tokio::sync::watch::Sender<u64>,
+    last_diagnostic: serde_json::Value,
     worker: Option<std::thread::JoinHandle<()>>,
     watchdog: Option<std::thread::JoinHandle<()>>,
     /// Dropping the sender wakes the watchdog immediately (disconnected).
@@ -720,6 +924,7 @@ impl Default for SonicBoom {
         let runtime = Arc::new(SpeechRuntime::new(generation));
         let (jobs, mut receiver) = tokio::sync::mpsc::channel(SPEECH_QUEUE_CAPACITY);
         let (cancel, mut cancelled) = tokio::sync::watch::channel(false);
+        let (disconnect, mut disconnected) = tokio::sync::watch::channel(0_u64);
         let (watchdog_wake, watchdog_rx) = std::sync::mpsc::channel::<()>();
 
         let worker_stats = Arc::clone(&stats);
@@ -741,6 +946,16 @@ impl Default for SonicBoom {
                         let job: Box<SpeechJob> = tokio::select! {
                             biased;
                             _ = cancelled.changed() => break,
+                            _ = disconnected.changed() => {
+                                let _ = engine.tracking_cancel.send(true);
+                                while engine.tracking.join_next().await.is_some() {}
+                                engine.tracking_cancel = tokio::sync::watch::channel(false).0;
+                                while receiver.try_recv().is_ok() {
+                                    worker_runtime.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                                    worker_stats.cancelled.fetch_add(1, Ordering::Relaxed);
+                                }
+                                continue;
+                            },
                             job = receiver.recv() => match job { Some(job) => job, None => break },
                         };
                         worker_runtime.queue_depth.fetch_sub(1, Ordering::Relaxed);
@@ -755,10 +970,22 @@ impl Default for SonicBoom {
                                 worker_stats.cancelled.fetch_add(1, Ordering::Relaxed);
                                 break;
                             },
+                            _ = disconnected.changed() => {
+                                worker_stats.cancelled.fetch_add(1, Ordering::Relaxed);
+                                let _ = engine.tracking_cancel.send(true);
+                                while engine.tracking.join_next().await.is_some() {}
+                                engine.tracking_cancel = tokio::sync::watch::channel(false).0;
+                                while receiver.try_recv().is_ok() {
+                                    worker_runtime.queue_depth.fetch_sub(1, Ordering::Relaxed);
+                                    worker_stats.cancelled.fetch_add(1, Ordering::Relaxed);
+                                }
+                            },
                             () = engine.process(job) => {}
                         }
                         worker_runtime.state.store(STATE_IDLE, Ordering::Relaxed);
                     }
+                    let _ = engine.tracking_cancel.send(true);
+                    while engine.tracking.join_next().await.is_some() {}
                     worker_runtime.state.store(STATE_STOPPED, Ordering::Relaxed);
                     receiver.close();
                     // Everything still queued at shutdown is retired with an
@@ -818,6 +1045,8 @@ impl Default for SonicBoom {
             next_job_id: 1,
             jobs: Some(jobs),
             cancel,
+            disconnect,
+            last_diagnostic: serde_json::Value::Null,
             worker: Some(worker),
             watchdog,
             watchdog_wake: Some(watchdog_wake),
@@ -847,14 +1076,20 @@ impl SonicBoom {
             return true;
         }
         self.stats.eligible.fetch_add(1, Ordering::Relaxed);
+        if self.runtime.queue_depth.load(Ordering::Relaxed) >= config.queue_capacity as i64 {
+            self.stats.rejected.fetch_add(1, Ordering::Relaxed);
+            eprintln!("sonicboom: speech rejected reason=configured_queue_capacity");
+            return true;
+        }
         let admitted = Instant::now();
+        let max_wait_age_ms = config.max_wait_age_ms;
         let job = Box::new(SpeechJob {
             job_id: self.next_job_id,
             upstream_event_id,
             session_generation: self.runtime.generation,
             admitted,
             admitted_at_ms: now_millis(),
-            deadline: admitted + Duration::from_millis(MAX_WAIT_AGE_MS),
+            deadline: admitted + Duration::from_millis(max_wait_age_ms),
             text: text.to_owned(),
             author,
             config,
@@ -936,12 +1171,57 @@ impl Drop for SonicBoom {
 }
 
 impl Plugin for SonicBoom {
+    fn poll(&mut self, _context: &PluginContext) -> PluginResult<PollResult> {
+        let mut diagnostic = self
+            .runtime
+            .diagnostic
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        diagnostic["queueDepth"] = self
+            .runtime
+            .queue_depth
+            .load(Ordering::Relaxed)
+            .max(0)
+            .into();
+        diagnostic["connection"] = state_name(self.runtime.state.load(Ordering::Relaxed)).into();
+        let stats = &self.stats;
+        diagnostic["counters"] = serde_json::json!({
+            "observed":stats.observed.load(Ordering::Relaxed), "filtered":stats.filtered.load(Ordering::Relaxed),
+            "expired":stats.expired.load(Ordering::Relaxed), "missingVoices":stats.no_voice.load(Ordering::Relaxed),
+            "submitted":stats.started.load(Ordering::Relaxed), "playbackAdmitted":stats.accepted.load(Ordering::Relaxed),
+            "failed":stats.failed.load(Ordering::Relaxed), "cancelled":stats.cancelled.load(Ordering::Relaxed),
+            "saturation":stats.rejected.load(Ordering::Relaxed), "duplicates":stats.deduped.load(Ordering::Relaxed),
+            "running":stats.generating.load(Ordering::Relaxed), "completed":stats.completed.load(Ordering::Relaxed),
+            "playbackQueued":stats.playback_queued.load(Ordering::Relaxed), "playbackStarted":stats.playback_started.load(Ordering::Relaxed),
+            "playbackFailed":stats.playback_failed.load(Ordering::Relaxed), "timedOut":stats.timed_out.load(Ordering::Relaxed),
+            "providerUnavailable":stats.provider_unavailable.load(Ordering::Relaxed)
+        });
+        if self.last_diagnostic == diagnostic {
+            return Ok(PollResult::default());
+        }
+        self.last_diagnostic = diagnostic.clone();
+        Ok(PollResult::default().event(PluginEvent::new("sonicboom.speech-status", diagnostic)?))
+    }
+
     fn shutdown(&mut self, _context: &PluginContext) -> PluginResult<()> {
         self.stop();
         Ok(())
     }
 
     fn event(&mut self, _context: &PluginContext, event: DomainEventEnvelope) -> PluginResult<()> {
+        if event.topic == "live.disconnected"
+            || (event.topic == "plugin.settings-changed"
+                && event
+                    .data
+                    .get("pluginId")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("sonicboom.server"))
+        {
+            self.disconnect
+                .send_modify(|generation| *generation = generation.wrapping_add(1));
+            return Ok(());
+        }
         if event.topic != "live.ui-event" {
             return Ok(());
         }
@@ -1548,5 +1828,45 @@ mod tests {
             received.try_iter().collect::<Vec<_>>(),
             vec!["GET /api/tts/plugin/voices HTTP/1.1"; 3]
         );
+    }
+    #[tokio::test]
+    async fn empty_catalog_retries_quickly_and_failures_back_off() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for (status, body) in [
+                ("200 OK", "[]"),
+                ("503 Unavailable", "{}"),
+                ("200 OK", r#"[{"id":"qwen3-gguf:p"}]"#),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0; 4096];
+                let n = stream.read(&mut buffer).unwrap();
+                assert!(n > 0);
+                write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let mut config = config::BackendConfig {
+            server_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        config.policy.provider_id = "qwen3-gguf".into();
+        let mut engine = SpeechEngine::default();
+        engine.ensure_voices(&config).await;
+        assert!(engine.voices.is_empty());
+        assert_eq!(engine.catalog_retry_ms, 2000);
+        engine.ensure_voices(&config).await; // Burst uses the negative cache.
+        assert_eq!(engine.catalog_failures, 0);
+        engine.voices_fetched_at_ms = 0;
+        engine.ensure_voices(&config).await;
+        assert_eq!(engine.catalog_failures, 1);
+        assert!(engine.catalog_retry_ms <= 30_000);
+        engine.voices_fetched_at_ms = 0;
+        engine.ensure_voices(&config).await;
+        assert_eq!(engine.voices, ["qwen3-gguf:p"]);
+        assert_eq!(engine.catalog_failures, 0);
+        assert_eq!(engine.catalog_retry_ms, VOICES_TTL_SECS * 1000);
+        server.join().unwrap();
     }
 }

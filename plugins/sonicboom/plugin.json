@@ -16,6 +16,7 @@
   "capabilities": [
     "http.request",
     "events.subscribe",
+    "events.publish",
     "points.write"
   ],
   "permissions": [
@@ -120,6 +121,11 @@
           "Content-Type": "text/plain"
         },
         "body": "{{ config.text }}",
+        "defaultsFromSettings": {
+          "provider": ["/tts/providerId"],
+          "voice": ["/tts/defaultVoice", "/defaultVoice"],
+          "language": ["/tts/language", "/defaultLanguage"]
+        },
         "timeoutMs": 15000,
         "timeoutByField": {
           "field": "provider",
@@ -366,8 +372,11 @@
     }
   ],
   "entry": "backend/dist/sonicboom-backend",
+  "eventTypes": [{"type":"sonicboom.speech-status","title":{"default":"Speech diagnostics"}}],
   "eventSubscriptions": [
-    "live.ui-event"
+    "live.ui-event",
+    "live.disconnected",
+    "plugin.settings-changed"
   ],
   "ui": {
     "apiVersion": 1,

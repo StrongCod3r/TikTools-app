@@ -1,6 +1,13 @@
 /** SonicBoom plugin UI strings (moved from the main frontend
  * so no TTS copy ships in the TikTools web bundle). */
 export const spanish = {
+  ttsDiagnostics: 'Diagnóstico de voz',
+  ttsReady: 'Listo',
+  ttsNotReady: 'No disponible',
+  ttsBackend: 'Backend',
+  ttsQueueDepth: 'Mensajes en cola',
+  ttsReloadDiagnostics: 'Recargar voces y reintentar',
+  ttsManualInterrupt: 'Interrumpir la voz actual en pruebas manuales',
   ttsConnectionChanged: 'La conexión cambió. Recarga las voces.',
   ttsProviderChanged: 'Proveedor cambiado; voces específicas restablecidas.',
   ttsCatalogUpdated: 'Catálogo de voces actualizado.',

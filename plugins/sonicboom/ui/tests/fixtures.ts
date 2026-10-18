@@ -59,6 +59,8 @@ const INIT_SCRIPT = `
   const state = window.__SONICBOOM_STATE__;
   const calls = window.__SONICBOOM_CALLS__;
   const settingsListeners = new Set();
+  const diagnosticListeners = new Set();
+  window.__SONICBOOM_EMIT_DIAGNOSTIC__ = (data) => { for (const listener of diagnosticListeners) listener('plugin.event', data); };
   window.__SONICBOOM_EMIT_SETTINGS__ = () => { for (const listener of settingsListeners) listener('plugin.settings-changed', { pluginId: 'sonicboom.server' }); };
   const delay = (ms, value) => new Promise((resolve) => setTimeout(() => resolve(value), ms));
   window.tiktools = {
@@ -105,7 +107,8 @@ const INIT_SCRIPT = `
     events: {
       subscribe: (topics, listener) => {
         if (topics.includes('plugin.settings-changed')) settingsListeners.add(listener);
-        return () => settingsListeners.delete(listener);
+        if (topics.includes('plugin.event')) diagnosticListeners.add(listener);
+        return () => { settingsListeners.delete(listener); diagnosticListeners.delete(listener); };
       },
     },
     host: {

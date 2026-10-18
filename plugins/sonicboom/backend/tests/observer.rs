@@ -201,3 +201,237 @@ fn chat_event_speaks_through_the_configured_server() {
     let _ = std::fs::remove_dir_all(&root);
     drop(server);
 }
+
+#[test]
+fn cloned_providers_cross_process_boundary_and_reach_playback_queue() {
+    for provider in ["pocket-tts", "qwen3-gguf"] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (report, received) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for index in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut raw = Vec::new();
+                let mut chunk = [0; 4096];
+                loop {
+                    let n = stream.read(&mut chunk).unwrap();
+                    raw.extend_from_slice(&chunk[..n]);
+                    if n == 0 || raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&raw).to_string();
+                let payload = match index {
+                    0 => format!(r#"[{{"id":"{provider}:owned-profile"}}]"#),
+                    1 => r#"{"id":"synthesis-a","stage":"queued"}"#.to_string(),
+                    _ => r#"{"id":"synthesis-a","stage":"completed","playback":{"state":"queued","queue_id":"playback-a"}}"#.to_string(),
+                };
+                write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).unwrap();
+                report.send(request).unwrap();
+            }
+        });
+        let root =
+            std::env::temp_dir().join(format!("sonicboom-jobs-{}-{provider}", std::process::id()));
+        let plugin_dir = root.join("sonicboom.server");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("settings.json"), serde_json::json!({
+            "serverUrl": format!("http://{address}"), "apiToken":"owner-token",
+            "tts": {"enabled":true,"providerId":provider,"defaultVoice":format!("{provider}:owned-profile"),"language":"es"}
+        }).to_string()).unwrap();
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_sonicboom-backend"))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .env("TIKTOOLS_PLUGIN_ID", "sonicboom.server")
+            .env("TIKTOOLS_PLUGIN_DATA_DIR", &root)
+            .env("TIKTOOLS_PLUGIN_DIRECTORY", &plugin_dir)
+            .spawn()
+            .unwrap();
+        let request = serde_json::json!({"protocolVersion":1,"id":"chat-1","method":"call","payload":{"type":"event","event":{"topic":"live.ui-event","data":{"event":{"kind":"chat","author":"ada","text":"hola","msgId":"upstream-1"}}}}});
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(&frame(&request))
+            .unwrap();
+        assert_eq!(read_frame(child.stdout.as_mut().unwrap())["ok"], true);
+        let requests: Vec<_> = (0..3)
+            .map(|_| received.recv_timeout(Duration::from_secs(10)).unwrap())
+            .collect();
+        assert!(requests[1].starts_with(&format!("POST /api/tts/jobs?profile=owned-profile&provider={provider}&lang=es&format=wav&playback=enqueue&play_now=false ")));
+        assert!(requests[1]
+            .to_lowercase()
+            .contains("authorization: bearer owner-token"));
+        assert!(requests[1]
+            .to_lowercase()
+            .contains("idempotency-key: tiktools-"));
+        assert!(requests[2].starts_with("GET /api/tts/jobs/synthesis-a "));
+        server.join().unwrap();
+        for _ in 0..100 {
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(&frame(&request))
+                .unwrap();
+            assert_eq!(read_frame(child.stdout.as_mut().unwrap())["ok"], true);
+        }
+        // EOF performs a graceful plugin shutdown and joins tracking tasks.
+        drop(child.stdin.take());
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("playback=queued queue_id=playback-a")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn live_burst_is_nonblocking_during_generation_and_disconnect_cancels() {
+    for topic in [
+        Some("live.disconnected"),
+        Some("plugin.settings-changed"),
+        None,
+    ] {
+        burst_cancel_case(topic);
+    }
+}
+
+fn burst_cancel_case(cancellation_topic: Option<&str>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (report, received) = mpsc::channel();
+    let server = std::thread::spawn(move || loop {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut buffer = [0; 8192];
+        let n = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..n]);
+        let line = request.lines().next().unwrap().to_owned();
+        let payload = if line.starts_with("GET /api/tts/plugin/voices ") {
+            r#"[{"id":"qwen3-gguf:profile"}]"#
+        } else if line.starts_with("POST /api/tts/jobs?") {
+            r#"{"id":"slow-job","stage":"queued"}"#
+        } else if line.contains("/cancel") {
+            r#"{"id":"slow-job","stage":"cancelled"}"#
+        } else {
+            r#"{"id":"slow-job","stage":"running"}"#
+        };
+        write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{payload}", payload.len()).unwrap();
+        let done = line.contains("/cancel");
+        report.send(line).unwrap();
+        if done {
+            break;
+        }
+    });
+    let root = std::env::temp_dir().join(format!("sonicboom-burst-{}", std::process::id()));
+    let plugin_dir = root.join("sonicboom.server");
+    std::fs::create_dir_all(&plugin_dir).unwrap();
+    std::fs::write(plugin_dir.join("settings.json"), serde_json::json!({
+        "serverUrl":format!("http://{address}"),"tts":{"enabled":true,"providerId":"qwen3-gguf","defaultVoice":"qwen3-gguf:profile","chatMaxInflight":1}
+    }).to_string()).unwrap();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_sonicboom-backend"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("TIKTOOLS_PLUGIN_ID", "sonicboom.server")
+        .env("TIKTOOLS_PLUGIN_DATA_DIR", &root)
+        .env("TIKTOOLS_PLUGIN_DIRECTORY", &plugin_dir)
+        .spawn()
+        .unwrap();
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr_reader = std::thread::spawn(move || {
+        let mut diagnostics = String::new();
+        stderr.read_to_string(&mut diagnostics).unwrap();
+        diagnostics
+    });
+    let send = |child: &mut std::process::Child, topic: &str, data: serde_json::Value| {
+        child.stdin.as_mut().unwrap().write_all(&frame(&serde_json::json!({"protocolVersion":1,"id":"event","method":"call","payload":{"type":"event","event":{"topic":topic,"data":data}}}))).unwrap();
+        assert_eq!(read_frame(child.stdout.as_mut().unwrap())["ok"], true);
+    };
+    send(
+        &mut child,
+        "live.ui-event",
+        serde_json::json!({"event":{"kind":"chat","text":"first","msgId":"first"}}),
+    );
+    for _ in 0..3 {
+        received.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+    let start = std::time::Instant::now();
+    for index in 0..100 {
+        send(
+            &mut child,
+            "live.ui-event",
+            serde_json::json!({"event":{"kind":"chat","text":"message","msgId":index}}),
+        );
+    }
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "generation must not block LIVE acknowledgements"
+    );
+    if let Some(topic) = cancellation_topic {
+        send(
+            &mut child,
+            topic,
+            serde_json::json!({"pluginId":"sonicboom.server"}),
+        );
+    } else {
+        drop(child.stdin.take());
+    }
+    loop {
+        if received
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .contains("/cancel")
+        {
+            break;
+        }
+    }
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let diagnostics = stderr_reader.join().unwrap();
+    assert_eq!(
+        diagnostics
+            .matches(" submitted synthesis_id=slow-job")
+            .count(),
+        1
+    );
+    assert!(diagnostics.contains("observed=101"));
+    let totals = diagnostics
+        .lines()
+        .find(|line| line.starts_with("sonicboom: totals "))
+        .unwrap();
+    let count = |key: &str| {
+        totals
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix(&format!("{key}=")))
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let terminal: u64 = [
+        "accepted",
+        "failed",
+        "expired",
+        "rejected",
+        "deduped",
+        "filtered",
+        "cancelled",
+    ]
+    .iter()
+    .map(|key| count(key))
+    .sum();
+    assert_eq!(
+        terminal, 101,
+        "every observed message has a terminal outcome: {totals}"
+    );
+    server.join().unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}

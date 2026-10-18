@@ -14,11 +14,16 @@ use super::policy::{sanitize_settings, TtsSettings};
 
 pub const DEFAULT_SERVER_URL: &str = "http://localhost:17842";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BackendConfig {
     pub server_url: String,
     pub api_token: String,
     pub policy: TtsSettings,
+    pub empty_catalog_retry_ms: u64,
+    pub queue_capacity: usize,
+    pub max_wait_age_ms: u64,
+    pub max_inflight: usize,
+    pub generation_timeout_ms: u64,
 }
 
 impl Default for BackendConfig {
@@ -27,6 +32,11 @@ impl Default for BackendConfig {
             server_url: DEFAULT_SERVER_URL.to_owned(),
             api_token: String::new(),
             policy: TtsSettings::default(),
+            empty_catalog_retry_ms: 2000,
+            queue_capacity: 64,
+            max_wait_age_ms: 15_000,
+            max_inflight: 1,
+            generation_timeout_ms: 300_000,
         }
     }
 }
@@ -75,7 +85,7 @@ pub fn config_from_values(values: &serde_json::Value) -> BackendConfig {
             .take(128)
             .collect();
     }
-    if policy.language == "en" {
+    if values.get("tts").and_then(|v| v.get("language")).is_none() {
         if let Some(language) = values
             .get("defaultLanguage")
             .and_then(serde_json::Value::as_str)
@@ -85,10 +95,28 @@ pub fn config_from_values(values: &serde_json::Value) -> BackendConfig {
             policy.language = language.chars().take(16).collect();
         }
     }
+    let bounded = |key: &str, fallback, min, max| {
+        values
+            .get("tts")
+            .and_then(|v| v.get(key))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(fallback)
+            .clamp(min, max)
+    };
     BackendConfig {
+        queue_capacity: bounded("chatQueueCapacity", 64, 1, 64) as usize,
+        max_wait_age_ms: bounded("chatMaxWaitMs", 15_000, 1000, 30_000),
+        max_inflight: bounded("chatMaxInflight", 1, 1, 4) as usize,
+        generation_timeout_ms: bounded("chatGenerationTimeoutMs", 300_000, 15_000, 600_000),
         server_url,
         api_token,
         policy,
+        empty_catalog_retry_ms: values
+            .get("tts")
+            .and_then(|v| v.get("emptyCatalogRetryMs"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(2000)
+            .clamp(250, 10_000),
     }
 }
 
@@ -97,6 +125,8 @@ pub fn config_from_values(values: &serde_json::Value) -> BackendConfig {
 pub struct ConfigCache {
     loaded_mtime: Option<std::time::SystemTime>,
     config: BackendConfig,
+    last_read: std::time::Instant,
+    loaded_path: Option<PathBuf>,
 }
 
 impl ConfigCache {
@@ -104,6 +134,8 @@ impl ConfigCache {
         Self {
             loaded_mtime: None,
             config: BackendConfig::default(),
+            last_read: std::time::Instant::now(),
+            loaded_path: None,
         }
     }
 
@@ -114,7 +146,12 @@ impl ConfigCache {
                 .and_then(|metadata| metadata.modified())
                 .ok()
         });
-        if mtime != self.loaded_mtime {
+        if mtime != self.loaded_mtime
+            || path != self.loaded_path
+            || self.last_read.elapsed() >= std::time::Duration::from_secs(1)
+        {
+            self.last_read = std::time::Instant::now();
+            self.loaded_path = path.clone();
             self.loaded_mtime = mtime;
             self.config = path
                 .as_ref()
@@ -181,5 +218,16 @@ mod tests {
                 .provider_id,
             "supertonic"
         );
+    }
+    #[test]
+    fn explicit_language_wins_and_scheduler_settings_are_bounded() {
+        let config = config_from_values(
+            &json!({"defaultLanguage":"es","tts":{"language":"en","chatQueueCapacity":10000,"chatMaxWaitMs":180000,"chatMaxInflight":100,"emptyCatalogRetryMs":0}}),
+        );
+        assert_eq!(config.policy.language, "en");
+        assert_eq!(config.queue_capacity, 64);
+        assert_eq!(config.max_wait_age_ms, 30_000);
+        assert_eq!(config.max_inflight, 4);
+        assert_eq!(config.empty_catalog_retry_ms, 250);
     }
 }

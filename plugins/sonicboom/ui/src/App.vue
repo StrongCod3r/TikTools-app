@@ -54,10 +54,13 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
   const outputsPending = ref<string | undefined>(undefined);
   const outputError = ref<string | undefined>(undefined);
   const speaking = ref(false);
+  const manualPlayNow = ref(false);
   const logs = ref<TtsLogEntry[]>([]);
   const bootError = ref('');
   let activeSpeech = 0;
   let logSequence = 0;
+  const diagnostic = ref<Record<string, unknown>>({});
+  let unsubscribeDiagnostic: (() => void) | undefined;
   let unsubscribeSettings: (() => void) | undefined;
   let ownSettingsEvents = 0;
   let connectionCheckPending = false;
@@ -88,7 +91,8 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
         voicesError.value = t(locale.value, 'ttsConnectionChanged');
         return;
       }
-      const values = { ...latest, tts: snapshot };
+      const previous = latest.tts && typeof latest.tts === 'object' && !Array.isArray(latest.tts) ? latest.tts : {};
+      const values = { ...latest, tts: { ...previous, ...snapshot } };
       ownSettingsEvents += 1;
       try { await broker.setSettings(values); }
       catch (failure) { ownSettingsEvents = Math.max(0, ownSettingsEvents - 1); throw failure; }
@@ -109,12 +113,17 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
   };
 
   const handleSettingsChange = (next: TtsSettings): void => {
-    if (next.providerId !== settings.value.providerId) {
+    const providerChanged = next.providerId !== settings.value.providerId;
+    if (providerChanged) {
       next = { ...next, defaultVoice: '', specialUsers: next.specialUsers.map(u => ({ ...u, voice: '' })) };
       catalogStatus.value = t(locale.value, 'ttsProviderChanged');
     }
     settings.value = sanitizeTtsSettings(next);
-    schedulePersist();
+    if (providerChanged) {
+      if (saveTimer !== undefined) { clearTimeout(saveTimer); saveTimer = undefined; }
+      settings.value.voiceCatalogRevision = crypto.randomUUID();
+      void persistSettings().catch(() => undefined);
+    } else schedulePersist();
   };
 
   const appendLog = (entry: Omit<TtsLogEntry, 'id' | 'at'>): void => {
@@ -240,7 +249,7 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
         provider: current.providerId,
         voice: resolvedVoice,
         language: current.language,
-        playNow: true,
+        playNow: manualPlayNow.value,
       });
     })
       .then((outcome) => {
@@ -248,12 +257,12 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
         const reason = outcome.ok ? outcome.summary : (outcome.error ?? outcome.summary);
         // Redacted diagnostics: selected provider, expected budget, actual
         // elapsed time, and where a failure stopped. Never voice reference
-        // audio, tokens, or chat payloads beyond the tester's own text.
+        // audio, tokens, transcripts, or spoken text.
         const diag = `provider=${current.providerId} budget=${formatBudgetMs(budgetMs)} elapsed=${outcome.durationMs}ms origin=${classifyTtsOutcomeOrigin(reason)}`;
         appendLog({
           ok: outcome.ok,
           source: 'tester',
-          text: clean.slice(0, 160),
+          text: '',
           voice: resolvedVoice,
           summary: `${diag} · ${reason}${lines}`.slice(0, 500),
         });
@@ -264,7 +273,7 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
         appendLog({
           ok: false,
           source: 'tester',
-          text: clean.slice(0, 160),
+          text: '',
           voice: resolvedVoice,
           summary: `${diag} · ${message}`.slice(0, 500),
         });
@@ -299,6 +308,13 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
 
   onMounted(() => {
     window.addEventListener('focus', checkConnection);
+    unsubscribeDiagnostic = broker.subscribe('plugin.event', data => {
+      if (!data || typeof data !== 'object') return;
+      const envelope = data as { pluginId?: string; eventType?: string; event?: Record<string, unknown> };
+      if (envelope.pluginId !== 'sonicboom.server' || envelope.eventType !== 'sonicboom.speech-status' || !envelope.event) return;
+      const payload = envelope.event.data ?? envelope.event;
+      if (payload && typeof payload === 'object') diagnostic.value = payload as Record<string, unknown>;
+    });
     unsubscribeSettings = broker.subscribe('plugin.settings-changed', data => {
       if (!data || typeof data !== 'object' || (data as { pluginId?: string }).pluginId !== 'sonicboom.server') return;
       // The host emits one event per successful settings write. Consume our own
@@ -347,6 +363,7 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
     disposed = true;
     window.removeEventListener('focus', checkConnection);
     unsubscribeSettings?.();
+    unsubscribeDiagnostic?.();
     // Flush a pending debounced save before the broker goes away.
     if (saveTimer !== undefined) {
       clearTimeout(saveTimer);
@@ -369,6 +386,14 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
       );
     }
     return (
+      <div>
+      <details class="tts-card"><summary>{t(locale.value, 'ttsDiagnostics')}</summary>
+        <p>{settings.value.providerId} · {ready.value ? t(locale.value, 'ttsReady') : t(locale.value, 'ttsNotReady')} · {settings.value.defaultVoice || '—'}</p>
+        <p>{t(locale.value, 'ttsBackend')}: {String(diagnostic.value.connection ?? '—')} · {t(locale.value, 'ttsQueueDepth')}: {String(diagnostic.value.queueDepth ?? '—')}</p>
+        <p>{String(diagnostic.value.stage ?? '—')} · {String(diagnostic.value.lastResult ?? '—')}</p>
+        <button type="button" onClick={refreshVoices}>{t(locale.value, 'ttsReloadDiagnostics')}</button>
+      </details>
+      <label class="tts-card"><input type="checkbox" checked={manualPlayNow.value} onChange={(event: Event) => { manualPlayNow.value = (event.target as HTMLInputElement).checked; }} />{t(locale.value, 'ttsManualInterrupt')}</label>
       <TtsSettingsPanel
         locale={locale.value}
         settings={settings.value}
@@ -392,6 +417,7 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
         onSelectOutput={handleSelectOutput}
         onRefreshOutputs={refreshOutputs}
       />
+      </div>
     );
   };
 });
