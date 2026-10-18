@@ -630,9 +630,13 @@ fn provider_aware_timeout_picks_a_slow_budget_above_the_generic_cap() {
         "values": {"supertonic": 15000, "pocket-tts": 60000, "qwen3-gguf": 180000}
     });
     let build = |provider: &str| {
-        build_action(json!({"provider": provider}), Some(15000), Some(spec.clone()))
-            .unwrap()
-            .timeout_ms
+        build_action(
+            json!({"provider": provider}),
+            Some(15000),
+            Some(spec.clone()),
+        )
+        .unwrap()
+        .timeout_ms
     };
     assert_eq!(build("supertonic"), 15_000);
     assert_eq!(build("pocket-tts"), 60_000);
@@ -699,20 +703,34 @@ async fn repo_posts_send_nested_json_and_unique_execution_keys() {
                 let n = socket.read(&mut chunk).await.unwrap();
                 assert!(n > 0);
                 bytes.extend_from_slice(&chunk[..n]);
-                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") { header_end = end + 4; break; }
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = end + 4;
+                    break;
+                }
             }
             let headers = String::from_utf8_lossy(&bytes[..header_end]).to_lowercase();
             assert!(headers.starts_with("post /api/spawn/enemy "));
-            let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().parse().unwrap();
+            let length: usize = headers
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
             while bytes.len() < header_end + length {
                 let mut chunk = [0; 4096];
                 let n = socket.read(&mut chunk).await.unwrap();
                 assert!(n > 0);
                 bytes.extend_from_slice(&chunk[..n]);
             }
-            let key = headers.lines().find_map(|l| l.strip_prefix("idempotency-key: ")).unwrap().to_owned();
-            assert!(!keys.contains(&key)); keys.push(key);
-            let body: Value = serde_json::from_slice(&bytes[header_end..header_end+length]).unwrap();
+            let key = headers
+                .lines()
+                .find_map(|l| l.strip_prefix("idempotency-key: "))
+                .unwrap()
+                .to_owned();
+            assert!(!keys.contains(&key));
+            keys.push(key);
+            let body: Value =
+                serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap();
             assert_eq!(body["enemyId"], "fixture\"\\\n{{ untouched }}");
             assert_eq!(body["quantity"], 2);
             assert_eq!(body["position"], json!({"mode":"random_player"}));
@@ -721,33 +739,69 @@ async fn repo_posts_send_nested_json_and_unique_execution_keys() {
         }
     });
     let core = Arc::new(crate::AppCore::new(Arc::new(Emitter)));
-    let mut document: Value = serde_json::from_str(include_str!("../../../../../examples/repo-game/plugin.json")).unwrap();
+    let mut document: Value = serde_json::from_str(include_str!(
+        "../../../../../examples/repo-game/plugin.json"
+    ))
+    .unwrap();
     document["http"]["baseUrl"] = json!(format!("http://{address}"));
     let manifest = PluginManifest::from_json_str(&document.to_string()).unwrap();
     let descriptor = &document["actionTypes"][0]["http"];
-    let plugin = tiktools_plugin_loader::DiscoveredPlugin { manifest, directory: std::env::temp_dir(), source: tiktools_plugin_loader::PluginSource::Development, available:true, reason:None, running:true };
+    let plugin = tiktools_plugin_loader::DiscoveredPlugin {
+        manifest,
+        directory: std::env::temp_dir(),
+        source: tiktools_plugin_loader::PluginSource::Development,
+        available: true,
+        reason: None,
+        running: true,
+    };
     for status in [200, 400, 401, 404, 409, 422, 429, 500, 501, 503, 504] {
         let result = core.execute_declarative_action(&plugin, descriptor,
             &json!({"config":{"enemyId":"fixture\"\\\n{{ untouched }}","quantity":2,"positionMode":"random_player"}}),
             &json!({}), &mut Vec::new(), false).await;
-        if status == 200 { assert!(result.is_ok(), "{result:?}"); }
-        else { let error = result.unwrap_err(); assert!(error.contains(&status.to_string()), "{error}"); assert!(error.contains("FIXTURE_ERROR"), "{error}"); }
+        if status == 200 {
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            let error = result.unwrap_err();
+            assert!(error.contains(&status.to_string()), "{error}");
+            assert!(error.contains("FIXTURE_ERROR"), "{error}");
+        }
     }
-    tokio::time::timeout(std::time::Duration::from_secs(10), server).await.unwrap().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), server)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[test]
 fn repo_dynamic_catalogs_use_runtime_ids_and_names() {
-    let document: Value = serde_json::from_str(include_str!("../../../../../examples/repo-game/plugin.json")).unwrap();
+    let document: Value = serde_json::from_str(include_str!(
+        "../../../../../examples/repo-game/plugin.json"
+    ))
+    .unwrap();
     for action in document["actionTypes"].as_array().unwrap() {
         if let Some(sources) = action["optionSources"].as_object() {
             for (_, spec) in sources {
                 let root = spec["itemsPath"].as_str().unwrap();
                 let body = json!({ root: [{"id":"modded-runtime-id", "name":"Runtime name"}] });
-                let mapped = super::super::option_sources::map_option_items(&body,
-                    Some(root), spec["valuePath"].as_str(), spec["labelPath"].as_str()).unwrap();
-                assert_eq!(mapped, vec![json!({"value":"modded-runtime-id","label":"Runtime name"})]);
-                assert!(super::super::option_sources::map_option_items(&json!({root:[]}), Some(root), Some("id"), Some("name")).unwrap().is_empty());
+                let mapped = super::super::option_sources::map_option_items(
+                    &body,
+                    Some(root),
+                    spec["valuePath"].as_str(),
+                    spec["labelPath"].as_str(),
+                )
+                .unwrap();
+                assert_eq!(
+                    mapped,
+                    vec![json!({"value":"modded-runtime-id","label":"Runtime name"})]
+                );
+                assert!(super::super::option_sources::map_option_items(
+                    &json!({root:[]}),
+                    Some(root),
+                    Some("id"),
+                    Some("name")
+                )
+                .unwrap()
+                .is_empty());
             }
         }
     }
@@ -759,34 +813,59 @@ async fn repo_bursts_reject_excess_work_without_queueing() {
     let _guard = REPO_EXECUTION_TEST_LOCK.lock().await;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     struct Emitter;
-    impl crate::HostEmitter for Emitter { fn emit(&self, _: crate::ipc::messages::HostMessage) {} }
+    impl crate::HostEmitter for Emitter {
+        fn emit(&self, _: crate::ipc::messages::HostMessage) {}
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         loop {
             let (mut socket, _) = listener.accept().await.unwrap();
             tokio::spawn(async move {
-                let mut bytes = [0;4096]; socket.read(&mut bytes).await.unwrap();
+                let mut bytes = [0; 4096];
+                socket.read(&mut bytes).await.unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+                    )
+                    .await;
             });
         }
     });
     let core = Arc::new(crate::AppCore::new(Arc::new(Emitter)));
-    let mut document: Value = serde_json::from_str(include_str!("../../../../../examples/repo-game/plugin.json")).unwrap();
+    let mut document: Value = serde_json::from_str(include_str!(
+        "../../../../../examples/repo-game/plugin.json"
+    ))
+    .unwrap();
     document["http"]["baseUrl"] = json!(format!("http://{address}"));
     let manifest = PluginManifest::from_json_str(&document.to_string()).unwrap();
-    let plugin = tiktools_plugin_loader::DiscoveredPlugin { manifest, directory: std::env::temp_dir(), source: tiktools_plugin_loader::PluginSource::Development, available:true, reason:None, running:true };
+    let plugin = tiktools_plugin_loader::DiscoveredPlugin {
+        manifest,
+        directory: std::env::temp_dir(),
+        source: tiktools_plugin_loader::PluginSource::Development,
+        available: true,
+        reason: None,
+        running: true,
+    };
     let mut tasks = tokio::task::JoinSet::new();
     for _ in 0..32 {
-        let core = core.clone(); let plugin = plugin.clone();
+        let core = core.clone();
+        let plugin = plugin.clone();
         tasks.spawn(async move { core.execute_declarative_action(&plugin,
             &json!({"method":"POST","path":"/api/enemies/clear","bodyJson":{},"idempotency":{"enabled":true}}),
             &json!({}), &json!({}), &mut Vec::new(), false).await });
     }
-    let mut accepted = 0; let mut rejected = 0;
+    let mut accepted = 0;
+    let mut rejected = 0;
     while let Some(result) = tasks.join_next().await {
-        match result.unwrap() { Ok(_) => accepted += 1, Err(error) => { assert!(error.contains("limit"), "{error}"); rejected += 1; } }
+        match result.unwrap() {
+            Ok(_) => accepted += 1,
+            Err(error) => {
+                assert!(error.contains("limit"), "{error}");
+                rejected += 1;
+            }
+        }
     }
     assert!(accepted <= 4);
     assert!(rejected >= 28);
@@ -800,26 +879,46 @@ static REPO_EXECUTION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::co
 #[tokio::test]
 async fn health_reports_api_reachability_separately_from_gameplay_readiness() {
     struct Emitter;
-    impl crate::HostEmitter for Emitter { fn emit(&self, _:crate::ipc::messages::HostMessage) {} }
+    impl crate::HostEmitter for Emitter {
+        fn emit(&self, _: crate::ipc::messages::HostMessage) {}
+    }
     let (address,server)=stub_server([
         ("/not-ready".to_owned(),(200,json!({"status":"ready","gameRunning":true,"inLevel":false,"isHost":true,"gameplayReady":false,"apiVersion":"1.0.0"}).to_string())),
         ("/ready".to_owned(),(200,json!({"status":"ready","gameRunning":true,"inLevel":true,"isHost":true,"gameplayReady":true,"apiVersion":"1.0.0"}).to_string())),
     ].into()).await;
-    let root=std::env::temp_dir().join(format!("health-readiness-{}",fastrand::u64(..)));
-    for (id,path) in [("repo.not-ready","/not-ready"),("repo.ready","/ready")] {
+    let root = std::env::temp_dir().join(format!("health-readiness-{}", fastrand::u64(..)));
+    for (id, path) in [("repo.not-ready", "/not-ready"), ("repo.ready", "/ready")] {
         std::fs::create_dir_all(root.join(id)).unwrap();
-        let mut document:Value=serde_json::from_str(include_str!("../../../../../examples/repo-game/plugin.json")).unwrap();
-        document["id"]=json!(id);document["actionTypes"]=json!([]);document["pages"]=json!([]);
-        document["http"]["baseUrl"]=json!(format!("http://{address}"));document["http"]["health"]["path"]=json!(path);
-        std::fs::write(root.join(id).join("plugin.json"),document.to_string()).unwrap();
+        let mut document: Value = serde_json::from_str(include_str!(
+            "../../../../../examples/repo-game/plugin.json"
+        ))
+        .unwrap();
+        document["id"] = json!(id);
+        document["actionTypes"] = json!([]);
+        document["pages"] = json!([]);
+        document["http"]["baseUrl"] = json!(format!("http://{address}"));
+        document["http"]["health"]["path"] = json!(path);
+        std::fs::write(root.join(id).join("plugin.json"), document.to_string()).unwrap();
     }
-    let manager=tiktools_plugin_loader::PluginManager::new(vec![tiktools_plugin_loader::PluginRoot{path:root.clone(),source:tiktools_plugin_loader::PluginSource::Development}]);
+    let manager =
+        tiktools_plugin_loader::PluginManager::new(vec![tiktools_plugin_loader::PluginRoot {
+            path: root.clone(),
+            source: tiktools_plugin_loader::PluginSource::Development,
+        }]);
     manager.scan().unwrap();
-    let mut core=crate::AppCore::new(Arc::new(Emitter));core.plugins=Arc::new(manager);
-    let core=Arc::new(core);
-    let unavailable=core.plugin_connection_check("repo.not-ready").await.unwrap();
-    assert!(unavailable.reachable);assert!(!unavailable.ok);assert_eq!(unavailable.gameplay_ready,Some(false));
-    let ready=core.plugin_connection_check("repo.ready").await.unwrap();
-    assert!(ready.reachable&&ready.ok);assert_eq!(ready.gameplay_ready,Some(true));
-    server.abort();let _=std::fs::remove_dir_all(root);
+    let mut core = crate::AppCore::new(Arc::new(Emitter));
+    core.plugins = Arc::new(manager);
+    let core = Arc::new(core);
+    let unavailable = core
+        .plugin_connection_check("repo.not-ready")
+        .await
+        .unwrap();
+    assert!(unavailable.reachable);
+    assert!(!unavailable.ok);
+    assert_eq!(unavailable.gameplay_ready, Some(false));
+    let ready = core.plugin_connection_check("repo.ready").await.unwrap();
+    assert!(ready.reachable && ready.ok);
+    assert_eq!(ready.gameplay_ready, Some(true));
+    server.abort();
+    let _ = std::fs::remove_dir_all(root);
 }

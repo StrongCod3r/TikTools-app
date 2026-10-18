@@ -231,7 +231,9 @@ pub(crate) fn http_error_reason(body: &Value) -> Option<String> {
     const MAX_REASON_CHARS: usize = 300;
     let raw = match body {
         Value::String(text) => text.clone(),
-        Value::Object(map) if map.contains_key("details") || map.contains_key("code") => body.to_string(),
+        Value::Object(map) if map.contains_key("details") || map.contains_key("code") => {
+            body.to_string()
+        }
         Value::Object(map) => map
             .get("message")
             .or_else(|| map.get("error"))
@@ -366,7 +368,10 @@ mod tests {
             MAX_HTTP_AUTOMATION_TIMEOUT_MS
         );
         // Absent budget keeps the historical 5s default.
-        assert_eq!(resolve_http_action_timeout_ms(&config(serde_json::json!({}))), 5_000);
+        assert_eq!(
+            resolve_http_action_timeout_ms(&config(serde_json::json!({}))),
+            5_000
+        );
         // A modest budget is honoured verbatim.
         assert_eq!(
             resolve_http_action_timeout_ms(&config(serde_json::json!({"timeoutMs": 250}))),
@@ -379,16 +384,16 @@ mod tests {
         let ceiling = tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS;
         // Qwen GGUF: 180s, well above the generic 120s automation cap.
         assert_eq!(
-            resolve_http_action_timeout_ms(
-                &config(serde_json::json!({"timeoutMs": 180_000, "timeoutCeilingMs": ceiling}))
-            ),
+            resolve_http_action_timeout_ms(&config(
+                serde_json::json!({"timeoutMs": 180_000, "timeoutCeilingMs": ceiling})
+            )),
             180_000
         );
         // Pocket: 60s, above the old 15s hard deadline.
         assert_eq!(
-            resolve_http_action_timeout_ms(
-                &config(serde_json::json!({"timeoutMs": 60_000, "timeoutCeilingMs": ceiling}))
-            ),
+            resolve_http_action_timeout_ms(&config(
+                serde_json::json!({"timeoutMs": 60_000, "timeoutCeilingMs": ceiling})
+            )),
             60_000
         );
     }
@@ -396,9 +401,9 @@ mod tests {
     #[test]
     fn a_forged_ceiling_cannot_exceed_the_declarative_maximum() {
         assert_eq!(
-            resolve_http_action_timeout_ms(
-                &config(serde_json::json!({"timeoutMs": 10_000_000, "timeoutCeilingMs": 10_000_000}))
-            ),
+            resolve_http_action_timeout_ms(&config(
+                serde_json::json!({"timeoutMs": 10_000_000, "timeoutCeilingMs": 10_000_000})
+            )),
             tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS
         );
     }
@@ -406,9 +411,9 @@ mod tests {
     #[test]
     fn budgets_never_drop_below_the_floor() {
         assert_eq!(
-            resolve_http_action_timeout_ms(
-                &config(serde_json::json!({"timeoutMs": 1, "timeoutCeilingMs": 0}))
-            ),
+            resolve_http_action_timeout_ms(&config(
+                serde_json::json!({"timeoutMs": 1, "timeoutCeilingMs": 0})
+            )),
             MIN_HTTP_TIMEOUT_MS
         );
     }

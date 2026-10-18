@@ -74,9 +74,10 @@ fn flag_u32(args: &[String], flag: &str) -> Result<Option<u32>, CommandError> {
 fn session_cookie(args: &[String], usage: &str) -> Result<String, CommandError> {
     let value = optional_session_cookie(args);
     if value.is_empty() {
-        return Err(
-            format!("{usage} needs --session-cookie <cookie> (or TIKTOOLS_SESSION_COOKIE)").into(),
-        );
+        return Err(format!(
+            "{usage} needs --session-cookie <cookie> (or TIKTOOLS_SESSION_COOKIE)"
+        )
+        .into());
     }
     Ok(value)
 }
