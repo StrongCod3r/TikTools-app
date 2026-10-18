@@ -61,11 +61,12 @@ impl crate::AppCore {
             .capabilities
             .load_plugin_settings_raw(manifest)
             .map_err(|error| error.to_string())?;
-        let config = action
+        let mut config = action
             .get("config")
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
+        apply_settings_defaults(&mut config, &settings, block.get("defaultsFromSettings"));
         let scope = json!({"event": event, "settings": settings, "config": config});
         let method = block
             .get("method")
@@ -414,5 +415,141 @@ mod execution_tests {
             (0..1024).map(|_| super::execution_key().unwrap()).collect();
         assert_eq!(keys.len(), 1024);
         assert!(keys.iter().all(|k| k.len() == 32));
+    }
+}
+
+/// Optional manifest defaults use the same host-owned settings snapshot as
+/// endpoint authentication. Explicit saved automation configuration wins.
+fn apply_settings_defaults(
+    config: &mut Map<String, Value>,
+    settings: &Value,
+    defaults: Option<&Value>,
+) {
+    let Some(defaults) = defaults.and_then(Value::as_object) else {
+        return;
+    };
+    for (field, pointers) in defaults.iter().take(32) {
+        if config
+            .get(field)
+            .is_some_and(|value| !value.is_null() && value.as_str() != Some(""))
+        {
+            continue;
+        }
+        if let Some(value) = pointers
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter_map(|pointer| settings.pointer(pointer))
+            .find(|value| !value.is_null() && value.as_str() != Some(""))
+        {
+            config.insert(field.clone(), value.clone());
+        }
+    }
+}
+
+#[cfg(test)]
+mod settings_defaults_tests {
+    use super::*;
+    #[test]
+    fn defaults_from_settings_align_provider_voice_language_and_preserve_explicit_actions() {
+        let settings = json!({"tts":{"providerId":"qwen3-gguf","defaultVoice":"qwen3-gguf:owned","language":"es"},"defaultVoice":"M1"});
+        let defaults = json!({"provider":["/tts/providerId"],"voice":["/tts/defaultVoice","/defaultVoice"],"language":["/tts/language","/defaultLanguage"]});
+        let mut config = Map::new();
+        apply_settings_defaults(&mut config, &settings, Some(&defaults));
+        assert_eq!(config["provider"], "qwen3-gguf");
+        assert_eq!(config["voice"], "qwen3-gguf:owned");
+        assert_eq!(config["language"], "es");
+        config.insert("provider".into(), json!("pocket-tts"));
+        config.insert("voice".into(), json!("pocket-tts:explicit"));
+        apply_settings_defaults(&mut config, &settings, Some(&defaults));
+        assert_eq!(config["provider"], "pocket-tts");
+        assert_eq!(config["voice"], "pocket-tts:explicit");
+        let mut legacy = Map::new();
+        apply_settings_defaults(&mut legacy, &json!({"defaultVoice":"M1"}), Some(&defaults));
+        assert_eq!(legacy["voice"], "M1");
+        assert!(!legacy.contains_key("provider"));
+    }
+}
+
+#[cfg(all(test, feature = "http"))]
+mod sonicboom_action_http_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn sonicboom_actions_inherit_selected_provider_over_real_http() {
+        struct Emitter;
+        impl crate::HostEmitter for Emitter {
+            fn emit(&self, _: crate::ipc::messages::HostMessage) {}
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for provider in ["supertonic", "pocket-tts", "qwen3-gguf"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 8192];
+                let n = socket.read(&mut bytes).await.unwrap();
+                let request = String::from_utf8_lossy(&bytes[..n]);
+                assert!(
+                    request.starts_with(&format!("POST /api/tts/play?provider={provider}&voice=")),
+                    "provider settings must reach HTTP routing"
+                );
+                assert!(request.lines().next().unwrap().contains("lang=es"));
+                assert!(request
+                    .to_lowercase()
+                    .contains("authorization: bearer test-owned-token"));
+                socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await.unwrap();
+            }
+        });
+        let document: Value =
+            serde_json::from_str(include_str!("../../../../../plugins/sonicboom/plugin.json"))
+                .unwrap();
+        let manifest = PluginManifest::from_json_str(&document.to_string()).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("sonicboom-action-http-{}", fastrand::u64(..)));
+        let mut core = crate::AppCore::new(Arc::new(Emitter));
+        core.capabilities = Arc::new(crate::services::capabilities::CapabilityBroker::new(
+            root.clone(),
+        ));
+        let core = Arc::new(core);
+        let plugin = tiktools_plugin_loader::DiscoveredPlugin {
+            manifest,
+            directory: root.clone(),
+            source: tiktools_plugin_loader::PluginSource::Development,
+            available: true,
+            reason: None,
+            running: true,
+        };
+        for provider in ["supertonic", "pocket-tts", "qwen3-gguf"] {
+            let settings = json!({"serverUrl":format!("http://{address}"),"apiToken":"test-owned-token","tts":{"providerId":provider,"defaultVoice":format!("{provider}:owned"),"language":"es"}});
+            let settings = settings
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+            core.capabilities
+                .save_plugin_settings(&plugin.manifest, &settings)
+                .unwrap();
+            let mut logs = Vec::new();
+            let result = core
+                .execute_declarative_action(
+                    &plugin,
+                    &document["actionTypes"][0]["http"],
+                    &json!({"config":{"text":"test"}}),
+                    &json!({}),
+                    &mut logs,
+                    false,
+                )
+                .await;
+            assert!(result.is_ok(), "{result:?}");
+            assert!(logs.iter().all(|log| !log.contains("test-owned-token")));
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(10), server)
+            .await
+            .unwrap()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

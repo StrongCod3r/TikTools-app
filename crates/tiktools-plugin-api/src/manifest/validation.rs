@@ -171,6 +171,27 @@ fn validate_action_http(http: &Value) -> Result<(), ManifestError> {
         validate_http_timeout(timeout, MAX_HTTP_ACTION_TIMEOUT_MS)
             .map_err(|_| ManifestError::InvalidField("actionTypes"))?;
     }
+    if let Some(defaults) = object.get("defaultsFromSettings") {
+        let valid = defaults.as_object().is_some_and(|defaults| {
+            defaults.len() <= 32
+                && defaults.iter().all(|(field, pointers)| {
+                    !field.is_empty()
+                        && field.len() <= 64
+                        && pointers.as_array().is_some_and(|pointers| {
+                            !pointers.is_empty()
+                                && pointers.len() <= 8
+                                && pointers.iter().all(|pointer| {
+                                    pointer.as_str().is_some_and(|pointer| {
+                                        pointer.starts_with('/') && pointer.len() <= 128
+                                    })
+                                })
+                        })
+                })
+        });
+        if !valid {
+            return Err(ManifestError::InvalidField("actionTypes"));
+        }
+    }
     if let Some(spec) = object.get("timeoutByField") {
         validate_timeout_by_field(spec).map_err(|_| ManifestError::InvalidField("actionTypes"))?;
     }
@@ -1385,5 +1406,28 @@ pub fn select_host_native_binary(
             target,
             count,
         }),
+    }
+}
+
+#[cfg(test)]
+mod settings_defaults_validation_tests {
+    use crate::manifest::PluginManifest;
+    use serde_json::json;
+
+    #[test]
+    fn settings_defaults_require_bounded_json_pointer_lists() {
+        for (defaults, valid) in [
+            (json!({"provider":["/tts/providerId"]}), true),
+            (json!({"provider":"/tts/providerId"}), false),
+            (json!({"provider":["tts.providerId"]}), false),
+            (json!({"provider":[]}), false),
+            (json!({"provider":[null]}), false),
+        ] {
+            let document = json!({"schemaVersion":3,"id":"test.defaults","name":"Defaults","version":"1.0.0","runtime":"declarative","http":{"baseUrl":"http://127.0.0.1:17842"},"actionTypes":[{"id":"test.defaults.speak","http":{"method":"POST","path":"/api/tts/play","defaultsFromSettings":defaults}}]});
+            assert_eq!(
+                PluginManifest::from_json_str(&document.to_string()).is_ok(),
+                valid
+            );
+        }
     }
 }
