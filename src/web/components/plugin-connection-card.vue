@@ -339,7 +339,7 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
           <button type="button" class="btn btn-sm" disabled={disabled} onClick={() => start({ mode: 'candidate', candidateId: candidate.id })}>{t(props.locale, 'pluginUseConfiguration')}</button>
         </li>)}</ul>
       </div>}
-      {props.provisionState?.message && <div class="plg-alert" role="status">{props.provisionState.message}</div>}
+      {props.provisionState?.message && <div class={`plg-alert${props.provisionState.ok === true ? ' plg-alert--ok' : ''}`} role="status">{props.provisionState.message}</div>}
     </div>;
   };
 
@@ -392,7 +392,7 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
               </span>
             </div>
             {connection.gameplayReady !== undefined && <p class="plg-note">{t(locale, connection.gameplayReady ? 'pluginGameplayReady' : 'pluginApiNotReady')}</p>}
-            {connection.details && <div class="plg-alert" role="status">{connection.details}</div>}
+            {connection.details && <div class={`plg-alert${connection.ok ? ' plg-alert--ok' : ''}`} role="status">{connection.details}</div>}
             {summaryRows.value.length > 0 && (
               <dl class="plg-connect__rows">
                 {summaryRows.value.map((row) => (
@@ -455,7 +455,7 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
           </div>
           {connection?.gameplayReady !== undefined && !dirty.value && <p class="plg-note">{t(locale, connection.gameplayReady ? 'pluginGameplayReady' : 'pluginApiNotReady')}</p>}
           {connection?.details && !dirty.value && (
-            <div class="plg-alert" role="status">{connection.details}</div>
+            <div class={`plg-alert${connection.ok ? ' plg-alert--ok' : ''}`} role="status">{connection.details}</div>
           )}
           {failed && !props.inline && (
             <div class="plg-alert" role="status">

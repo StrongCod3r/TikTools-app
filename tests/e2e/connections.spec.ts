@@ -112,6 +112,7 @@ test('REPO imports a token through the shared card without showing the secret', 
   await expect(page.getByRole('button', { name: 'Get API token…' })).toHaveCount(0);
   await importButton.click();
   await expect(page.getByText('API token imported and saved.')).toBeVisible();
+  await expect(page.getByText('API token imported and saved.')).toHaveClass(/plg-alert--ok/);
   await expect(page.getByText('Connected to http://127.0.0.1:17453').first()).toBeVisible();
   await page.getByRole('button', { name: 'Edit settings' }).click();
   await expect(page.locator('input[type="password"]')).toHaveValue('••••••••');
@@ -153,6 +154,7 @@ test('automatic REPO setup chooses a profile and distinguishes API availability 
   await expect(page.getByText('API token imported and saved.')).toHaveCount(0);
   await page.getByRole('listitem').filter({ hasText: 'Mod profile: Stream' }).getByRole('button', { name: 'Use this configuration' }).click();
   await expect(page.getByText('API token imported and saved.')).toBeVisible();
+  await expect(page.getByText('API token imported and saved.')).toHaveClass(/plg-alert--ok/);
   await expect(page.getByText('API connected · Gameplay not ready', { exact: true }).first()).toBeVisible();
   await expect(page.locator('input[type="password"]')).toHaveValue('••••••••');
   await expect(page.locator('.plg-connect input').first()).toHaveValue('http://127.0.0.1:18053');
@@ -170,6 +172,7 @@ test('REPO setup offers a folder picker when automatic discovery finds nothing',
   await expect(page.getByText('No configuration found. Select the game folder.')).toBeVisible();
   await page.getByRole('button', { name: 'Select game folder…' }).click();
   await expect(page.getByText('API token imported and saved.')).toBeVisible();
+  await expect(page.getByText('API token imported and saved.')).toHaveClass(/plg-alert--ok/);
   await expect(page.getByText('Connected to http://127.0.0.1:17453').first()).toBeVisible();
   await assertNoUnhandledCalls(page);
   capture.assertClean();
