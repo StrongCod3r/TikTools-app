@@ -72,7 +72,7 @@ describe('extended test-event factories', () => {
 
 describe('makeTestEnvelopeFor', () => {
   test('covers every emulatable trigger', () => {
-    expect(TEST_EMULATABLE_TYPES).toHaveLength(12);
+    expect(TEST_EMULATABLE_TYPES).toHaveLength(13);
     for (const type of TEST_EMULATABLE_TYPES) {
       const payload = parseLiveEvent(makeTestEnvelopeFor(type));
       expect(payload?.eventType, type).toBe(type);
