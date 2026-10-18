@@ -17,12 +17,13 @@ type TtsSpecialUsersProps = {
   locale: Locale;
   settings: TtsSettings;
   voices: ActionOptionItem[];
+  providers?: ActionOptionItem[];
   onSettingsChange: (next: TtsSettings) => void;
 };
 
 /** Per-handle voice overrides card: add/patch/remove special users. */
 export const TtsSpecialUsers = defineVueComponent<TtsSpecialUsersProps>(
-  ['locale', 'settings', 'voices', 'onSettingsChange'],
+  ['locale', 'settings', 'voices', 'providers', 'onSettingsChange'],
   (props) => {
   const newSpecialHandle = ref('');
 
@@ -42,7 +43,7 @@ export const TtsSpecialUsers = defineVueComponent<TtsSpecialUsersProps>(
     newSpecialHandle.value = '';
   };
 
-  const patchSpecialUser = (handle: string, patch: Partial<{ allowed: boolean; voice: string; speed: number; pitch: number }>): void => {
+  const patchSpecialUser = (handle: string, patch: Partial<{ allowed: boolean; providerId: string; voice: string; speed: number; pitch: number }>): void => {
     update({
       specialUsers: props.settings.specialUsers.map((entry) =>
         entry.handle === handle ? { ...entry, ...patch } : entry,
@@ -57,7 +58,7 @@ export const TtsSpecialUsers = defineVueComponent<TtsSpecialUsersProps>(
   return () => {
   const settings = props.settings;
   const locale = props.locale;
-  const voiceList = voiceOptions(props.voices);
+
   return (
     <section class="tts-card">
       <h4 class="tts-card__title">{t(locale, 'ttsSpecialUsers')}</h4>
@@ -82,9 +83,10 @@ export const TtsSpecialUsers = defineVueComponent<TtsSpecialUsersProps>(
               <tr>
                 <th>{t(locale, 'ttsHandle')}</th>
                 <th>{t(locale, 'ttsAllowed')}</th>
+                <th>{t(locale, 'ttsProvider')}</th>
                 <th>{t(locale, 'ttsVoice')}</th>
-                <th>{t(locale, 'ttsSpeed')}</th>
-                <th>{t(locale, 'ttsPitch')}</th>
+                {!TTS_SPEED_PITCH_UNSUPPORTED && <th>{t(locale, 'ttsSpeed')}</th>}
+                {!TTS_SPEED_PITCH_UNSUPPORTED && <th>{t(locale, 'ttsPitch')}</th>}
                 <th></th>
               </tr>
             </thead>
@@ -100,18 +102,27 @@ export const TtsSpecialUsers = defineVueComponent<TtsSpecialUsersProps>(
                     />
                   </td>
                   <td>
+                    <select class="tts-select" aria-label={`${t(locale, 'ttsProvider')} @${entry.handle}`} value={entry.providerId ?? ''}
+                      onChange={(event) => patchSpecialUser(entry.handle, { providerId: (event.currentTarget as HTMLSelectElement).value, voice: '' })}>
+                      <option value="">{t(locale, 'ttsGeneralProvider')}</option>
+                      {entry.providerId && !props.providers?.some(provider => provider.value === entry.providerId) && <option value={entry.providerId} disabled>{entry.providerId}</option>}
+                      {props.providers?.map(provider => <option key={provider.value} value={provider.value} disabled={provider.disabled}>{provider.label.replace('(loading)', `(${t(locale, 'ttsProviderLoading')})`).replace('(not_installed)', `(${t(locale, 'ttsProviderMissing')})`).replace('(error)', `(${t(locale, 'ttsProviderError')})`)}</option>)}
+                    </select>
+                  </td>
+                  <td>
                     <select
                       class="tts-select"
+                      aria-label={`${t(locale, 'ttsVoice')} @${entry.handle}`}
                       value={entry.voice}
                       onChange={(event) => patchSpecialUser(entry.handle, { voice: (event.currentTarget as HTMLSelectElement).value })}
                     >
                       <option value="">{t(locale, 'ttsDefault')}</option>
-                      {voiceList.map((option) => (
+                      {voiceOptions(props.voices.filter(voice => voice.value.startsWith(`${entry.providerId || settings.providerId}:`))).map((option) => (
                         <option key={option.value} value={option.value}>{option.label}</option>
                       ))}
                     </select>
                   </td>
-                  <td>
+                  {!TTS_SPEED_PITCH_UNSUPPORTED && <td>
                     <input
                       class="tts-input"
                       style="width: 72px;"
@@ -126,8 +137,8 @@ export const TtsSpecialUsers = defineVueComponent<TtsSpecialUsersProps>(
                         if (Number.isFinite(value)) patchSpecialUser(entry.handle, { speed: clampNumber(value, TTS_LIMITS.minSpeed, TTS_LIMITS.maxSpeed, 1) });
                       }}
                     />
-                  </td>
-                  <td>
+                  </td>}
+                  {!TTS_SPEED_PITCH_UNSUPPORTED && <td>
                     <input
                       class="tts-input"
                       style="width: 72px;"
@@ -142,7 +153,7 @@ export const TtsSpecialUsers = defineVueComponent<TtsSpecialUsersProps>(
                         if (Number.isFinite(value)) patchSpecialUser(entry.handle, { pitch: clampNumber(value, TTS_LIMITS.minPitch, TTS_LIMITS.maxPitch, 1) });
                       }}
                     />
-                  </td>
+                  </td>}
                   <td style="text-align: right;">
                     <button type="button" class="plg-btn plg-btn--sm plg-btn--danger" onClick={() => removeSpecialUser(entry.handle)}>{t(locale, 'ttsRemove')}</button>
                   </td>

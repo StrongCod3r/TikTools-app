@@ -182,8 +182,10 @@ export function decideTts(request: TtsRequest): TtsDecision {
       specialUser: eligibility.specialUser,
     };
   }
+  const providerId = eligibility.specialUser?.providerId || settings.providerId;
+  const voiceSettings = providerId === settings.providerId ? settings : { ...settings, providerId, defaultVoice: '', randomVoice: false };
   const voice = chooseVoice(
-    settings,
+    voiceSettings,
     eligibility.specialUser?.voice,
     request.availableVoices,
     request.randomFn,

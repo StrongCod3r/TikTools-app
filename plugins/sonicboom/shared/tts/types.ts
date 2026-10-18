@@ -5,6 +5,8 @@ export type TtsCommentMode = 'any' | 'dot' | 'slash' | 'command';
 export type SpecialTtsUser = {
   handle: string;
   allowed: boolean;
+  /** Empty/omitted inherits the general provider. */
+  providerId?: string;
   voice: string;
   speed: number;
   pitch: number;

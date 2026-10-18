@@ -134,7 +134,7 @@ test('provider switching scopes default, tester, and special voices without unbl
   await expect(page.getByText('3 voices')).toBeVisible();
   await expect(page.locator('#tts-provider option[value="qwen3-gguf"]')).toBeDisabled();
   await page.getByLabel('Voice', { exact: true }).selectOption('supertonic:F2');
-  await page.getByLabel('TTS provider').selectOption('pocket-tts');
+  await page.getByLabel('TTS provider', { exact: true }).selectOption('pocket-tts');
   await expect(page.getByText('1 voices')).toBeVisible();
   await expect(page.locator('#tts-default-voice option[value^="supertonic:"]')).toHaveCount(0);
   await expect(page.getByLabel('Voice', { exact: true })).toHaveValue('');
@@ -188,9 +188,9 @@ test('switching provider during reload keeps the new selection', async ({ page }
   await expect(page.getByText('3 voices')).toBeVisible();
   await page.evaluate(() => { (window as unknown as { __SONICBOOM_STATE__: { catalogDelayMs?: number } }).__SONICBOOM_STATE__.catalogDelayMs = 250; });
   await page.getByRole('button', { name: 'Refresh voices' }).click();
-  await page.getByLabel('TTS provider').selectOption('pocket-tts');
+  await page.getByLabel('TTS provider', { exact: true }).selectOption('pocket-tts');
   await expect(page.getByRole('button', { name: 'Refresh voices' })).toBeEnabled();
-  await expect(page.getByLabel('TTS provider')).toHaveValue('pocket-tts');
+  await expect(page.getByLabel('TTS provider', { exact: true })).toHaveValue('pocket-tts');
   await expect(page.locator('#tts-default-voice option[value^="supertonic:"]')).toHaveCount(0);
 });
 
@@ -221,7 +221,7 @@ test('selected loading provider remains selected and cannot speak', async ({ pag
   state.providers.push({ value: 'qwen3-gguf', label: 'Qwen3-TTS GGUF (loading)', disabled: true });
   state.settings.tts = { enabled: true, providerId: 'qwen3-gguf', defaultVoice: 'qwen3-gguf:old' };
   await installFakeBroker(page, state); await page.goto('/');
-  await expect(page.getByLabel('TTS provider')).toHaveValue('qwen3-gguf');
+  await expect(page.getByLabel('TTS provider', { exact: true })).toHaveValue('qwen3-gguf');
   await expect(page.getByText('Selected provider is unavailable. (qwen3-gguf)')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Play', exact: true })).toBeDisabled();
 });
@@ -269,6 +269,8 @@ test('diagnostics consume host events without refreshing catalogs and manual int
   await page.goto('/');
   await expect(page.getByText('3 voices')).toBeVisible();
   const before = (await readBrokerCalls(page)).filter(call => call.method === 'options.get').length;
+  await expect(page.getByLabel('Interrupt current speech for manual tests')).toBeHidden();
+  await page.getByText('Advanced', { exact: true }).click();
   await page.getByText('Speech diagnostics', { exact: true }).click();
   await page.evaluate(() => {
     const w = window as unknown as { __SONICBOOM_EMIT_DIAGNOSTIC__: (data: unknown) => void };
@@ -287,4 +289,23 @@ test('diagnostics consume host events without refreshing catalogs and manual int
   await expect.poll(async () => (await readBrokerCalls(page)).filter(call => call.method === 'actions.execute').length).toBe(2);
   actions = (await readBrokerCalls(page)).filter(call => call.method === 'actions.execute');
   expect(actions[1]?.params['config']).toMatchObject({playNow:true});
+});
+
+test('special users keep independent providers and voices across reloads and general provider changes', async ({ page }) => {
+  const state = baseFakeState();
+  state.providers.push({value:'qwen3-gguf',label:'Qwen3-TTS GGUF'},{value:'pocket-tts',label:'Pocket TTS'});
+  state.voices.push({value:'qwen3-gguf:vip',label:'VIP Qwen voice'},{value:'pocket-tts:owned',label:'Pocket voice'});
+  state.settings.tts = {enabled:true,providerId:'supertonic',defaultVoice:'supertonic:M1',specialUsers:[{handle:'vip',allowed:true,voice:'',speed:1,pitch:1}]};
+  await installFakeBroker(page,state); await page.goto('/');
+  await expect(page.getByText('3 voices')).toBeVisible();
+  await page.getByLabel('TTS provider @vip',{exact:true}).selectOption('qwen3-gguf');
+  await expect(page.getByLabel('Voice @vip',{exact:true}).locator('option[value^="supertonic:"]')).toHaveCount(0);
+  await page.getByLabel('Voice @vip',{exact:true}).selectOption('qwen3-gguf:vip');
+  await expect.poll(async () => ((await readBrokerState(page)).settings.tts as {specialUsers:unknown[]}).specialUsers[0]).toMatchObject({providerId:'qwen3-gguf',voice:'qwen3-gguf:vip'});
+  await expect(page.getByLabel('TTS provider',{exact:true})).toHaveValue('supertonic');
+  await page.getByRole('button',{name:'Refresh voices',exact:true}).click();
+  await expect(page.getByLabel('Voice @vip',{exact:true})).toHaveValue('qwen3-gguf:vip');
+  await page.getByLabel('TTS provider',{exact:true}).selectOption('pocket-tts');
+  await expect(page.getByLabel('TTS provider @vip',{exact:true})).toHaveValue('qwen3-gguf');
+  await expect(page.getByLabel('Voice @vip',{exact:true})).toHaveValue('qwen3-gguf:vip');
 });

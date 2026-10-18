@@ -1,6 +1,8 @@
 /** SonicBoom plugin UI strings (moved from the main frontend
  * so no TTS copy ships in the TikTools web bundle). */
 export const spanish = {
+  ttsAdvanced: 'Avanzado',
+  ttsGeneralProvider: 'Usar proveedor general',
   ttsDiagnostics: 'Diagnóstico de voz',
   ttsReady: 'Listo',
   ttsNotReady: 'No disponible',

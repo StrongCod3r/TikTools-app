@@ -115,7 +115,7 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
   const handleSettingsChange = (next: TtsSettings): void => {
     const providerChanged = next.providerId !== settings.value.providerId;
     if (providerChanged) {
-      next = { ...next, defaultVoice: '', specialUsers: next.specialUsers.map(u => ({ ...u, voice: '' })) };
+      next = { ...next, defaultVoice: '', specialUsers: next.specialUsers.map(u => u.providerId ? u : ({ ...u, voice: '' })) };
       catalogStatus.value = t(locale.value, 'ttsProviderChanged');
     }
     settings.value = sanitizeTtsSettings(next);
@@ -176,7 +176,12 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
       const valid = (v: string): string => voices.value.some(o => o.value === qualify(v)) ? qualify(v) : '';
       // Loading is temporary: keep saved voice preferences until a ready catalog can validate them.
       const reconcile = ready.value ? valid : qualify;
-      settings.value = { ...settings.value, defaultVoice: reconcile(settings.value.defaultVoice), specialUsers: settings.value.specialUsers.map(u => ({ ...u, voice: reconcile(u.voice) })) };
+      settings.value = { ...settings.value, defaultVoice: reconcile(settings.value.defaultVoice), specialUsers: settings.value.specialUsers.map(u => {
+        const provider = u.providerId || settings.value.providerId;
+        const voice = u.voice && !u.voice.includes(':') && provider === 'supertonic' ? `supertonic:${u.voice}` : u.voice;
+        const providerReady = providers.value.some(p => p.value === provider && !p.disabled);
+        return { ...u, voice: !providerReady || catalog.value.some(v => v.value === voice && v.value.startsWith(`${provider}:`)) ? voice : '' };
+      }) };
       if (refresh) settings.value.voiceCatalogRevision = crypto.randomUUID();
       if (refresh || selectionBefore !== JSON.stringify(settings.value) || saveTimer !== undefined) {
         if (saveTimer !== undefined) { clearTimeout(saveTimer); saveTimer = undefined; }
@@ -387,17 +392,20 @@ export const SonicBoomApp = defineVueComponent<Record<string, never>>([], () => 
     }
     return (
       <div>
-      <details class="tts-card"><summary>{t(locale.value, 'ttsDiagnostics')}</summary>
+      <details class="tts-card"><summary>{t(locale.value, 'ttsAdvanced')}</summary>
+      <details><summary>{t(locale.value, 'ttsDiagnostics')}</summary>
         <p>{settings.value.providerId} · {ready.value ? t(locale.value, 'ttsReady') : t(locale.value, 'ttsNotReady')} · {settings.value.defaultVoice || '—'}</p>
         <p>{t(locale.value, 'ttsBackend')}: {String(diagnostic.value.connection ?? '—')} · {t(locale.value, 'ttsQueueDepth')}: {String(diagnostic.value.queueDepth ?? '—')}</p>
         <p>{String(diagnostic.value.stage ?? '—')} · {String(diagnostic.value.lastResult ?? '—')}</p>
         <button type="button" onClick={refreshVoices}>{t(locale.value, 'ttsReloadDiagnostics')}</button>
       </details>
       <label class="tts-card"><input type="checkbox" checked={manualPlayNow.value} onChange={(event: Event) => { manualPlayNow.value = (event.target as HTMLInputElement).checked; }} />{t(locale.value, 'ttsManualInterrupt')}</label>
+      </details>
       <TtsSettingsPanel
         locale={locale.value}
         settings={settings.value}
         voices={voices.value}
+        allVoices={catalog.value}
         providers={providers.value}
         catalogStatus={catalogStatus.value}
         refreshing={refreshing.value}

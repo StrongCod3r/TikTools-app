@@ -304,6 +304,7 @@ struct SpeechEngine {
     deduper: Deduper,
     event_ids: IdDeduper,
     voices: Vec<String>,
+    authorized_voices: Vec<String>,
     voices_fetched_at_ms: u64,
     catalog_retry_ms: u64,
     catalog_failures: u32,
@@ -332,6 +333,7 @@ impl Default for SpeechEngine {
             deduper: Deduper::new(DEDUP_WINDOW_MS, DEDUP_MAX_ENTRIES),
             event_ids: IdDeduper::new(EVENT_ID_DEDUP_WINDOW_MS, EVENT_ID_DEDUP_MAX_ENTRIES),
             voices: Vec::new(),
+            authorized_voices: Vec::new(),
             voices_fetched_at_ms: 0,
             catalog_retry_ms: 0,
             catalog_failures: 0,
@@ -422,7 +424,13 @@ impl SpeechEngine {
 
     /// Server, credential identity, provider and UI revision scope both positive and
     /// empty catalogs. Explicit reload invalidates immediately; TTL is a fallback.
+    #[cfg(test)]
     async fn ensure_voices(&mut self, config: &config::BackendConfig) {
+        self.ensure_voices_for(config, &config.policy.provider_id)
+            .await;
+    }
+
+    async fn ensure_voices_for(&mut self, config: &config::BackendConfig, provider: &str) {
         use std::hash::{Hash, Hasher};
         let mut identity = std::collections::hash_map::DefaultHasher::new();
         config.api_token.hash(&mut identity);
@@ -436,6 +444,7 @@ impl SpeechEngine {
         if self.catalog_key.as_ref() != Some(&key) || generation != self.catalog_generation {
             self.catalog_generation = generation;
             self.voices.clear();
+            self.authorized_voices.clear();
             self.voices_fetched_at_ms = 0;
             self.catalog_retry_ms = 0;
             self.catalog_failures = 0;
@@ -447,7 +456,19 @@ impl SpeechEngine {
         if now.saturating_sub(self.voices_fetched_at_ms) < self.catalog_retry_ms
             && self.voices_fetched_at_ms != 0
         {
-            return;
+            let prefix = format!("{provider}:");
+            self.voices = self
+                .authorized_voices
+                .iter()
+                .filter(|voice| voice.starts_with(&prefix))
+                .cloned()
+                .collect();
+            if self.catalog_failures > 0
+                || !self.voices.is_empty()
+                || now.saturating_sub(self.voices_fetched_at_ms) < config.empty_catalog_retry_ms
+            {
+                return;
+            }
         }
         let url = format!("{server_url}/api/tts/plugin/voices");
         let mut request = self
@@ -483,15 +504,17 @@ impl SpeechEngine {
             }
         };
         self.voices.clear();
+        self.authorized_voices.clear();
         if let Some(voices) = fetched {
-            let prefix = format!("{}:", config.policy.provider_id);
+            self.authorized_voices = voices.clone();
+            let prefix = format!("{provider}:");
             self.voices = voices
                 .into_iter()
                 .filter(|v| v.starts_with(&prefix))
                 .collect();
             self.voices_fetched_at_ms = now;
             self.catalog_failures = 0;
-            self.catalog_retry_ms = if self.voices.is_empty() {
+            self.catalog_retry_ms = if self.authorized_voices.is_empty() {
                 config.empty_catalog_retry_ms
             } else {
                 VOICES_TTL_SECS * 1000
@@ -603,7 +626,10 @@ impl SpeechEngine {
             diagnostic["provider"] = config.policy.provider_id.clone().into();
             diagnostic["voice"] = config.policy.default_voice.clone().into();
         }
-        self.ensure_voices(&config).await;
+        let selected = policy::settings_for_author(&config.policy, &author);
+        self.ensure_voices_for(&config, &selected.provider_id).await;
+        let mut config = config;
+        config.policy = selected;
         if self.voices.is_empty() {
             if self.last_empty_diagnostic_at != self.voices_fetched_at_ms {
                 self.last_empty_diagnostic_at = self.voices_fetched_at_ms;
@@ -1810,7 +1836,10 @@ mod tests {
         config.policy.default_voice = "M1".into();
         engine.ensure_voices(&config).await;
         assert_eq!(engine.voices, ["supertonic:M1"]);
-        engine.ensure_voices(&config).await; // Cached despite explicit default.
+        engine.ensure_voices_for(&config, "pocket-tts").await;
+        assert_eq!(engine.voices, ["pocket-tts:old"]);
+        engine.ensure_voices(&config).await; // Provider overrides share the authenticated catalog.
+        assert_eq!(engine.voices, ["supertonic:M1"]);
         assert_eq!(received.try_iter().count(), 1);
         config.policy.voice_catalog_revision = "new-ui-reload".into();
         engine.ensure_voices(&config).await;

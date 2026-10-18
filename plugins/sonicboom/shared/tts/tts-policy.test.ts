@@ -407,3 +407,14 @@ describe('decideTts text processing', () => {
     expect(removed.spokenText).toBe('Hello');
   });
 });
+
+test('special users can select another provider without changing general speech', () => {
+  const config = sanitizeTtsSettings({ ...defaultTtsSettings(), enabled:true, providerId:'supertonic', defaultVoice:'supertonic:M1', specialUsers:[{handle:'vip',allowed:true,providerId:'qwen3-gguf',voice:'qwen3-gguf:owned',speed:1,pitch:1}] });
+  const availableVoices = ['supertonic:M1','qwen3-gguf:owned'];
+  expect(config.specialUsers[0]?.providerId).toBe('qwen3-gguf');
+  expect(decideTts({comment:'hello',author:{handle:'vip'},settings:config,availableVoices}).voice).toBe('qwen3-gguf:owned');
+  expect(decideTts({comment:'hello',author:{handle:'regular'},settings:config,availableVoices}).voice).toBe('supertonic:M1');
+  expect(decideTts({comment:'hello',author:{handle:'vip'},settings:config,availableVoices:['supertonic:M1']}).voice).toBe('');
+  config.specialUsers[0]!.allowed=false;
+  expect(decideTts({comment:'hello',author:{handle:'vip'},settings:config,availableVoices}).speak).toBe(false);
+});

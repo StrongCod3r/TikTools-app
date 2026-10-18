@@ -40,6 +40,7 @@ pub enum CommentMode {
 pub struct SpecialUser {
     pub handle: String,
     pub allowed: bool,
+    pub provider_id: String,
     pub voice: String,
     pub speed: f64,
     pub pitch: f64,
@@ -192,6 +193,17 @@ fn to_special_users(value: Option<&serde_json::Value>) -> Vec<SpecialUser> {
         clean.push(SpecialUser {
             handle,
             allowed: to_bool(record.get("allowed"), true),
+            provider_id: record
+                .get("providerId")
+                .and_then(serde_json::Value::as_str)
+                .filter(|p| {
+                    !p.is_empty()
+                        && p.len() <= 32
+                        && p.bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                })
+                .unwrap_or_default()
+                .to_owned(),
             voice: to_voice(record.get("voice")),
             speed: clamp_number(to_number(record.get("speed"), 1.0), 0.25, 3.0, 1.0),
             pitch: clamp_number(to_number(record.get("pitch"), 1.0), 0.25, 2.0, 1.0),
@@ -627,6 +639,21 @@ pub fn choose_voice(
     first_available_voice(&pool)
 }
 
+/// Per-user routing is explicit; an omitted override inherits the general
+/// provider. Never carry a general provider's default into another engine.
+pub fn settings_for_author(settings: &TtsSettings, author: &Author) -> TtsSettings {
+    let mut selected = settings.clone();
+    if let Some(user) = find_special_user(&author.handle, settings) {
+        if user.allowed && !user.provider_id.is_empty() && user.provider_id != settings.provider_id
+        {
+            selected.provider_id = user.provider_id.clone();
+            selected.default_voice.clear();
+            selected.random_voice = false;
+        }
+    }
+    selected
+}
+
 /// Single full-pipeline decision. Callers must check `speak` before
 /// acting: computing eligibility never speaks by itself.
 pub fn decide(
@@ -701,8 +728,9 @@ pub fn decide(
             special_user,
         };
     }
+    let selected = settings_for_author(settings, author);
     let voice = choose_voice(
-        settings,
+        &selected,
         special_user
             .as_ref()
             .map(|user| user.voice.as_str())
@@ -846,6 +874,7 @@ mod tests {
             special_users: vec![SpecialUser {
                 handle: "ada".to_owned(),
                 allowed: true,
+                provider_id: String::new(),
                 voice: String::new(),
                 speed: 1.0,
                 pitch: 1.0,
@@ -1063,5 +1092,41 @@ mod tests {
         let decision = decide("Hello [happy] world", &author, &settings, &[], |_| 0);
         assert!(decision.speak);
         assert_eq!(decision.spoken_text, "Hello happy world");
+    }
+    #[test]
+    fn special_provider_overrides_are_scoped_and_blocked_users_never_speak() {
+        let settings = sanitize_settings(Some(
+            &json!({"enabled":true,"providerId":"supertonic","defaultVoice":"supertonic:M1",
+            "specialUsers":[{"handle":"vip","allowed":true,"providerId":"qwen3-gguf","voice":"qwen3-gguf:owned"}]}),
+        ));
+        let voices = vec!["supertonic:M1".into(), "qwen3-gguf:owned".into()];
+        let vip = Author {
+            handle: "vip".into(),
+            ..Author::default()
+        };
+        assert_eq!(
+            settings_for_author(&settings, &vip).provider_id,
+            "qwen3-gguf"
+        );
+        assert_eq!(
+            decide("hello", &vip, &settings, &voices, |_| 0).voice,
+            "qwen3-gguf:owned"
+        );
+        let regular = Author {
+            handle: "regular".into(),
+            ..Author::default()
+        };
+        assert_eq!(
+            decide("hello", &regular, &settings, &voices, |_| 0).voice,
+            "supertonic:M1"
+        );
+        assert!(
+            decide("hello", &vip, &settings, &["supertonic:M1".into()], |_| 0)
+                .voice
+                .is_empty()
+        );
+        let mut blocked = settings.clone();
+        blocked.special_users[0].allowed = false;
+        assert!(!decide("hello", &vip, &blocked, &voices, |_| 0).speak);
     }
 }

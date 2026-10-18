@@ -21,6 +21,7 @@ type TtsSettingsPanelProps = {
   locale: Locale;
   settings: TtsSettings;
   voices: ActionOptionItem[];
+  allVoices?: ActionOptionItem[];
   providers?: ActionOptionItem[];
   refreshing?: boolean;
   catalogStatus?: string;
@@ -53,7 +54,7 @@ type TtsSettingsPanelProps = {
  * restricted broker (`settings.*`, `actions.*`, `options.*`).
  */
 export const TtsSettingsPanel = defineVueComponent<TtsSettingsPanelProps>(
-  ['providers', 'refreshing', 'catalogStatus', 'providerReady', 'locale', 'settings', 'voices', 'voicesError', 'speaking', 'logs', 'onSettingsChange', 'onRefreshVoices', 'onSpeak', 'outputsSupported', 'outputs', 'outputsSelected', 'outputsError', 'outputsPending', 'outputError', 'onSelectOutput', 'onRefreshOutputs'],
+  ['allVoices', 'providers', 'refreshing', 'catalogStatus', 'providerReady', 'locale', 'settings', 'voices', 'voicesError', 'speaking', 'logs', 'onSettingsChange', 'onRefreshVoices', 'onSpeak', 'outputsSupported', 'outputs', 'outputsSelected', 'outputsError', 'outputsPending', 'outputError', 'onSelectOutput', 'onRefreshOutputs'],
   (props) => {
     const update = (patch: Partial<TtsSettings>): void => {
       props.onSettingsChange({ ...props.settings, ...patch });
@@ -287,7 +288,8 @@ export const TtsSettingsPanel = defineVueComponent<TtsSettingsPanelProps>(
             <TtsSpecialUsers
               locale={locale}
               settings={settings}
-              voices={props.voices}
+              voices={props.allVoices ?? props.voices}
+              providers={props.providers}
               onSettingsChange={props.onSettingsChange}
             />
 

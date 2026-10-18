@@ -102,3 +102,13 @@ The temporary verification server was stopped after the checks. Private recordin
 TikTools changes: `plugins/sonicboom/backend/src/{main,config,transport}.rs`, `plugins/sonicboom/backend/tests/observer.rs`, `plugins/sonicboom/plugin.json`, `plugins/sonicboom/ui/src/App.vue`, both UI locale catalogs, UI fixtures/specs, `crates/tiktools-core/src/services/declarative_http/execution.rs`, `crates/tiktools-plugin-api/src/manifest/validation.rs`, this report, and rebuilt tracked UI/backend distribution files.
 
 SonicBoom changes: `src/api/jobs.rs`, `src/server/manager.rs`, and `docs/tiktools-live-integration.md`.
+
+## Follow-up: per-user providers and minimal controls
+
+Special users may now persist an optional `providerId`. Empty/omitted means the general provider; an explicit provider scopes that user's voice catalog and speech transport independently. For example, use Supertonic generally and `qwen3-gguf` for one allowed viewer. Blocked users remain blocked. Explicit overrides survive general-provider changes and catalog reloads; legacy entries retain their inheritance behavior. Both shared TypeScript and backend Rust policy implement the same routing rule. Missing Qwen voices never fall back to Supertonic.
+
+The backend caches the full authenticated catalog and selects a provider pool for each message, avoiding a catalog fetch whenever adjacent users choose different engines. Existing cache identity, negative retry and failure backoff behavior remains intact. Actual-process HTTP tests cover both general cloned providers and cloned special-user overrides with Supertonic selected generally.
+
+Diagnostics and the manual interruption checkbox are now inside a collapsed Advanced section (English/Spanish). Unsupported per-user speed/pitch columns are hidden while persisted settings remain compatible.
+
+Follow-up verification: 102 shared/plugin tests, 55 backend unit tests, 3 process integration tests and 21 UI tests pass; UI/root typechecks, plugin lint, backend clippy and packaged builds pass. Real inference was not repeated for this routing/UI extension. Mixed-provider parallel inference requires SonicBoom `inference.max_concurrent >= 2`; this extension does not bypass or silently increase server limits.

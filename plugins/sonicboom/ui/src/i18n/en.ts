@@ -1,6 +1,8 @@
 /** SonicBoom plugin UI strings (moved from the main frontend
  * so no TTS copy ships in the TikTools web bundle). */
 export const english = {
+  ttsAdvanced: 'Advanced',
+  ttsGeneralProvider: 'Use general provider',
   ttsDiagnostics: 'Speech diagnostics',
   ttsReady: 'Ready',
   ttsNotReady: 'Not ready',

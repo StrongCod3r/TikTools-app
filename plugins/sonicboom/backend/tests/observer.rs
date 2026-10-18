@@ -204,7 +204,12 @@ fn chat_event_speaks_through_the_configured_server() {
 
 #[test]
 fn cloned_providers_cross_process_boundary_and_reach_playback_queue() {
-    for provider in ["pocket-tts", "qwen3-gguf"] {
+    for (provider, special_override) in [
+        ("pocket-tts", false),
+        ("qwen3-gguf", false),
+        ("pocket-tts", true),
+        ("qwen3-gguf", true),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let (report, received) = mpsc::channel();
@@ -239,7 +244,8 @@ fn cloned_providers_cross_process_boundary_and_reach_playback_queue() {
         std::fs::create_dir_all(&plugin_dir).unwrap();
         std::fs::write(plugin_dir.join("settings.json"), serde_json::json!({
             "serverUrl": format!("http://{address}"), "apiToken":"owner-token",
-            "tts": {"enabled":true,"providerId":provider,"defaultVoice":format!("{provider}:owned-profile"),"language":"es"}
+            "tts": {"enabled":true,"providerId":if special_override {"supertonic"} else {provider},"defaultVoice":if special_override {"supertonic:M1".to_owned()} else {format!("{provider}:owned-profile")},"language":"es",
+                "specialUsers":if special_override {serde_json::json!([{"handle":"ada","allowed":true,"providerId":provider,"voice":format!("{provider}:owned-profile")}])} else {serde_json::json!([])}}
         }).to_string()).unwrap();
         let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_sonicboom-backend"))
             .stdin(Stdio::piped())

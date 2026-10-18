@@ -124,6 +124,7 @@ function toSpecialUsers(value: unknown): SpecialTtsUser[] {
     clean.push({
       handle,
       allowed: toBoolean(record.allowed, true),
+      ...(typeof record.providerId === 'string' && /^[a-z0-9-]{1,32}$/.test(record.providerId) ? { providerId: record.providerId } : {}),
       voice: toVoiceString(record.voice),
       speed: clampNumber(
         typeof record.speed === 'number' ? record.speed : 1,
