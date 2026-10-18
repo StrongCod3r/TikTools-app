@@ -4549,6 +4549,7 @@ version = "0.3.3"
 dependencies = [
  "arboard",
  "fastrand",
+ "getrandom 0.3.4",
  "napi-vm",
  "reqwest 0.13.5",
  "rusqlite",

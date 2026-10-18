@@ -65,6 +65,7 @@ type ConnectionsViewProps = {
   onSaveSettings: (id: string, values: PluginSettingValues) => void;
   onGetActionOptions: (source: string) => void;
   onOpenMediaPicker?: OpenMediaPicker;
+  onImportToken?: (id: string) => void;
   onProvisionToken?: (id: string, username: string, password: string) => void;
   onOpenPlugins: () => void;
 };
@@ -83,7 +84,7 @@ type ConnectionsViewProps = {
  * icon is reused here instead.
  */
 export const ConnectionsView = defineVueComponent<ConnectionsViewProps>(
-  ['locale', 'uniqueId', 'cookie', 'status', 'recents', 'error', 'plugins', 'pluginPages', 'connections', 'pluginSettings', 'actionOptions', 'provisionStates', 'onUniqueIdChange', 'onCookieChange', 'onConnect', 'onDisconnect', 'onReconnect', 'onPickLive', 'onSelectRecent', 'discoveryOpen', 'discoveryKeyword', 'discoveryRooms', 'discoveryStatus', 'discoveryError', 'discoveryRandom', 'discoveryHasMore', 'onToggleDiscovery', 'onDiscoveryKeyword', 'onRefreshDiscovery', 'onLoadMoreDiscovery', 'onPickRandomRoom', 'onClearRandomRoom', 'onConnectRoom', 'onTestConnection', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onOpenMediaPicker', 'onProvisionToken', 'onOpenPlugins'],
+  ['locale', 'uniqueId', 'cookie', 'status', 'recents', 'error', 'plugins', 'pluginPages', 'connections', 'pluginSettings', 'actionOptions', 'provisionStates', 'onUniqueIdChange', 'onCookieChange', 'onConnect', 'onDisconnect', 'onReconnect', 'onPickLive', 'onSelectRecent', 'discoveryOpen', 'discoveryKeyword', 'discoveryRooms', 'discoveryStatus', 'discoveryError', 'discoveryRandom', 'discoveryHasMore', 'onToggleDiscovery', 'onDiscoveryKeyword', 'onRefreshDiscovery', 'onLoadMoreDiscovery', 'onPickRandomRoom', 'onClearRandomRoom', 'onConnectRoom', 'onTestConnection', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onOpenMediaPicker', 'onProvisionToken', 'onImportToken', 'onOpenPlugins'],
   (props) => {
   const savedConnections = loadViewState().connections;
   const showCookie = ref(savedConnections?.showCookie ?? Boolean(props.cookie));
@@ -408,6 +409,8 @@ export const ConnectionsView = defineVueComponent<ConnectionsViewProps>(
                         onGetActionOptions={props.onGetActionOptions}
                         onTestConnection={props.onTestConnection}
                         onOpenMediaPicker={props.onOpenMediaPicker}
+                        supportsTokenImport={plugin.descriptor.supportsTokenImport}
+                        onImportToken={props.onImportToken}
                         supportsProvisioning={plugin.descriptor.supportsTokenProvisioning}
                         provisionState={props.provisionStates[id]}
                         onProvisionToken={props.onProvisionToken}

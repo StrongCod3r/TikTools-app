@@ -36,6 +36,8 @@ type PluginPageViewProps = {
   onOpenMediaPicker?: OpenMediaPicker;
   onExecuteAction?: (actionType: string, config: PluginSettingValues) => void;
   supportsProvisioning?: boolean;
+  supportsTokenImport?: boolean;
+  onImportToken?: (id: string) => void;
   provisionState?: { working: boolean; ok: boolean; message: string };
   onProvisionToken?: (id: string, username: string, password: string) => void;
   /** Host-stamped `ui` descriptor for this plugin, when the snapshot carries one. */
@@ -56,7 +58,7 @@ type PluginPageViewProps = {
  * adapter.
  */
 export const PluginPageView = defineVueComponent<PluginPageViewProps>(
-  ['locale', 'page', 'pluginName', 'settingsState', 'connection', 'actionOptions', 'actionOptionErrors', 'actionOptionSelected', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onTestConnection', 'onOpenMediaPicker', 'onExecuteAction', 'supportsProvisioning', 'provisionState', 'onProvisionToken', 'ui', 'backend', 'subscribeTopic'],
+  ['locale', 'page', 'pluginName', 'settingsState', 'connection', 'actionOptions', 'actionOptionErrors', 'actionOptionSelected', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onTestConnection', 'onOpenMediaPicker', 'onExecuteAction', 'supportsProvisioning', 'supportsTokenImport', 'onImportToken', 'provisionState', 'onProvisionToken', 'ui', 'backend', 'subscribeTopic'],
   (props) => {
   const adapted = computed(() => adaptLegacyPage(props.page));
   const localState = ref<Record<string, string | number | boolean>>({});
@@ -91,6 +93,8 @@ export const PluginPageView = defineVueComponent<PluginPageViewProps>(
       pick: props.onOpenMediaPicker,
     },
     provisioning: {
+      supportsImport: props.supportsTokenImport,
+      importToken: () => props.onImportToken?.(props.page.pluginId),
       supported: props.supportsProvisioning ?? false,
       state: props.provisionState,
       provision: (username, password) =>

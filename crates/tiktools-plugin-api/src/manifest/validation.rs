@@ -124,6 +124,41 @@ fn validate_action_http(http: &Value) -> Result<(), ManifestError> {
     if let Some(headers) = object.get("headers") {
         validate_header_map(headers).map_err(|_| ManifestError::InvalidField("actionTypes"))?;
     }
+    for key in ["bodyJson", "bodyVariants", "idempotency"] {
+        if let Some(value) = object.get(key) {
+            if !value.is_object() || value.to_string().len() > MAX_DESCRIPTOR_BYTES {
+                return Err(ManifestError::InvalidField("actionTypes"));
+            }
+        }
+    }
+    if let Some(spec) = object.get("bodyVariants") {
+        if spec
+            .get("field")
+            .and_then(Value::as_str)
+            .is_none_or(|s| s.is_empty())
+            || spec
+                .get("values")
+                .and_then(Value::as_object)
+                .is_none_or(|values| values.is_empty() || values.values().any(|v| !v.is_object()))
+            || !object.contains_key("bodyJson")
+        {
+            return Err(ManifestError::InvalidField("actionTypes"));
+        }
+    }
+    if object.contains_key("bodyJson") && object.contains_key("body") {
+        return Err(ManifestError::InvalidField("actionTypes"));
+    }
+    if let Some(spec) = object.get("idempotency") {
+        if !spec.get("enabled").is_some_and(Value::is_boolean)
+            || spec.get("header").is_some_and(|h| {
+                h.as_str().is_none_or(|h| {
+                    h.is_empty() || !h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                })
+            })
+        {
+            return Err(ManifestError::InvalidField("actionTypes"));
+        }
+    }
     if let Some(body) = object.get("body") {
         let body = body
             .as_str()
@@ -212,9 +247,50 @@ pub fn validate_http_config(http: &Value) -> Result<(), ManifestError> {
             .and_then(Value::as_str)
             .ok_or(ManifestError::InvalidField("http"))?;
         validate_relative_path(path).map_err(|_| ManifestError::InvalidField("http"))?;
+        if health.get("readinessField").is_some_and(|v| {
+            v.as_str().is_none_or(|s| {
+                s.is_empty()
+                    || s.len() > 128
+                    || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            })
+        }) {
+            return Err(ManifestError::InvalidField("http"));
+        }
         if let Some(timeout) = health.get("timeoutMs") {
             validate_http_timeout(timeout, MAX_HTTP_FETCH_TIMEOUT_MS)
                 .map_err(|_| ManifestError::InvalidField("http"))?;
+        }
+    }
+    if let Some(spec) = object.get("tokenImport") {
+        let spec = spec
+            .as_object()
+            .ok_or(ManifestError::InvalidField("http"))?;
+        if spec.get("format").and_then(Value::as_str) != Some("ini") {
+            return Err(ManifestError::InvalidField("http"));
+        }
+        for key in ["section", "key", "fileName"] {
+            if spec.get(key).and_then(Value::as_str).is_none_or(|s| {
+                s.trim().is_empty()
+                    || s.len() > 128
+                    || s.chars().any(char::is_control)
+                    || s.contains(['/', '\\', '[', ']', '='])
+            }) {
+                return Err(ManifestError::InvalidField("http"));
+            }
+        }
+        if spec
+            .get("minLength")
+            .is_some_and(|n| n.as_u64().is_none_or(|n| !(1..=4096).contains(&n)))
+        {
+            return Err(ManifestError::InvalidField("http"));
+        }
+        if object
+            .get("auth")
+            .and_then(|auth| auth.get("tokenSetting"))
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            return Err(ManifestError::InvalidField("http"));
         }
     }
     if let Some(provisioning) = object.get("tokenProvisioning") {

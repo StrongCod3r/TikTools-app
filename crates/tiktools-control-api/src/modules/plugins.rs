@@ -246,6 +246,16 @@ pub fn register(router: &mut ControlRouter) {
             outcome.map_err(ApiError::from)
         },
     );
+    router.register_typed::<PluginIdParams, PluginProvisionResult, _, _>(
+        "plugins.token.import",
+        "Imports a secret token from a user-selected local configuration via the native picker",
+        true,
+        |core: Arc<AppCore>, params: PluginIdParams| async move {
+            core.plugin_token_import(&params.plugin_id)
+                .await
+                .map_err(|error| ApiError::from(error).scoped_not_found("plugin_not_found"))
+        },
+    );
     router.register_typed::<PluginProvisionParams, PluginProvisionResult, _, _>(
         "plugins.token.provision",
         "Mints an API token via the plugin provisioning flow (password is used once, never stored)",

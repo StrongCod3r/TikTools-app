@@ -231,6 +231,7 @@ pub(crate) fn http_error_reason(body: &Value) -> Option<String> {
     const MAX_REASON_CHARS: usize = 300;
     let raw = match body {
         Value::String(text) => text.clone(),
+        Value::Object(map) if map.contains_key("details") || map.contains_key("code") => body.to_string(),
         Value::Object(map) => map
             .get("message")
             .or_else(|| map.get("error"))

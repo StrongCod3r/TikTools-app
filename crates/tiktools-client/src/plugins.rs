@@ -29,6 +29,7 @@ pub(crate) const METHODS: &[&str] = &[
     PLUGINS_OPTIONS,
     PLUGINS_ACTION_EXECUTE,
     PLUGINS_TOKEN_PROVISION,
+    PLUGINS_TOKEN_IMPORT,
     PLUGINS_INSTALL_SET,
 ];
 
@@ -44,10 +45,19 @@ const PLUGINS_HEALTH: &str = "plugins.health";
 const PLUGINS_DIAGNOSTICS: &str = "plugins.diagnostics";
 const PLUGINS_OPTIONS: &str = "plugins.options";
 const PLUGINS_ACTION_EXECUTE: &str = "plugins.action.execute";
+const PLUGINS_TOKEN_IMPORT: &str = "plugins.token.import";
 const PLUGINS_TOKEN_PROVISION: &str = "plugins.token.provision";
 const PLUGINS_INSTALL_SET: &str = "plugins.install.set";
 
 impl TikToolsClient {
+    /// Imports a token using a native file picker; no path or secret crosses RPC.
+    pub async fn plugins_token_import(
+        &self,
+        params: PluginIdParams,
+    ) -> Result<PluginProvisionResult, ClientError> {
+        self.call(PLUGINS_TOKEN_IMPORT, params).await
+    }
+
     /// Safe plugin summaries (never includes settings values).
     /// RPC method `plugins.list`.
     pub async fn plugins_list(&self) -> Result<PluginListResult, ClientError> {

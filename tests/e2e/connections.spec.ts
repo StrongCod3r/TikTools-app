@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 
 import {
@@ -85,4 +86,35 @@ test('server connection failure shows the error without an app-wide crash', asyn
 
   await assertNoUnhandledCalls(page);
   consoleCapture.assertClean();
+});
+
+test('REPO imports a token through the shared card without showing the secret', async ({ page }) => {
+  const { baseHostState } = await import('./fixtures/tiktools-host.ts');
+  const { sonicboomStatus, sonicboomDescriptor } = await import('./fixtures/plugins.ts');
+  const manifest = JSON.parse(readFileSync(new URL('../../examples/repo-game/plugin.json', import.meta.url), 'utf8'));
+  const id = manifest.id;
+  const state = baseHostState();
+  state.automationSnapshot.plugins = [sonicboomStatus({
+    descriptor: sonicboomDescriptor({ id, name: { default: manifest.name },
+      supportsTokenProvisioning: false, supportsTokenImport: true, actionTypeIds: [] }),
+  })];
+  state.automationSnapshot.pluginPages = [{ id: 'connection', pluginId: id,
+    title: { default: 'Connection' }, sections: [{ kind: 'connection' }],
+    source: { kind: 'plugin', pluginId: id } }];
+  state.pluginSettings[id] = { schema: manifest.settings.schema, values: { serverUrl: 'http://127.0.0.1:17453' } };
+  state.pluginHealth[id] = { ok: false, latencyMs: 1, error: 'API token missing.' };
+  const capture = await installFakeHost(page, state);
+  await page.goto('/');
+  await openConnections(page);
+  await page.getByRole('button', { name: /R.E.P.O. Game/ }).click();
+  const importButton = page.getByRole('button', { name: 'Import token from configuration…' });
+  await expect(importButton).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Get API token…' })).toHaveCount(0);
+  await importButton.click();
+  await expect(page.getByText('API token imported and saved.')).toBeVisible();
+  await expect(page.getByText('Connected to http://127.0.0.1:17453').first()).toBeVisible();
+  await page.getByRole('button', { name: 'Edit settings' }).click();
+  await expect(page.locator('input[type="password"]')).toHaveValue('••••••••');
+  await assertNoUnhandledCalls(page);
+  capture.assertClean();
 });

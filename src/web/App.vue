@@ -53,6 +53,11 @@ const activePluginSupportsProvisioning: ComputedRef<boolean> = computed(() => {
   const plugin = plugins.find((entry) => entry.descriptor.id === page.pluginId);
   return plugin?.descriptor.supportsTokenProvisioning ?? false;
 });
+const activePluginSupportsTokenImport: ComputedRef<boolean> = computed(() => {
+  const id = activePluginPage.value?.pluginId;
+  const plugins: PluginStatus[] = controller.behavior.value.plugins;
+  return plugins.find((plugin) => plugin.descriptor.id === id)?.descriptor.supportsTokenImport ?? false;
+});
 const activePluginUi = computed(() => {
   const page = activePluginPage.value;
   if (!page) return undefined;
@@ -249,6 +254,7 @@ const activePluginBackend = computed(() => {
         :on-get-action-options="app.handleGetActionOptions"
         :on-open-media-picker="app.openMediaPicker"
         :on-provision-token="app.handleProvisionPluginToken"
+        :on-import-token="app.handleImportPluginToken"
         :on-open-plugins="app.openPlugins"
       />
 
@@ -298,8 +304,10 @@ const activePluginBackend = computed(() => {
         :on-open-media-picker="app.openMediaPicker"
         :on-execute-action="(actionType, config) => app.executePluginAction(activePluginPage?.pluginId ?? '', actionType, config, true)"
         :supports-provisioning="activePluginSupportsProvisioning"
+        :supports-token-import="activePluginSupportsTokenImport"
         :provision-state="app.pluginProvision[activePluginPage.pluginId]"
         :on-provision-token="app.handleProvisionPluginToken"
+        :on-import-token="app.handleImportPluginToken"
         :ui="activePluginUi"
         :backend="activePluginBackend?.backend"
         :subscribe-topic="activePluginBackend?.subscribeTopic"

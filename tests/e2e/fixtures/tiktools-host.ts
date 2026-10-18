@@ -213,6 +213,13 @@ const INIT_SCRIPT = `
       }
       return outcome;
     },
+    'plugins.token.import': (params) => {
+      const id = String(params.pluginId);
+      const settings = state.pluginSettings[id];
+      if (settings) settings.values.apiToken = '••••••••';
+      state.pluginHealth[id] = { ok: true, latencyMs: 1 };
+      return { pluginId: id, ok: true, error: null };
+    },
     'plugins.token.provision': (params) => ({ pluginId: params.pluginId, ok: true, error: null }),
     'live.status': () => state.liveStatus,
     'live.connect': (params) => {

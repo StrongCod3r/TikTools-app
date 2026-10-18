@@ -1385,3 +1385,35 @@ fn l4d2_first_party_manifest_declares_the_rcon_contract() {
         .as_array()
         .is_some_and(|required| required.contains(&Value::String("password".into()))));
 }
+
+#[test]
+fn repo_and_reference_manifests_are_valid() {
+    for source in [
+        include_str!("../../../../examples/repo-game/plugin.json"),
+        include_str!("../../../../examples/minecraft-server/plugin.json"),
+        include_str!("../../../../examples/sonicboom-server/plugin.json"),
+    ] {
+        PluginManifest::from_json_str(source).expect("reference declarative manifest");
+    }
+}
+
+#[test]
+fn token_import_validates_parser_options_and_never_accepts_a_manifest_file_path() {
+    let original: Value =
+        serde_json::from_str(include_str!("../../../../examples/repo-game/plugin.json")).unwrap();
+    for (key, value) in [
+        ("format", serde_json::json!("json")),
+        ("fileName", serde_json::json!("../credentials.cfg")),
+        ("section", serde_json::json!("")),
+        ("key", serde_json::json!("token\nprivate")),
+        ("minLength", serde_json::json!(0)),
+        ("minLength", serde_json::json!(4097)),
+    ] {
+        let mut document = original.clone();
+        document["http"]["tokenImport"][key] = value;
+        assert!(PluginManifest::from_value(document).is_err(), "{key}");
+    }
+    let mut missing_auth = original;
+    missing_auth["http"]["auth"] = serde_json::json!({"type":"none"});
+    assert!(PluginManifest::from_value(missing_auth).is_err());
+}

@@ -1,0 +1,1103 @@
+{
+  "schemaVersion": 3,
+  "id": "repo.game",
+  "name": "R.E.P.O. Game",
+  "version": "1.0.0",
+  "description": "Control R.E.P.O. gameplay through its local REST API.",
+  "icon": "terminal",
+  "tags": [
+    "game",
+    "repo",
+    "tiktok",
+    "interactive"
+  ],
+  "runtime": "declarative",
+  "capabilities": [
+    "http.request"
+  ],
+  "permissions": [],
+  "http": {
+    "baseUrl": "{{ settings.serverUrl }}",
+    "timeoutMs": 10000,
+    "auth": {
+      "type": "bearer",
+      "tokenSetting": "apiToken"
+    },
+    "health": {
+      "path": "/health",
+      "timeoutMs": 5000,
+      "readinessField": "gameplayReady"
+    },
+    "tokenImport": {
+      "format": "ini",
+      "fileName": "org.repo.rest-api.cfg",
+      "section": "HTTP",
+      "key": "AuthenticationToken",
+      "minLength": 43
+    }
+  },
+  "settings": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "serverUrl": {
+          "type": "string",
+          "format": "uri",
+          "title": "Server URL",
+          "default": "http://127.0.0.1:17453"
+        },
+        "apiToken": {
+          "type": "string",
+          "title": "API token",
+          "secret": true,
+          "description": "Use Import token from configuration to select BepInEx/config/org.repo.rest-api.cfg from your game or active mod profile. You can also paste the token manually."
+        },
+        "positionMode": {
+          "type": "string",
+          "title": "Default spawn position",
+          "default": "random_player",
+          "enum": [
+            "near_player",
+            "random_player",
+            "random_valid",
+            "world_position"
+          ]
+        },
+        "quantity": {
+          "type": "integer",
+          "title": "Default quantity",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 10
+        },
+        "playerId": {
+          "type": "string",
+          "title": "Default player ID",
+          "default": ""
+        }
+      }
+    },
+    "uiHints": {
+      "fields": {
+        "apiToken": {
+          "secret": true
+        },
+        "playerId": {
+          "optionsFrom": "plugin-action-options:repo.game.heal-player:playerId",
+          "kind": "select"
+        }
+      }
+    }
+  },
+  "pages": [
+    {
+      "id": "connection",
+      "title": {
+        "default": "R.E.P.O. connection"
+      },
+      "icon": "terminal",
+      "sections": [
+        {
+          "kind": "text",
+          "text": {
+            "default": "Start R.E.P.O. with REPOapi once. Use Import token from configuration and select BepInEx/config/org.repo.rest-api.cfg inside your game folder or active mod-manager profile. Gameplay requires an active level and host authority."
+          }
+        },
+        {
+          "kind": "connection"
+        }
+      ]
+    }
+  ],
+  "actionTypes": [
+    {
+      "id": "repo.game.spawn-enemy",
+      "version": 1,
+      "title": {
+        "default": "Spawn enemy"
+      },
+      "description": {
+        "default": "Spawn enemy. Requires host gameplay readiness."
+      },
+      "tag": "repo",
+      "icon": "terminal",
+      "category": "R.E.P.O.",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "enemyId",
+          "label": {
+            "default": "Enemy"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.spawn-enemy:enemyId"
+        },
+        {
+          "key": "quantity",
+          "label": {
+            "default": "Quantity (blank uses setting)"
+          },
+          "kind": "number",
+          "value": "",
+          "min": 1,
+          "max": 10
+        },
+        {
+          "key": "positionMode",
+          "label": {
+            "default": "Position"
+          },
+          "kind": "select",
+          "value": "",
+          "options": [
+            {
+              "value": "",
+              "label": {
+                "default": "Use default"
+              }
+            },
+            {
+              "value": "near_player",
+              "label": {
+                "default": "Near player"
+              }
+            },
+            {
+              "value": "random_player",
+              "label": {
+                "default": "Random player"
+              }
+            },
+            {
+              "value": "random_valid",
+              "label": {
+                "default": "Random valid"
+              }
+            },
+            {
+              "value": "world_position",
+              "label": {
+                "default": "World position"
+              }
+            }
+          ]
+        },
+        {
+          "key": "playerId",
+          "label": {
+            "default": "Player (near player only)"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.spawn-enemy:playerId"
+        },
+        {
+          "key": "x",
+          "label": {
+            "default": "X (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "y",
+          "label": {
+            "default": "Y (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "z",
+          "label": {
+            "default": "Z (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/spawn/enemy",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "enemyId": {
+            "$value": "config.enemyId"
+          },
+          "quantity": {
+            "$number": "config.quantity",
+            "fallback": "settings.quantity",
+            "min": 1,
+            "max": 10,
+            "integer": true
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000,
+        "bodyVariants": {
+          "field": "positionMode",
+          "values": {
+            "near_player": {
+              "position": {
+                "mode": "near_player",
+                "playerId": {
+                  "$value": "config.playerId",
+                  "fallback": "settings.playerId"
+                }
+              }
+            },
+            "random_player": {
+              "position": {
+                "mode": "random_player"
+              }
+            },
+            "random_valid": {
+              "position": {
+                "mode": "random_valid"
+              }
+            },
+            "world_position": {
+              "position": {
+                "mode": "world_position",
+                "x": {
+                  "$number": "config.x",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "y": {
+                  "$number": "config.y",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "z": {
+                  "$number": "config.z",
+                  "min": -10000,
+                  "max": 10000
+                }
+              }
+            }
+          }
+        }
+      },
+      "optionSources": {
+        "enemyId": {
+          "path": "/api/catalog/enemies",
+          "itemsPath": "enemies",
+          "valuePath": "id",
+          "labelPath": "name"
+        },
+        "playerId": {
+          "path": "/api/players",
+          "itemsPath": "players",
+          "valuePath": "id",
+          "labelPath": "name"
+        }
+      }
+    },
+    {
+      "id": "repo.game.spawn-item",
+      "version": 1,
+      "title": {
+        "default": "Spawn item"
+      },
+      "description": {
+        "default": "Spawn item. Requires host gameplay readiness."
+      },
+      "tag": "repo",
+      "icon": "terminal",
+      "category": "R.E.P.O.",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "itemId",
+          "label": {
+            "default": "Item"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.spawn-item:itemId"
+        },
+        {
+          "key": "quantity",
+          "label": {
+            "default": "Quantity (blank uses setting)"
+          },
+          "kind": "number",
+          "value": "",
+          "min": 1,
+          "max": 10
+        },
+        {
+          "key": "positionMode",
+          "label": {
+            "default": "Position"
+          },
+          "kind": "select",
+          "value": "",
+          "options": [
+            {
+              "value": "",
+              "label": {
+                "default": "Use default"
+              }
+            },
+            {
+              "value": "near_player",
+              "label": {
+                "default": "Near player"
+              }
+            },
+            {
+              "value": "random_player",
+              "label": {
+                "default": "Random player"
+              }
+            },
+            {
+              "value": "random_valid",
+              "label": {
+                "default": "Random valid"
+              }
+            },
+            {
+              "value": "world_position",
+              "label": {
+                "default": "World position"
+              }
+            }
+          ]
+        },
+        {
+          "key": "playerId",
+          "label": {
+            "default": "Player (near player only)"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.spawn-item:playerId"
+        },
+        {
+          "key": "x",
+          "label": {
+            "default": "X (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "y",
+          "label": {
+            "default": "Y (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "z",
+          "label": {
+            "default": "Z (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/spawn/item",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "itemId": {
+            "$value": "config.itemId"
+          },
+          "quantity": {
+            "$number": "config.quantity",
+            "fallback": "settings.quantity",
+            "min": 1,
+            "max": 10,
+            "integer": true
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000,
+        "bodyVariants": {
+          "field": "positionMode",
+          "values": {
+            "near_player": {
+              "position": {
+                "mode": "near_player",
+                "playerId": {
+                  "$value": "config.playerId",
+                  "fallback": "settings.playerId"
+                }
+              }
+            },
+            "random_player": {
+              "position": {
+                "mode": "random_player"
+              }
+            },
+            "random_valid": {
+              "position": {
+                "mode": "random_valid"
+              }
+            },
+            "world_position": {
+              "position": {
+                "mode": "world_position",
+                "x": {
+                  "$number": "config.x",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "y": {
+                  "$number": "config.y",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "z": {
+                  "$number": "config.z",
+                  "min": -10000,
+                  "max": 10000
+                }
+              }
+            }
+          }
+        }
+      },
+      "optionSources": {
+        "itemId": {
+          "path": "/api/catalog/items",
+          "itemsPath": "items",
+          "valuePath": "id",
+          "labelPath": "name"
+        },
+        "playerId": {
+          "path": "/api/players",
+          "itemsPath": "players",
+          "valuePath": "id",
+          "labelPath": "name"
+        }
+      }
+    },
+    {
+      "id": "repo.game.spawn-valuable",
+      "version": 1,
+      "title": {
+        "default": "Spawn valuable"
+      },
+      "description": {
+        "default": "Spawn valuable. Requires host gameplay readiness."
+      },
+      "tag": "repo",
+      "icon": "terminal",
+      "category": "R.E.P.O.",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "valuableId",
+          "label": {
+            "default": "Valuable"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.spawn-valuable:valuableId"
+        },
+        {
+          "key": "quantity",
+          "label": {
+            "default": "Quantity (blank uses setting)"
+          },
+          "kind": "number",
+          "value": "",
+          "min": 1,
+          "max": 10
+        },
+        {
+          "key": "positionMode",
+          "label": {
+            "default": "Position"
+          },
+          "kind": "select",
+          "value": "",
+          "options": [
+            {
+              "value": "",
+              "label": {
+                "default": "Use default"
+              }
+            },
+            {
+              "value": "near_player",
+              "label": {
+                "default": "Near player"
+              }
+            },
+            {
+              "value": "random_player",
+              "label": {
+                "default": "Random player"
+              }
+            },
+            {
+              "value": "random_valid",
+              "label": {
+                "default": "Random valid"
+              }
+            },
+            {
+              "value": "world_position",
+              "label": {
+                "default": "World position"
+              }
+            }
+          ]
+        },
+        {
+          "key": "playerId",
+          "label": {
+            "default": "Player (near player only)"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.spawn-valuable:playerId"
+        },
+        {
+          "key": "x",
+          "label": {
+            "default": "X (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "y",
+          "label": {
+            "default": "Y (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "z",
+          "label": {
+            "default": "Z (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/spawn/valuable",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "valuableId": {
+            "$value": "config.valuableId"
+          },
+          "quantity": {
+            "$number": "config.quantity",
+            "fallback": "settings.quantity",
+            "min": 1,
+            "max": 10,
+            "integer": true
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000,
+        "bodyVariants": {
+          "field": "positionMode",
+          "values": {
+            "near_player": {
+              "position": {
+                "mode": "near_player",
+                "playerId": {
+                  "$value": "config.playerId",
+                  "fallback": "settings.playerId"
+                }
+              }
+            },
+            "random_player": {
+              "position": {
+                "mode": "random_player"
+              }
+            },
+            "random_valid": {
+              "position": {
+                "mode": "random_valid"
+              }
+            },
+            "world_position": {
+              "position": {
+                "mode": "world_position",
+                "x": {
+                  "$number": "config.x",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "y": {
+                  "$number": "config.y",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "z": {
+                  "$number": "config.z",
+                  "min": -10000,
+                  "max": 10000
+                }
+              }
+            }
+          }
+        }
+      },
+      "optionSources": {
+        "valuableId": {
+          "path": "/api/catalog/valuables",
+          "itemsPath": "valuables",
+          "valuePath": "id",
+          "labelPath": "name"
+        },
+        "playerId": {
+          "path": "/api/players",
+          "itemsPath": "players",
+          "valuePath": "id",
+          "labelPath": "name"
+        }
+      }
+    },
+    {
+      "id": "repo.game.spawn-upgrade",
+      "version": 1,
+      "title": {
+        "default": "Spawn upgrade"
+      },
+      "description": {
+        "default": "Spawn a physical upgrade pickup; does not directly grant a player an upgrade."
+      },
+      "tag": "repo",
+      "icon": "terminal",
+      "category": "R.E.P.O.",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "upgradeId",
+          "label": {
+            "default": "Upgrade"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.spawn-upgrade:upgradeId"
+        },
+        {
+          "key": "quantity",
+          "label": {
+            "default": "Quantity (blank uses setting)"
+          },
+          "kind": "number",
+          "value": "",
+          "min": 1,
+          "max": 10
+        },
+        {
+          "key": "positionMode",
+          "label": {
+            "default": "Position"
+          },
+          "kind": "select",
+          "value": "",
+          "options": [
+            {
+              "value": "",
+              "label": {
+                "default": "Use default"
+              }
+            },
+            {
+              "value": "near_player",
+              "label": {
+                "default": "Near player"
+              }
+            },
+            {
+              "value": "random_player",
+              "label": {
+                "default": "Random player"
+              }
+            },
+            {
+              "value": "random_valid",
+              "label": {
+                "default": "Random valid"
+              }
+            },
+            {
+              "value": "world_position",
+              "label": {
+                "default": "World position"
+              }
+            }
+          ]
+        },
+        {
+          "key": "playerId",
+          "label": {
+            "default": "Player (near player only)"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.spawn-upgrade:playerId"
+        },
+        {
+          "key": "x",
+          "label": {
+            "default": "X (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "y",
+          "label": {
+            "default": "Y (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "z",
+          "label": {
+            "default": "Z (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/spawn/upgrade",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "upgradeId": {
+            "$value": "config.upgradeId"
+          },
+          "quantity": {
+            "$number": "config.quantity",
+            "fallback": "settings.quantity",
+            "min": 1,
+            "max": 10,
+            "integer": true
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000,
+        "bodyVariants": {
+          "field": "positionMode",
+          "values": {
+            "near_player": {
+              "position": {
+                "mode": "near_player",
+                "playerId": {
+                  "$value": "config.playerId",
+                  "fallback": "settings.playerId"
+                }
+              }
+            },
+            "random_player": {
+              "position": {
+                "mode": "random_player"
+              }
+            },
+            "random_valid": {
+              "position": {
+                "mode": "random_valid"
+              }
+            },
+            "world_position": {
+              "position": {
+                "mode": "world_position",
+                "x": {
+                  "$number": "config.x",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "y": {
+                  "$number": "config.y",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "z": {
+                  "$number": "config.z",
+                  "min": -10000,
+                  "max": 10000
+                }
+              }
+            }
+          }
+        }
+      },
+      "optionSources": {
+        "upgradeId": {
+          "path": "/api/catalog/upgrades",
+          "itemsPath": "upgrades",
+          "valuePath": "id",
+          "labelPath": "name"
+        },
+        "playerId": {
+          "path": "/api/players",
+          "itemsPath": "players",
+          "valuePath": "id",
+          "labelPath": "name"
+        }
+      }
+    },
+    {
+      "id": "repo.game.heal-player",
+      "version": 1,
+      "title": {
+        "default": "Heal player"
+      },
+      "description": {
+        "default": "Heal player. Requires host gameplay readiness."
+      },
+      "tag": "repo",
+      "icon": "terminal",
+      "category": "R.E.P.O.",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "playerId",
+          "label": {
+            "default": "Player"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.heal-player:playerId"
+        },
+        {
+          "key": "amount",
+          "label": {
+            "default": "Heal amount"
+          },
+          "kind": "number",
+          "value": "25",
+          "min": 1,
+          "max": 100
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/player/heal",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "playerId": {
+            "$value": "config.playerId",
+            "fallback": "settings.playerId"
+          },
+          "amount": {
+            "$number": "config.amount",
+            "min": 1,
+            "max": 100,
+            "integer": true
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000
+      },
+      "optionSources": {
+        "playerId": {
+          "path": "/api/players",
+          "itemsPath": "players",
+          "valuePath": "id",
+          "labelPath": "name"
+        }
+      }
+    },
+    {
+      "id": "repo.game.revive-player",
+      "version": 1,
+      "title": {
+        "default": "Revive player"
+      },
+      "description": {
+        "default": "Revive player. Requires host gameplay readiness."
+      },
+      "tag": "repo",
+      "icon": "terminal",
+      "category": "R.E.P.O.",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "playerId",
+          "label": {
+            "default": "Player"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:repo.game.revive-player:playerId"
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/player/revive",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "playerId": {
+            "$value": "config.playerId",
+            "fallback": "settings.playerId"
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000
+      },
+      "optionSources": {
+        "playerId": {
+          "path": "/api/players",
+          "itemsPath": "players",
+          "valuePath": "id",
+          "labelPath": "name"
+        }
+      }
+    },
+    {
+      "id": "repo.game.clear-enemies",
+      "version": 1,
+      "title": {
+        "default": "Clear API-spawned enemies"
+      },
+      "description": {
+        "default": "Clear API-spawned enemies. Requires host gameplay readiness."
+      },
+      "tag": "repo",
+      "icon": "terminal",
+      "category": "R.E.P.O.",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [],
+      "http": {
+        "method": "POST",
+        "path": "/api/enemies/clear",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {},
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000
+      },
+      "optionSources": {}
+    },
+    {
+      "id": "repo.game.despawn-enemy",
+      "version": 1,
+      "title": {
+        "default": "Despawn API-spawned enemy"
+      },
+      "description": {
+        "default": "Despawn API-spawned enemy. Requires host gameplay readiness."
+      },
+      "tag": "repo",
+      "icon": "terminal",
+      "category": "R.E.P.O.",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "enemyId",
+          "label": {
+            "default": "Spawned enemy instance ID"
+          },
+          "kind": "text",
+          "value": ""
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/enemies/despawn",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "enemyId": {
+            "$value": "config.enemyId"
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000
+      },
+      "optionSources": {}
+    }
+  ]
+}

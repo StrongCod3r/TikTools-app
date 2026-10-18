@@ -20,6 +20,35 @@ impl crate::AppCore {
         logs: &mut Vec<String>,
         test: bool,
     ) -> Result<String, String> {
+        // Fail fast under bursts: no unbounded gameplay queue. Opt-in actions
+        // share a conservative process-wide budget below REPOapi's 20 rps.
+        static IN_FLIGHT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+        static RATE: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>> =
+            std::sync::Mutex::new(std::collections::VecDeque::new());
+        let guarded = action_http
+            .get("idempotency")
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(true);
+        let _permit = if guarded && !test {
+            let permit = IN_FLIGHT
+                .try_acquire()
+                .map_err(|_| "Gameplay busy: concurrent request limit reached")?;
+            let mut rate = RATE.lock().map_err(|_| "Request budget unavailable")?;
+            while rate
+                .front()
+                .is_some_and(|started| started.elapsed() >= std::time::Duration::from_secs(1))
+            {
+                rate.pop_front();
+            }
+            if rate.len() >= 16 {
+                return Err("Gameplay rate limit reached; command was not sent".to_owned());
+            }
+            rate.push_back(std::time::Instant::now());
+            Some(permit)
+        } else {
+            None
+        };
         let manifest = &plugin.manifest;
         let block = action_http
             .as_object()
@@ -46,7 +75,7 @@ impl crate::AppCore {
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| format!("Plugin `{}` action has no HTTP path.", manifest.id))?;
-        let endpoint = build_declarative_request(&DeclarativeBuild {
+        let mut endpoint = build_declarative_request(&DeclarativeBuild {
             manifest,
             http,
             method,
@@ -58,6 +87,44 @@ impl crate::AppCore {
             scope: &scope,
             broker: &self.capabilities,
         })?;
+        if let Some(template) = block.get("bodyJson") {
+            let mut template = template.clone();
+            if let Some(spec) = block.get("bodyVariants") {
+                let field = spec["field"].as_str().ok_or("Missing variant field")?;
+                let selected = config
+                    .get(field)
+                    .filter(|v| v.as_str() != Some(""))
+                    .or_else(|| settings.get(field))
+                    .and_then(Value::as_str)
+                    .ok_or("Select a request variant")?;
+                let variant = spec["values"]
+                    .get(selected)
+                    .and_then(Value::as_object)
+                    .ok_or("Invalid request variant")?;
+                template
+                    .as_object_mut()
+                    .ok_or("bodyJson must be an object")?
+                    .extend(variant.clone());
+            }
+            endpoint.body = Some(super::template::render_json(&template, &scope)?.to_string());
+        }
+        if block
+            .get("idempotency")
+            .and_then(|v| v.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            let header = block
+                .get("idempotency")
+                .and_then(|v| v.get("header"))
+                .and_then(Value::as_str)
+                .unwrap_or("Idempotency-Key");
+            let key = execution_key()?;
+            endpoint
+                .headers
+                .retain(|(name, _)| !name.eq_ignore_ascii_case(header));
+            endpoint.headers.push((header.to_owned(), key));
+        }
         if test {
             let host = url::Url::parse(&endpoint.url)
                 .ok()
@@ -83,7 +150,14 @@ impl crate::AppCore {
             ),
         );
         if let Some(body) = endpoint.body.as_deref() {
-            fetch.insert("body".to_owned(), Value::String(body.to_owned()));
+            fetch.insert(
+                "body".to_owned(),
+                if block.contains_key("bodyJson") {
+                    serde_json::from_str(body).map_err(|_| "Invalid structured body")?
+                } else {
+                    Value::String(body.to_owned())
+                },
+            );
         }
         fetch.insert(
             "timeoutMs".to_owned(),
@@ -95,9 +169,7 @@ impl crate::AppCore {
         // workflow config.
         fetch.insert(
             "timeoutCeilingMs".to_owned(),
-            Value::Number(
-                tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS.into(),
-            ),
+            Value::Number(tiktools_plugin_api::manifest::MAX_DECLARATIVE_HTTP_TIMEOUT_MS.into()),
         );
         fetch.insert(
             "allowPrivateNetwork".to_owned(),
@@ -215,6 +287,7 @@ pub(crate) struct PluginConnectionCheck {
     pub(crate) ok: bool,
     pub(crate) latency_ms: u64,
     pub(crate) error: Option<String>,
+    pub(crate) details: Option<String>,
 }
 
 impl crate::AppCore {
@@ -227,6 +300,7 @@ impl crate::AppCore {
             ok: false,
             latency_ms: crate::helpers::now_millis().saturating_sub(started),
             error: Some(error),
+            details: None,
         };
         let plugin = self.plugins.get(id);
         let Some(plugin) = plugin else {
@@ -255,7 +329,7 @@ impl crate::AppCore {
             Err(fetch) => return failed(fetch.to_string()),
         };
         let scope = json!({"settings": settings});
-        if let Err(fetch) = self
+        let body = match self
             .fetch_declarative_json(
                 &plugin.manifest,
                 "GET",
@@ -265,12 +339,26 @@ impl crate::AppCore {
             )
             .await
         {
-            return failed(fetch);
+            Ok(body) => body,
+            Err(error) => return failed(error),
+        };
+        let details = health.get("readinessField").and_then(Value::as_str).map(|field| {
+            let version = body["apiVersion"].as_str().filter(|v| v.len() <= 32 && v.bytes().all(|b| b.is_ascii_digit() || b == b'.')).unwrap_or("unknown");
+            format!("API version: {version}; game running: {}; in level: {}; host: {}; gameplay ready: {}",
+                body["gameRunning"].as_bool().unwrap_or(false), body["inLevel"].as_bool().unwrap_or(false), body["isHost"].as_bool().unwrap_or(false), body[field].as_bool().unwrap_or(false))
+        });
+        if let Some(field) = health.get("readinessField").and_then(Value::as_str) {
+            if body.get(field).and_then(Value::as_bool) != Some(true) {
+                let mut result = failed("API reachable; gameplay unavailable.".to_owned());
+                result.details = details;
+                return result;
+            }
         }
         PluginConnectionCheck {
             ok: true,
             latency_ms: crate::helpers::now_millis().saturating_sub(started),
             error: None,
+            details,
         }
     }
 
@@ -297,5 +385,23 @@ impl crate::AppCore {
             latency_ms,
             error,
         });
+    }
+}
+
+/// Created once when preparing an execution, outside the transport sender.
+fn execution_key() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    getrandom::fill(&mut bytes).map_err(|_| "Cannot generate execution key")?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+#[cfg(test)]
+mod execution_tests {
+    #[test]
+    fn distinct_executions_have_distinct_keys() {
+        let keys: std::collections::HashSet<_> =
+            (0..1024).map(|_| super::execution_key().unwrap()).collect();
+        assert_eq!(keys.len(), 1024);
+        assert!(keys.iter().all(|k| k.len() == 32));
     }
 }

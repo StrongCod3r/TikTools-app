@@ -49,6 +49,8 @@ type PluginConnectionCardProps = {
   onTestConnection: (id: string) => void;
   onOpenMediaPicker?: OpenMediaPicker;
   supportsProvisioning?: boolean;
+  supportsTokenImport?: boolean;
+  onImportToken?: (id: string) => void;
   provisionState?: { working: boolean; ok: boolean; message: string };
   onProvisionToken?: (id: string, username: string, password: string) => void;
   /** Stretch full-width (Connections tab) instead of the centered 720px page column. */
@@ -71,7 +73,7 @@ type SaveState = 'idle' | 'saving' | 'saved' | 'error';
  * script, or component indirection from the manifest.
  */
 export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps>(
-  ['locale', 'pluginId', 'pluginName', 'settingsState', 'connection', 'actionOptions', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onTestConnection', 'onOpenMediaPicker', 'supportsProvisioning', 'provisionState', 'onProvisionToken', 'inline'],
+  ['locale', 'pluginId', 'pluginName', 'settingsState', 'connection', 'actionOptions', 'onGetSettings', 'onSaveSettings', 'onGetActionOptions', 'onTestConnection', 'onOpenMediaPicker', 'supportsProvisioning', 'supportsTokenImport', 'onImportToken', 'provisionState', 'onProvisionToken', 'inline'],
   (props) => {
   const draft = ref<JsonObject | null>(null);
   const editing = ref(false);
@@ -309,12 +311,33 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
     );
   };
 
-  /**
-   * One-click API token provisioning entry point, rendered only when the
-   * manifest declares a supported strategy. The admin login lives in its
-   * own modal so operator credentials are never confused with the plugin
-   * settings around them; progress and outcome come from controller state.
-   */
+  /** Native, user-selected token import; pending edits must be saved first. */
+  const renderTokenImport = () => {
+    if (!props.supportsTokenImport || !props.onImportToken) return null;
+    const working = props.provisionState?.working === true;
+    return (
+      <div class="plg-connect__actions">
+        <button type="button" class="btn btn-sm"
+          disabled={working || testing.value || dirty.value || saveState.value === 'saving' || !props.settingsState}
+          onClick={() => {
+            clearSaveTimers();
+            draft.value = null;
+            lastSent.value = null;
+            lastSentJson.value = null;
+            saveState.value = 'idle';
+            props.onImportToken?.(props.pluginId);
+          }}>
+          {t(props.locale, working ? 'pluginImportingToken' : 'pluginImportToken')}
+        </button>
+        <p class="plg-note">{t(props.locale, 'pluginImportTokenHint')}</p>
+        {props.provisionState?.message && (
+          <div class="plg-alert" role="status">{props.provisionState.message}</div>
+        )}
+      </div>
+    );
+  };
+
+  /** Existing admin-login provisioning remains independent of file import. */
   const renderProvision = () => {
     const provision = props.onProvisionToken;
     if (!props.supportsProvisioning || !provision) return null;
@@ -362,6 +385,7 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
                 <span class="plg-connect__url">{t(locale, 'pluginConnectedTo', { url: urlValue.value })}</span>
               </span>
             </div>
+            {connection.details && <div class="plg-alert" role="status">{connection.details}</div>}
             {summaryRows.value.length > 0 && (
               <dl class="plg-connect__rows">
                 {summaryRows.value.map((row) => (
@@ -389,6 +413,7 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
                 {t(locale, 'pluginEditSettings')}
               </button>
             </div>
+            {renderTokenImport()}
             {renderProvision()}
           </div>
         </section>
@@ -419,12 +444,15 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
             </span>
             {renderSaveState(locale)}
           </div>
+          {connection?.details && !dirty.value && (
+            <div class="plg-alert" role="status">{connection.details}</div>
+          )}
           {failed && !props.inline && (
             <div class="plg-alert" role="status">
               {connection?.error || t(locale, 'pluginConnectionFailed')}
             </div>
           )}
-          {state ? (
+          {state && !(props.supportsTokenImport && props.provisionState?.working) ? (
             <SchemaForm
               locale={locale}
               schema={state.schema}
@@ -455,6 +483,7 @@ export const PluginConnectionCard = defineVueComponent<PluginConnectionCardProps
               ? t(locale, 'pluginLocalTrustedNote')
               : t(locale, 'pluginConnectionHint')}
           </p>
+          {renderTokenImport()}
           {renderProvision()}
         </div>
       </section>

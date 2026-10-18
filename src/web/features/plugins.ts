@@ -30,6 +30,7 @@ export interface PluginOptionsResult {
 }
 
 export interface PluginConnectionResult {
+  details?: string;
   pluginId: string;
   ok: boolean;
   latencyMs: number;
@@ -250,6 +251,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
             ok: result.ok,
             latencyMs: result.latencyMs,
             error: result.error ?? undefined,
+            details: result.details,
             at: Date.now(),
           },
         };
@@ -260,6 +262,28 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
           ...pluginConnections.value,
           [id]: { ok: false, latencyMs: 0, error: errorMessage(failure), at: Date.now() },
         };
+      });
+  };
+
+  const handleImportPluginToken = (id: string): void => {
+    if (pluginProvision.value[id]?.working) return;
+    pluginProvision.value = { ...pluginProvision.value, [id]: { working: true, ok: false, message: '' } };
+    void control.call<PluginProvisionResult>('plugins.token.import', { pluginId: id })
+      .then((result) => {
+        if (disposed) return;
+        pluginProvision.value = {
+          ...pluginProvision.value,
+          [id]: { working: false, ok: result.ok, message: result.ok
+            ? callbacks.translate('pluginTokenImported') : (result.error ?? '') },
+        };
+        if (result.ok) {
+          handleGetPluginSettings(id);
+          handleTestPluginConnection(id);
+        }
+      })
+      .catch((failure: unknown) => {
+        if (disposed) return;
+        pluginProvision.value = { ...pluginProvision.value, [id]: { working: false, ok: false, message: errorMessage(failure) } };
       });
   };
 
@@ -430,6 +454,7 @@ export function usePlugins(control: ControlClient, callbacks: PluginsCallbacks) 
     handleGetActionOptions,
     handleTestPluginConnection,
     handleProvisionPluginToken,
+    handleImportPluginToken,
     handleSetPluginInstalled,
     handleUninstallPlugin,
     handleSetPluginEnabled,

@@ -46,6 +46,8 @@ export interface PluginUiMediaApi {
 }
 
 export interface PluginUiProvisioningApi {
+  supportsImport?: boolean;
+  importToken?(): void;
   supported: boolean;
   state?: { working: boolean; ok: boolean; message: string };
   provision(username: string, password: string): void;

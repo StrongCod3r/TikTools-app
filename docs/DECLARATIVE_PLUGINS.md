@@ -394,3 +394,80 @@ The Plugins card shows **Connect** for plugins declaring `http.health`;
 the dialog edits settings and probes the endpoint, reporting latency or a
 redacted error. Probing is generic IPC (`test-plugin-connection` /
 `plugin-connection-result`) shared by every declarative integration.
+
+## Structured JSON and execution keys
+
+Actions may opt into `http.bodyJson` instead of the legacy string `body`.
+Objects/arrays are rendered structurally and serialized once; strings are escaped
+by the JSON serializer. A binding `{ "$value": "config.itemId" }` preserves the
+resolved JSON type. `{ "$number": "config.quantity", "min": 1, "max": 10,
+"integer": true, "fallback": "settings.quantity" }` converts and validates
+numeric form input. Missing required bindings fail before sending. A `fallback`
+is a scope path used for missing/blank input.
+
+`bodyVariants: { "field": "positionMode", "values": { "random_player":
+{ "position": { "mode": "random_player" } } } }` merges the selected variant
+into the base body before rendering; the field resolves from config then settings.
+This permits nested conditional payloads without raw JSON interpolation.
+Legacy string bodies retain their behavior.
+
+`http.idempotency: { "enabled": true, "header": "Idempotency-Key" }` generates
+one cryptographically random 128-bit execution key in the prepared request.
+Different executions, including within one event, receive different keys. There
+are no automatic gameplay retries. Any future retry must reuse the prepared
+request, including body and key. Opt-in calls share a fail-fast four-request /
+sixteen-starts-per-second budget; no additional pending queue is created.
+
+A health descriptor may declare `readinessField` naming a boolean response field.
+A false/missing value reports the server as reachable but gameplay unavailable,
+with the game readiness diagnostics. R.E.P.O. uses `gameplayReady`.
+
+## Import a token from local configuration
+
+A plugin may offer **Import token from configuration…** on the existing shared
+connection card, independently of admin-login `tokenProvisioning`:
+
+```json
+"http": {
+  "baseUrl": "{{ settings.serverUrl }}",
+  "auth": { "type": "bearer", "tokenSetting": "apiToken" },
+  "tokenImport": {
+    "format": "ini",
+    "fileName": "org.repo.rest-api.cfg",
+    "section": "HTTP",
+    "key": "AuthenticationToken",
+    "minLength": 43
+  }
+}
+```
+
+`auth.tokenSetting` must name a setting marked `secret: true` in
+`settings.schema.properties`; otherwise the host does not offer import.
+`fileName` is a filename hint in the native dialog, never a filesystem path.
+The reusable INI parser supports UTF-8 (optional BOM), CRLF/LF, whole-line
+`#`/`;` comments and unquoted `key = value` entries. Values preserve embedded
+`=` (including Base64 padding). Section and key names are case-sensitive.
+Duplicate matching keys, empty/whitespace/control-containing tokens, invalid
+UTF-8, non-files and files over 64 KiB are rejected without echoing contents.
+`minLength` defaults to 1; all tokens are capped at 4096 bytes. The manifest
+validator bounds every parser option. Additional file formats require host
+parser support; plugins cannot supply executable readers.
+
+The `plugins.token.import` control operation accepts `{ "pluginId": "repo.game" }`
+and opens the existing host-owned native picker with configuration-file filters.
+It accepts no filesystem path or file contents from the caller. Only the file
+the operator selects is read, on a blocking worker; no directory scanning or
+credential discovery occurs. Only one import dialog may run at a time.
+The result uses `{pluginId, ok, error}`: cancellation is `ok: false` with no error.
+File contents and extracted tokens stay inside the host. Existing settings are
+merged through the normal secret persistence, cache invalidation and change-event
+path. Disabled, unloaded or changed plugins cannot finish an outstanding import.
+The UI reloads masked settings and tests the connection after success; it blocks
+import during pending edits and removes the settings form while importing to
+avoid racing autosaves with the new secret.
+
+Only `examples/repo-game/plugin.json` opts in initially. SonicBoom retains its
+admin login flow and Minecraft stays unchanged. A future plugin with an INI token
+can opt in with its own filename/section/key and secret token setting, using the
+same connection UI and executor. Token import does not disable authentication or
+modify the source server configuration.

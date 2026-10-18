@@ -1,0 +1,293 @@
+{
+  "profileVersion": 1,
+  "id": "repo-giftwall",
+  "name": "R.E.P.O. giftwall",
+  "description": "Import, choose live catalog IDs in each action, then enable each event. Requires repo.game. All rules initially disabled for safe configuration.",
+  "params": {},
+  "templates": [
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "repo-rule-0",
+        "title": "Rose \u2192 item",
+        "description": "Select catalog content in the action editor before enabling. Edit gift filter as needed.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn item",
+            "typeId": "repo.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Rose",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Rose"
+            }
+          ],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "repo-rule-1",
+        "title": "Finger Heart \u2192 valuable",
+        "description": "Select catalog content in the action editor before enabling. Edit gift filter as needed.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn valuable",
+            "typeId": "repo.game.spawn-valuable",
+            "enabled": true,
+            "config": {
+              "valuableId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Finger Heart",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Finger Heart"
+            }
+          ],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "repo-rule-2",
+        "title": "Doughnut \u2192 enemy",
+        "description": "Select catalog content in the action editor before enabling. Edit gift filter as needed.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn enemy",
+            "typeId": "repo.game.spawn-enemy",
+            "enabled": true,
+            "config": {
+              "enemyId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Doughnut",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Doughnut"
+            }
+          ],
+          "cooldownMs": 15000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "repo-rule-3",
+        "title": "Perfume \u2192 enemy",
+        "description": "Select catalog content in the action editor before enabling. Edit gift filter as needed.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn enemy",
+            "typeId": "repo.game.spawn-enemy",
+            "enabled": true,
+            "config": {
+              "enemyId": "",
+              "quantity": 2,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Perfume",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Perfume"
+            }
+          ],
+          "cooldownMs": 15000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "repo-rule-4",
+        "title": "Galaxy \u2192 enemy",
+        "description": "Select catalog content in the action editor before enabling. Edit gift filter as needed.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn enemy",
+            "typeId": "repo.game.spawn-enemy",
+            "enabled": true,
+            "config": {
+              "enemyId": "",
+              "quantity": 5,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Galaxy",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Galaxy"
+            }
+          ],
+          "cooldownMs": 15000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "repo-rule-5",
+        "title": "Follow \u2192 item",
+        "description": "Select catalog content in the action editor before enabling. Edit gift filter as needed.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn item",
+            "typeId": "repo.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Follow",
+          "enabled": false,
+          "trigger": "tiktok.follow",
+          "filters": [],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "repo-rule-6",
+        "title": "Share \u2192 valuable",
+        "description": "Select catalog content in the action editor before enabling. Edit gift filter as needed.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn valuable",
+            "typeId": "repo.game.spawn-valuable",
+            "enabled": true,
+            "config": {
+              "valuableId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Share",
+          "enabled": false,
+          "trigger": "tiktok.share",
+          "filters": [],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "repo-rule-7",
+        "title": "Large gift \u2192 enemy",
+        "description": "Select catalog content in the action editor before enabling. Edit gift filter as needed.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn enemy",
+            "typeId": "repo.game.spawn-enemy",
+            "enabled": true,
+            "config": {
+              "enemyId": "",
+              "quantity": 3,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Large gift",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Large gift"
+            }
+          ],
+          "cooldownMs": 15000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    }
+  ]
+}

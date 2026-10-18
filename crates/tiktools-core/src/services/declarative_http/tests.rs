@@ -676,3 +676,122 @@ fn resolved_timeout_stays_bounded_and_defaults_without_a_table() {
     let endpoint = build_action(json!({}), None, None).unwrap();
     assert_eq!(endpoint.timeout_ms, 10_000);
 }
+
+#[cfg(feature = "http")]
+#[tokio::test]
+async fn repo_posts_send_nested_json_and_unique_execution_keys() {
+    let _guard = REPO_EXECUTION_TEST_LOCK.lock().await;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    struct Emitter;
+    impl crate::HostEmitter for Emitter {
+        fn emit(&self, _: crate::ipc::messages::HostMessage) {}
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut keys = Vec::new();
+        for status in [200, 400, 401, 404, 409, 422, 429, 500, 501, 503, 504] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let header_end;
+            loop {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+                if let Some(end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") { header_end = end + 4; break; }
+            }
+            let headers = String::from_utf8_lossy(&bytes[..header_end]).to_lowercase();
+            assert!(headers.starts_with("post /api/spawn/enemy "));
+            let length: usize = headers.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().parse().unwrap();
+            while bytes.len() < header_end + length {
+                let mut chunk = [0; 4096];
+                let n = socket.read(&mut chunk).await.unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&chunk[..n]);
+            }
+            let key = headers.lines().find_map(|l| l.strip_prefix("idempotency-key: ")).unwrap().to_owned();
+            assert!(!keys.contains(&key)); keys.push(key);
+            let body: Value = serde_json::from_slice(&bytes[header_end..header_end+length]).unwrap();
+            assert_eq!(body["enemyId"], "fixture\"\\\n{{ untouched }}");
+            assert_eq!(body["quantity"], 2);
+            assert_eq!(body["position"], json!({"mode":"random_player"}));
+            let response = r#"{"error":{"code":"FIXTURE_ERROR","message":"contract fixture","details":{"spawned":1}}}"#;
+            socket.write_all(format!("HTTP/1.1 {status} Fixture\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}", response.len()).as_bytes()).await.unwrap();
+        }
+    });
+    let core = Arc::new(crate::AppCore::new(Arc::new(Emitter)));
+    let mut document: Value = serde_json::from_str(include_str!("../../../../../examples/repo-game/plugin.json")).unwrap();
+    document["http"]["baseUrl"] = json!(format!("http://{address}"));
+    let manifest = PluginManifest::from_json_str(&document.to_string()).unwrap();
+    let descriptor = &document["actionTypes"][0]["http"];
+    let plugin = tiktools_plugin_loader::DiscoveredPlugin { manifest, directory: std::env::temp_dir(), source: tiktools_plugin_loader::PluginSource::Development, available:true, reason:None, running:true };
+    for status in [200, 400, 401, 404, 409, 422, 429, 500, 501, 503, 504] {
+        let result = core.execute_declarative_action(&plugin, descriptor,
+            &json!({"config":{"enemyId":"fixture\"\\\n{{ untouched }}","quantity":2,"positionMode":"random_player"}}),
+            &json!({}), &mut Vec::new(), false).await;
+        if status == 200 { assert!(result.is_ok(), "{result:?}"); }
+        else { let error = result.unwrap_err(); assert!(error.contains(&status.to_string()), "{error}"); assert!(error.contains("FIXTURE_ERROR"), "{error}"); }
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(10), server).await.unwrap().unwrap();
+}
+
+#[test]
+fn repo_dynamic_catalogs_use_runtime_ids_and_names() {
+    let document: Value = serde_json::from_str(include_str!("../../../../../examples/repo-game/plugin.json")).unwrap();
+    for action in document["actionTypes"].as_array().unwrap() {
+        if let Some(sources) = action["optionSources"].as_object() {
+            for (_, spec) in sources {
+                let root = spec["itemsPath"].as_str().unwrap();
+                let body = json!({ root: [{"id":"modded-runtime-id", "name":"Runtime name"}] });
+                let mapped = super::super::option_sources::map_option_items(&body,
+                    Some(root), spec["valuePath"].as_str(), spec["labelPath"].as_str()).unwrap();
+                assert_eq!(mapped, vec![json!({"value":"modded-runtime-id","label":"Runtime name"})]);
+                assert!(super::super::option_sources::map_option_items(&json!({root:[]}), Some(root), Some("id"), Some("name")).unwrap().is_empty());
+            }
+        }
+    }
+}
+
+#[cfg(feature = "http")]
+#[tokio::test]
+async fn repo_bursts_reject_excess_work_without_queueing() {
+    let _guard = REPO_EXECUTION_TEST_LOCK.lock().await;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    struct Emitter;
+    impl crate::HostEmitter for Emitter { fn emit(&self, _: crate::ipc::messages::HostMessage) {} }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        loop {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut bytes = [0;4096]; socket.read(&mut bytes).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}").await;
+            });
+        }
+    });
+    let core = Arc::new(crate::AppCore::new(Arc::new(Emitter)));
+    let mut document: Value = serde_json::from_str(include_str!("../../../../../examples/repo-game/plugin.json")).unwrap();
+    document["http"]["baseUrl"] = json!(format!("http://{address}"));
+    let manifest = PluginManifest::from_json_str(&document.to_string()).unwrap();
+    let plugin = tiktools_plugin_loader::DiscoveredPlugin { manifest, directory: std::env::temp_dir(), source: tiktools_plugin_loader::PluginSource::Development, available:true, reason:None, running:true };
+    let mut tasks = tokio::task::JoinSet::new();
+    for _ in 0..32 {
+        let core = core.clone(); let plugin = plugin.clone();
+        tasks.spawn(async move { core.execute_declarative_action(&plugin,
+            &json!({"method":"POST","path":"/api/enemies/clear","bodyJson":{},"idempotency":{"enabled":true}}),
+            &json!({}), &json!({}), &mut Vec::new(), false).await });
+    }
+    let mut accepted = 0; let mut rejected = 0;
+    while let Some(result) = tasks.join_next().await {
+        match result.unwrap() { Ok(_) => accepted += 1, Err(error) => { assert!(error.contains("limit"), "{error}"); rejected += 1; } }
+    }
+    assert!(accepted <= 4);
+    assert!(rejected >= 28);
+    server.abort();
+}
+
+#[cfg(feature = "http")]
+static REPO_EXECUTION_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

@@ -499,6 +499,7 @@ export function useAppController() {
     handleGetActionOptions: plugins.handleGetActionOptions,
     handleTestPluginConnection: plugins.handleTestPluginConnection,
     handleProvisionPluginToken: plugins.handleProvisionPluginToken,
+    handleImportPluginToken: plugins.handleImportPluginToken,
     executePluginAction: plugins.executeAction,
     openMediaPicker: media.openMediaPicker,
   };
@@ -632,6 +633,7 @@ export function useAppController() {
     handleTestPluginConnection: plugins.handleTestPluginConnection,
     pluginProvision: plugins.pluginProvision,
     handleProvisionPluginToken: plugins.handleProvisionPluginToken,
+    handleImportPluginToken: plugins.handleImportPluginToken,
     executePluginAction: plugins.executeAction,
     actionOptionSelected: plugins.actionOptionSelected,
     analyticsSummary: analytics.analyticsSummary,

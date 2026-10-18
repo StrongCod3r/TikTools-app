@@ -53,9 +53,37 @@ impl AppCore {
                         crate::services::declarative_http::HTTP_REQUEST_CAPABILITY,
                     )
                     .map_err(|error| error.to_string())?;
-                return self
-                    .execute_declarative_action(&plugin, action_http, action, event, logs, test)
-                    .await;
+                let execution = self.execute_declarative_action(
+                    &plugin,
+                    action_http,
+                    action,
+                    event,
+                    logs,
+                    test,
+                );
+                if !test
+                    && action_http
+                        .pointer("/idempotency/enabled")
+                        .and_then(Value::as_bool)
+                        == Some(true)
+                {
+                    // Dropping the HTTP future cancels client work. A command
+                    // already accepted by the game may still complete: never
+                    // recover an uncertain cancellation with a new key.
+                    let cancelled = async {
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            if !self.plugin_ready(&plugin.manifest.id) {
+                                break;
+                            }
+                        }
+                    };
+                    return tokio::select! {
+                        result = execution => result,
+                        _ = cancelled => Err("Plugin disabled or unloaded; request cancelled. Game outcome may be uncertain; do not automatically replay.".to_owned()),
+                    };
+                }
+                return execution.await;
             }
         }
         if test {

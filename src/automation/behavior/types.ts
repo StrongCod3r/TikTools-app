@@ -224,6 +224,8 @@ export interface PluginDescriptor {
   hasConnectionProbe?: boolean;
   /** True when the host can mint this plugin's API token from an admin login. */
   supportsTokenProvisioning?: boolean;
+  /** Imports a secret from an explicitly selected local configuration file. */
+  supportsTokenImport?: boolean;
 }
 
 export interface PluginStatus {
