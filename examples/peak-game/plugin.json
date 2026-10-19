@@ -1,0 +1,821 @@
+{
+  "schemaVersion": 3,
+  "id": "peak.game",
+  "name": "PEAK Game",
+  "version": "1.0.0",
+  "description": "Control PEAK gameplay through the local PEAKapi REST API.",
+  "icon": "terminal",
+  "tags": [
+    "peak",
+    "game",
+    "tiktok",
+    "interactive"
+  ],
+  "runtime": "declarative",
+  "capabilities": [
+    "http.request"
+  ],
+  "permissions": [],
+  "http": {
+    "baseUrl": "{{ settings.serverUrl }}",
+    "timeoutMs": 10000,
+    "auth": {
+      "type": "bearer",
+      "tokenSetting": "apiToken"
+    },
+    "health": {
+      "path": "/health",
+      "timeoutMs": 5000,
+      "readinessField": "gameplayReady"
+    },
+    "tokenImport": {
+      "format": "ini",
+      "fileName": "org.peak.rest-api.cfg",
+      "section": "HTTP",
+      "key": "AuthenticationToken",
+      "minLength": 43,
+      "discovery": {
+        "steamFolder": "PEAK",
+        "modManagerGame": "PEAK",
+        "relativePath": "BepInEx/config/org.peak.rest-api.cfg"
+      },
+      "connection": {
+        "setting": "serverUrl",
+        "section": "HTTP",
+        "hostKey": "Host",
+        "portKey": "Port"
+      }
+    }
+  },
+  "settings": {
+    "schema": {
+      "type": "object",
+      "properties": {
+        "serverUrl": {
+          "type": "string",
+          "format": "uri",
+          "title": "Server URL",
+          "default": "http://127.0.0.1:17454"
+        },
+        "apiToken": {
+          "type": "string",
+          "title": "API token",
+          "secret": true,
+          "description": "Use Connect automatically or select the game/profile folder. File import and manual token entry remain available."
+        },
+        "positionMode": {
+          "type": "string",
+          "title": "Default spawn position",
+          "default": "random_player",
+          "enum": [
+            "near_player",
+            "random_player",
+            "world_position"
+          ]
+        },
+        "quantity": {
+          "type": "integer",
+          "title": "Default quantity",
+          "default": 1,
+          "minimum": 1,
+          "maximum": 5
+        },
+        "playerId": {
+          "type": "string",
+          "title": "Default player ID",
+          "default": ""
+        }
+      }
+    },
+    "uiHints": {
+      "fields": {
+        "apiToken": {
+          "secret": true
+        },
+        "playerId": {
+          "kind": "select",
+          "optionsFrom": "plugin-action-options:peak.game.spawn-item:playerId"
+        }
+      }
+    }
+  },
+  "pages": [
+    {
+      "id": "connection",
+      "title": {
+        "default": "PEAK connection"
+      },
+      "icon": "terminal",
+      "sections": [
+        {
+          "kind": "text",
+          "text": {
+            "default": "Start PEAK with BepInEx and PEAKapi once. Use Connect automatically and choose your Steam installation or active mod profile. If it is not found, select the game/profile folder. TikTools imports the token and API port without showing credentials. Gameplay requires an active level and host authority."
+          }
+        },
+        {
+          "kind": "connection"
+        }
+      ]
+    }
+  ],
+  "actionTypes": [
+    {
+      "id": "peak.game.spawn-item",
+      "version": 1,
+      "title": {
+        "default": "Spawn item"
+      },
+      "description": {
+        "default": "Spawn an item. Requires host gameplay readiness."
+      },
+      "tag": "peak",
+      "icon": "terminal",
+      "category": "PEAK",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "itemId",
+          "label": {
+            "default": "Item"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:peak.game.spawn-item:itemId"
+        },
+        {
+          "key": "quantity",
+          "label": {
+            "default": "Quantity (blank uses setting)"
+          },
+          "kind": "number",
+          "value": "",
+          "min": 1,
+          "max": 5
+        },
+        {
+          "key": "positionMode",
+          "label": {
+            "default": "Position"
+          },
+          "kind": "select",
+          "value": "",
+          "options": [
+            {
+              "value": "",
+              "label": {
+                "default": "Use default"
+              }
+            },
+            {
+              "value": "near_player",
+              "label": {
+                "default": "Near player"
+              }
+            },
+            {
+              "value": "random_player",
+              "label": {
+                "default": "Random player"
+              }
+            },
+            {
+              "value": "world_position",
+              "label": {
+                "default": "World position"
+              }
+            }
+          ]
+        },
+        {
+          "key": "playerId",
+          "label": {
+            "default": "Player (near player only)"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:peak.game.spawn-item:playerId"
+        },
+        {
+          "key": "x",
+          "label": {
+            "default": "X (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "y",
+          "label": {
+            "default": "Y (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "z",
+          "label": {
+            "default": "Z (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/spawn/item",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "itemId": {
+            "$value": "config.itemId"
+          },
+          "quantity": {
+            "$number": "config.quantity",
+            "fallback": "settings.quantity",
+            "min": 1,
+            "max": 5,
+            "integer": true
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000,
+        "bodyVariants": {
+          "field": "positionMode",
+          "values": {
+            "near_player": {
+              "position": {
+                "mode": "near_player",
+                "playerId": {
+                  "$value": "config.playerId",
+                  "fallback": "settings.playerId"
+                }
+              }
+            },
+            "random_player": {
+              "position": {
+                "mode": "random_player"
+              }
+            },
+            "world_position": {
+              "position": {
+                "mode": "world_position",
+                "x": {
+                  "$number": "config.x",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "y": {
+                  "$number": "config.y",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "z": {
+                  "$number": "config.z",
+                  "min": -10000,
+                  "max": 10000
+                }
+              }
+            }
+          }
+        }
+      },
+      "optionSources": {
+        "itemId": {
+          "path": "/api/catalog/items",
+          "itemsPath": "items",
+          "valuePath": "id",
+          "labelPath": "name"
+        },
+        "playerId": {
+          "path": "/api/players",
+          "itemsPath": "players",
+          "valuePath": "id",
+          "labelPath": "name"
+        }
+      }
+    },
+    {
+      "id": "peak.game.spawn-entity",
+      "version": 1,
+      "title": {
+        "default": "Spawn entity"
+      },
+      "description": {
+        "default": "Spawn a hostile or neutral entity. Requires host gameplay readiness and a game version that supports it."
+      },
+      "tag": "peak",
+      "icon": "terminal",
+      "category": "PEAK",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "entityId",
+          "label": {
+            "default": "Entity"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:peak.game.spawn-entity:entityId"
+        },
+        {
+          "key": "quantity",
+          "label": {
+            "default": "Quantity (blank uses setting)"
+          },
+          "kind": "number",
+          "value": "",
+          "min": 1,
+          "max": 5
+        },
+        {
+          "key": "positionMode",
+          "label": {
+            "default": "Position"
+          },
+          "kind": "select",
+          "value": "",
+          "options": [
+            {
+              "value": "",
+              "label": {
+                "default": "Use default"
+              }
+            },
+            {
+              "value": "near_player",
+              "label": {
+                "default": "Near player"
+              }
+            },
+            {
+              "value": "random_player",
+              "label": {
+                "default": "Random player"
+              }
+            },
+            {
+              "value": "world_position",
+              "label": {
+                "default": "World position"
+              }
+            }
+          ]
+        },
+        {
+          "key": "playerId",
+          "label": {
+            "default": "Player (near player only)"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:peak.game.spawn-entity:playerId"
+        },
+        {
+          "key": "x",
+          "label": {
+            "default": "X (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "y",
+          "label": {
+            "default": "Y (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "z",
+          "label": {
+            "default": "Z (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "lifetimeSeconds",
+          "label": {
+            "default": "Lifetime in seconds"
+          },
+          "kind": "number",
+          "value": "",
+          "min": 1,
+          "max": 300
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/spawn/entity",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "entityId": {
+            "$value": "config.entityId"
+          },
+          "quantity": {
+            "$number": "config.quantity",
+            "fallback": "settings.quantity",
+            "min": 1,
+            "max": 5,
+            "integer": true
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000,
+        "bodyVariants": {
+          "field": "positionMode",
+          "values": {
+            "near_player": {
+              "position": {
+                "mode": "near_player",
+                "playerId": {
+                  "$value": "config.playerId",
+                  "fallback": "settings.playerId"
+                }
+              }
+            },
+            "random_player": {
+              "position": {
+                "mode": "random_player"
+              }
+            },
+            "world_position": {
+              "position": {
+                "mode": "world_position",
+                "x": {
+                  "$number": "config.x",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "y": {
+                  "$number": "config.y",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "z": {
+                  "$number": "config.z",
+                  "min": -10000,
+                  "max": 10000
+                }
+              }
+            }
+          }
+        }
+      },
+      "optionSources": {
+        "entityId": {
+          "path": "/api/catalog/entities",
+          "itemsPath": "entities",
+          "valuePath": "id",
+          "labelPath": "name"
+        },
+        "playerId": {
+          "path": "/api/players",
+          "itemsPath": "players",
+          "valuePath": "id",
+          "labelPath": "name"
+        }
+      }
+    },
+    {
+      "id": "peak.game.spawn-hazard",
+      "version": 1,
+      "title": {
+        "default": "Spawn hazard"
+      },
+      "description": {
+        "default": "Spawn an environmental hazard. Requires host gameplay readiness and a game version that supports it."
+      },
+      "tag": "peak",
+      "icon": "terminal",
+      "category": "PEAK",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "hazardId",
+          "label": {
+            "default": "Hazard"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:peak.game.spawn-hazard:hazardId"
+        },
+        {
+          "key": "quantity",
+          "label": {
+            "default": "Quantity (blank uses setting)"
+          },
+          "kind": "number",
+          "value": "",
+          "min": 1,
+          "max": 5
+        },
+        {
+          "key": "positionMode",
+          "label": {
+            "default": "Position"
+          },
+          "kind": "select",
+          "value": "",
+          "options": [
+            {
+              "value": "",
+              "label": {
+                "default": "Use default"
+              }
+            },
+            {
+              "value": "near_player",
+              "label": {
+                "default": "Near player"
+              }
+            },
+            {
+              "value": "random_player",
+              "label": {
+                "default": "Random player"
+              }
+            },
+            {
+              "value": "world_position",
+              "label": {
+                "default": "World position"
+              }
+            }
+          ]
+        },
+        {
+          "key": "playerId",
+          "label": {
+            "default": "Player (near player only)"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:peak.game.spawn-hazard:playerId"
+        },
+        {
+          "key": "x",
+          "label": {
+            "default": "X (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "y",
+          "label": {
+            "default": "Y (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "z",
+          "label": {
+            "default": "Z (world position only)"
+          },
+          "kind": "number",
+          "value": "0",
+          "min": -10000,
+          "max": 10000
+        },
+        {
+          "key": "lifetimeSeconds",
+          "label": {
+            "default": "Lifetime in seconds"
+          },
+          "kind": "number",
+          "value": "",
+          "min": 1,
+          "max": 300
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/spawn/hazard",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "hazardId": {
+            "$value": "config.hazardId"
+          },
+          "quantity": {
+            "$number": "config.quantity",
+            "fallback": "settings.quantity",
+            "min": 1,
+            "max": 5,
+            "integer": true
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000,
+        "bodyVariants": {
+          "field": "positionMode",
+          "values": {
+            "near_player": {
+              "position": {
+                "mode": "near_player",
+                "playerId": {
+                  "$value": "config.playerId",
+                  "fallback": "settings.playerId"
+                }
+              }
+            },
+            "random_player": {
+              "position": {
+                "mode": "random_player"
+              }
+            },
+            "world_position": {
+              "position": {
+                "mode": "world_position",
+                "x": {
+                  "$number": "config.x",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "y": {
+                  "$number": "config.y",
+                  "min": -10000,
+                  "max": 10000
+                },
+                "z": {
+                  "$number": "config.z",
+                  "min": -10000,
+                  "max": 10000
+                }
+              }
+            }
+          }
+        }
+      },
+      "optionSources": {
+        "hazardId": {
+          "path": "/api/catalog/hazards",
+          "itemsPath": "hazards",
+          "valuePath": "id",
+          "labelPath": "name"
+        },
+        "playerId": {
+          "path": "/api/players",
+          "itemsPath": "players",
+          "valuePath": "id",
+          "labelPath": "name"
+        }
+      }
+    },
+    {
+      "id": "peak.game.despawn-entity",
+      "version": 1,
+      "title": {
+        "default": "Despawn API owned object"
+      },
+      "description": {
+        "default": "Despawn an object that PEAKapi created. Objects of the game are never touched."
+      },
+      "tag": "peak",
+      "icon": "terminal",
+      "category": "PEAK",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "instanceId",
+          "label": {
+            "default": "Spawned instance"
+          },
+          "kind": "select",
+          "value": "",
+          "optionsFrom": "plugin-action-options:peak.game.despawn-entity:instanceId"
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/entities/despawn",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "instanceId": {
+            "$value": "config.instanceId"
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000
+      },
+      "optionSources": {
+        "instanceId": {
+          "path": "/api/entities",
+          "itemsPath": "entities",
+          "valuePath": "id",
+          "labelPath": "catalogId"
+        }
+      }
+    },
+    {
+      "id": "peak.game.clear-entities",
+      "version": 1,
+      "title": {
+        "default": "Clear API owned objects"
+      },
+      "description": {
+        "default": "Remove the objects PEAKapi created. Objects of the game or of other mods are never touched."
+      },
+      "tag": "peak",
+      "icon": "terminal",
+      "category": "PEAK",
+      "requiredCapabilities": [
+        "http.request"
+      ],
+      "fields": [
+        {
+          "key": "kind",
+          "label": {
+            "default": "Kind"
+          },
+          "kind": "select",
+          "value": "all",
+          "options": [
+            {
+              "value": "all",
+              "label": {
+                "default": "All"
+              }
+            },
+            {
+              "value": "entity",
+              "label": {
+                "default": "Entities only"
+              }
+            },
+            {
+              "value": "hazard",
+              "label": {
+                "default": "Hazards only"
+              }
+            }
+          ]
+        }
+      ],
+      "http": {
+        "method": "POST",
+        "path": "/api/entities/clear",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "bodyJson": {
+          "kind": {
+            "$value": "config.kind"
+          }
+        },
+        "idempotency": {
+          "enabled": true,
+          "header": "Idempotency-Key"
+        },
+        "timeoutMs": 10000
+      },
+      "optionSources": {}
+    }
+  ]
+}

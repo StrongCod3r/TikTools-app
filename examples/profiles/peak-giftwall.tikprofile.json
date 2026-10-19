@@ -1,0 +1,367 @@
+{
+  "profileVersion": 1,
+  "id": "peak-giftwall",
+  "name": "PEAK giftwall",
+  "description": "Import, choose the live catalog IDs in each action, then enable each event. Requires peak.game. All rules start disabled so nothing reaches the game until you turn it on. The gift names are editable examples, not a promise about which gifts exist or what they cost.",
+  "params": {},
+  "templates": [
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-rose",
+        "title": "Rose \u2192 safe pickup",
+        "description": "Low impact. Pick the item in the action editor, then enable the event. Edit the gift filter if your stream uses a different name.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn item",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Rose",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Rose"
+            }
+          ],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-finger-heart",
+        "title": "Finger Heart \u2192 safe pickup",
+        "description": "Low impact. Uses the item catalog, so a modded item works as well as a vanilla one.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn item",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Finger Heart",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Finger Heart"
+            }
+          ],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-doughnut",
+        "title": "Doughnut \u2192 Scorpion",
+        "description": "Medium impact. Feature gated: the entity has to be spawnable in the running game. If the action editor shows no selectable entity, leave this rule disabled.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn entity",
+            "typeId": "peak.game.spawn-entity",
+            "enabled": true,
+            "config": {
+              "entityId": "scorpion",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Doughnut",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Doughnut"
+            }
+          ],
+          "cooldownMs": 30000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-perfume",
+        "title": "Perfume \u2192 Bee Swarm",
+        "description": "Medium impact. Feature gated: the entity has to be spawnable in the running game.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn entity",
+            "typeId": "peak.game.spawn-entity",
+            "enabled": true,
+            "config": {
+              "entityId": "bee_swarm",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Perfume",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Perfume"
+            }
+          ],
+          "cooldownMs": 30000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-galaxy",
+        "title": "Galaxy \u2192 Mushroom Zombie",
+        "description": "High impact. Feature gated: the entity has to be spawnable in the running game.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn entity",
+            "typeId": "peak.game.spawn-entity",
+            "enabled": true,
+            "config": {
+              "entityId": "mushroom_zombie",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Galaxy",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Galaxy"
+            }
+          ],
+          "cooldownMs": 30000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-large-gift",
+        "title": "Larger gift \u2192 Scoutmaster",
+        "description": "High impact. The current PEAKapi build cannot spawn a Scoutmaster: the game owns that character and only exposes a teleport, so this rule stays disabled until the API supports it.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn entity",
+            "typeId": "peak.game.spawn-entity",
+            "enabled": true,
+            "config": {
+              "entityId": "scoutmaster",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Large gift",
+          "enabled": false,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.diamondCount",
+              "operator": "gte",
+              "value": "1000"
+            }
+          ],
+          "cooldownMs": 60000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-follow",
+        "title": "Follow \u2192 safe pickup",
+        "description": "Opt in. A follow is worth a small pickup. The event is disabled by default.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn item",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Follow",
+          "enabled": false,
+          "trigger": "tiktok.follow",
+          "filters": [],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-share",
+        "title": "Share \u2192 safe pickup",
+        "description": "Opt in. A share is worth a small pickup. The event is disabled by default.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn item",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Share",
+          "enabled": false,
+          "trigger": "tiktok.share",
+          "filters": [],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-likes-milestone",
+        "title": "Likes milestone \u2192 one safe pickup",
+        "description": "Aggregated on purpose. The filter only matches once the room like count reaches the threshold, and the cooldown keeps it to one pickup per interval instead of one per like. Raise the threshold to taste.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn item",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Likes milestone",
+          "enabled": false,
+          "trigger": "tiktok.like",
+          "filters": [
+            {
+              "path": "event.data.count",
+              "operator": "gte",
+              "value": "100"
+            }
+          ],
+          "cooldownMs": 30000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-rule-comment-command",
+        "title": "Comment command \u2192 safe pickup",
+        "description": "Host controlled opt in. Only comments that start with the command word are allowed, and the action can only be one of the allowlisted PEAK actions.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Spawn item",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Comment command",
+          "enabled": false,
+          "trigger": "tiktok.chat",
+          "filters": [
+            {
+              "path": "event.data.comment",
+              "operator": "starts-with",
+              "value": "!peak"
+            }
+          ],
+          "cooldownMs": 5000,
+          "cooldownScope": "user",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    }
+  ]
+}
