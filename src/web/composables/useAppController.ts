@@ -176,7 +176,11 @@ export function useAppController() {
     saveViewState('tab', value);
   });
 
-  watch([live.events, live.autoScroll, activeTab], () => {
+  // Re-pin the stream after anything that reshapes it: new events, toggling
+  // auto-scroll, returning to the feed, and changing the filter or search
+  // (which swap the rendered window and would otherwise leave the scroll
+  // offset stale).
+  watch([live.events, live.autoScroll, activeTab, live.filter, live.searchQuery], () => {
     if (activeTab.value !== 'feed' || !live.autoScroll.value) return;
     live.scrollToBottom();
   });
