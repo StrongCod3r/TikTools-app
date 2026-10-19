@@ -226,7 +226,7 @@ mod tests {
             format!("\"path\" \"{}\"", library.display()),
         )
         .unwrap();
-        let found = discover_at(&spec(), &[steam.clone()], &[manager]).unwrap();
+        let found = discover_at(&spec(), std::slice::from_ref(&steam), &[manager]).unwrap();
         assert_eq!(found.len(), 4);
         assert!(found.iter().any(|c| c.label.contains("Stream")));
         assert!(folder_config(&steam.join("steamapps/common/REPO"), &spec()).is_some());

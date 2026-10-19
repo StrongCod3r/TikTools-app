@@ -823,7 +823,7 @@ async fn repo_bursts_reject_excess_work_without_queueing() {
             let (mut socket, _) = listener.accept().await.unwrap();
             tokio::spawn(async move {
                 let mut bytes = [0; 4096];
-                socket.read(&mut bytes).await.unwrap();
+                let _ = socket.read(&mut bytes).await.unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let _ = socket
                     .write_all(
