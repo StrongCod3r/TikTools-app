@@ -80,6 +80,13 @@
           "minimum": 1,
           "maximum": 5
         },
+        "lifetimeSeconds": {
+          "type": "integer",
+          "title": "Default lifetime in seconds",
+          "default": 60,
+          "minimum": 1,
+          "maximum": 300
+        },
         "playerId": {
           "type": "string",
           "title": "Default player ID",
@@ -421,7 +428,7 @@
             "default": "Lifetime in seconds"
           },
           "kind": "number",
-          "value": "",
+          "value": "60",
           "min": 1,
           "max": 300
         }
@@ -441,6 +448,13 @@
             "fallback": "settings.quantity",
             "min": 1,
             "max": 5,
+            "integer": true
+          },
+          "lifetimeSeconds": {
+            "$number": "config.lifetimeSeconds",
+            "fallback": "settings.lifetimeSeconds",
+            "min": 1,
+            "max": 300,
             "integer": true
           }
         },
@@ -618,7 +632,7 @@
             "default": "Lifetime in seconds"
           },
           "kind": "number",
-          "value": "",
+          "value": "60",
           "min": 1,
           "max": 300
         }
@@ -638,6 +652,13 @@
             "fallback": "settings.quantity",
             "min": 1,
             "max": 5,
+            "integer": true
+          },
+          "lifetimeSeconds": {
+            "$number": "config.lifetimeSeconds",
+            "fallback": "settings.lifetimeSeconds",
+            "min": 1,
+            "max": 300,
             "integer": true
           }
         },

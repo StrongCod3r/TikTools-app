@@ -20,6 +20,22 @@ plugin, no new WebView code and no bespoke UI.
 * PEAK with BepInEx 5 and the PEAKapi plugin installed and running.
 * PEAKapi reachable from this machine. The default is `http://127.0.0.1:17454`.
 
+## Installing
+
+The package is declarative: `plugin.json` is the whole integration, there is no
+executable to build.
+
+* Development: `bun run prepare:dev-plugins` stages this directory into
+  `.dev-plugins/peak.game`, and `bun run start` discovers it from there.
+* Release: copy this directory into the user plugin directory
+  (`~/.local/share/TikTools/plugins/peak.game` on Linux,
+  `%LOCALAPPDATA%/TikTools/plugins/peak.game` on Windows,
+  `~/Library/Application Support/TikTools/plugins/peak.game` on macOS) and
+  restart the host.
+
+After the install, enable `peak.game` and its `http.request` capability in the
+Plugins tab.
+
 ## Connecting
 
 1. Start PEAK once so that PEAKapi writes its configuration to
@@ -62,6 +78,15 @@ Every spawn action sends a validated `position`:
 
 The default comes from the `positionMode` setting and falls back to
 `random_player`.
+
+### Lifetime of spawned objects
+
+Entities and hazards are sent with a `lifetimeSeconds` between 1 and 300
+seconds, so a burst of gifts cannot fill the game's own caps for live
+entities and hazards. The action editor sets it per action; a blank field
+uses the **Default lifetime in seconds** setting (60 by default).
+
+Items have no lifetime: they stay in the world until the game removes them.
 
 ### Dynamic options
 

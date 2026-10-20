@@ -36,9 +36,11 @@ test('all PEAK actions opt into authenticated idempotent JSON requests', () => {
 test('every PEAK action sends a validated position', () => {
   for (const action of manifest.actionTypes) {
     if (!action.http.path.startsWith('/api/spawn/')) continue;
-    expect(action.http.bodyVariants).toBeDefined();
-    expect(action.http.bodyVariants.field).toBe('positionMode');
-    const values = action.http.bodyVariants.values;
+    const variants = action.http.bodyVariants;
+    expect(variants).toBeDefined();
+    if (!variants) continue;
+    expect(variants.field).toBe('positionMode');
+    const values = variants.values;
     expect(Object.keys(values)).toContain('near_player');
     expect(Object.keys(values)).toContain('random_player');
     expect(Object.keys(values)).toContain('world_position');
@@ -60,6 +62,25 @@ test('PEAK option sources read the endpoints PEAKapi actually serves', () => {
   expect(paths.has('/api/catalog/hazards')).toBe(true);
   expect(paths.has('/api/players')).toBe(true);
   expect(paths.has('/api/entities')).toBe(true);
+});
+
+test('spawned entities and hazards carry a bounded lifetime that survives a missing field', () => {
+  const lifetime = manifest.settings.schema.properties.lifetimeSeconds;
+  expect(lifetime.default).toBe(60);
+  expect(lifetime.minimum).toBe(1);
+  expect(lifetime.maximum).toBe(300);
+  for (const id of ['peak.game.spawn-entity', 'peak.game.spawn-hazard']) {
+    const action = manifest.actionTypes.find((a) => a.id === id);
+    const binding = action?.http.bodyJson?.lifetimeSeconds;
+    expect(binding).toBeDefined();
+    // A profile-imported action carries no field value, so the binding has
+    // to fall back to the setting instead of failing the request.
+    expect(binding?.$number).toBe('config.lifetimeSeconds');
+    expect(binding?.fallback).toBe('settings.lifetimeSeconds');
+    expect(binding?.min).toBe(1);
+    expect(binding?.max).toBe(300);
+    expect(binding?.integer).toBe(true);
+  }
 });
 
 test('PEAK discovers the BepInEx configuration of the game', () => {
