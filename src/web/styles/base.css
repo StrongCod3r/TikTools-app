@@ -75,7 +75,7 @@ textarea:disabled {
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-  outline: 2px solid var(--line-focus) !important;
+  outline: 2px solid var(--line-focus);
   outline-offset: 1px;
 }
 
@@ -84,6 +84,6 @@ textarea:focus-visible {
 input:focus,
 select:focus,
 textarea:focus {
-  outline: 2px solid var(--line-focus) !important;
+  outline: 2px solid var(--line-focus);
   outline-offset: 1px;
 }

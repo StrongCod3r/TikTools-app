@@ -20,8 +20,8 @@ import {
   mergePluginUis,
 } from '../../automation/plugins/declarative.ts';
 import type { HotkeyStatusData } from '../../shared/messages.ts';
-import type { ControlClient } from '../platform/control-client.ts';
-import { ControlCallError, errorMessage } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
+import { ControlCallError, errorMessage } from '@/shared/api/control-client.ts';
 import { setPluginTranslations } from '../i18n.ts';
 
 type AutomationKind = 'event' | 'action';

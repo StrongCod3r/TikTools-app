@@ -23,7 +23,7 @@
  * settings/options and execute its own actions.
  */
 
-import type { ControlClient } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
 
 export const BROKER_API_VERSION = 1;
 

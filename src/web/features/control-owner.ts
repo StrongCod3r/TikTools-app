@@ -1,4 +1,4 @@
-import type { ControlClient } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
 
 /** A feature owns its subscriptions independently of the shared client. */
 export function ownControlSubscriptions(control: ControlClient) {

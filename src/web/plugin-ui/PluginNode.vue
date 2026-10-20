@@ -14,8 +14,10 @@ import {
   type PluginUiNode,
 } from '../../plugin-ui/index.ts';
 import { readSettingsPath, writeSettingsPath } from '../../shared/settings-values.ts';
-import { withSchemaDefaults } from '../components/plugin-connection-logic.ts';
-import { PluginConnectionCard } from '../components/plugin-connection-card.vue';
+import type { PluginSettingValues } from '../../shared/messages.ts';
+import type { TokenSetupOptions } from '../../shared/token-import.ts';
+import PluginConnectionEditor from '@/features/configure-plugin-connection/ui/PluginConnectionEditor.vue';
+import { withSchemaDefaults } from '@/shared/ui/schema-form/lib/schema-fields.ts';
 import { SchemaForm } from '../components/ui/SchemaForm.vue';
 import { i18nText, t, type Locale } from '../i18n.ts';
 import { toSettingValues, type PluginUiContext } from './PluginUiContext.ts';
@@ -185,24 +187,23 @@ export const PluginNode = defineVueComponent<PluginNodeProps>(
       const context = props.context;
       const connection: PluginConnectionState | undefined = context.connection.state;
       return (
-        <PluginConnectionCard
-          locale={context.locale}
+        <PluginConnectionEditor
           pluginId={context.pluginId}
           pluginName={context.pluginName}
-          settingsState={context.settings.state}
+          settings={context.settings.state}
           connection={connection}
           actionOptions={context.options.values}
-          onGetSettings={() => context.settings.get()}
-          onSaveSettings={(_id, values) => context.settings.save(values)}
-          onGetActionOptions={(source) => context.options.get(source)}
-          onTestConnection={() => context.connection.test()}
-          onOpenMediaPicker={context.media.pick}
+          openMediaPicker={context.media.pick}
           supportsTokenImport={context.provisioning.supportsImport}
           supportsTokenDiscovery={context.provisioning.supportsDiscovery}
-          onImportToken={(_id, options) => context.provisioning.importToken?.(options)}
           supportsProvisioning={context.provisioning.supported}
           provisionState={context.provisioning.state}
-          onProvisionToken={(_id, username, password) =>
+          onLoadSettings={() => context.settings.get()}
+          onLoadOptions={(source: string) => context.options.get(source)}
+          onSave={(_id: string, values: PluginSettingValues) => context.settings.save(values)}
+          onTest={() => context.connection.test()}
+          onImportToken={(_id: string, options?: TokenSetupOptions) => context.provisioning.importToken?.(options)}
+          onProvision={(_id: string, username: string, password: string) =>
             context.provisioning.provision(username, password)
           }
         />

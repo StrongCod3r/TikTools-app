@@ -1,0 +1,114 @@
+<script setup lang="ts">
+import { computed, markRaw, type Component } from 'vue';
+import { useI18n } from 'vue-i18n';
+import { useRoute, useRouter } from 'vue-router';
+import { useLegacyController } from '@/composables/legacy-controller.ts';
+import LanguageSelect from '@/features/change-language/ui/LanguageSelect.vue';
+import RuntimeGlobalsEditor from '@/features/edit-runtime-globals/ui/RuntimeGlobalsEditor.vue';
+import type { Locale } from '@/shared/i18n/i18n.ts';
+import BaseFormGrid from '@/shared/ui/form/BaseFormGrid.vue';
+import BaseFormRow from '@/shared/ui/form/BaseFormRow.vue';
+import BaseGroupBox from '@/shared/ui/group-box/BaseGroupBox.vue';
+import IconGear from '@/shared/ui/icon/icons/IconGear.vue';
+import IconLink from '@/shared/ui/icon/icons/IconLink.vue';
+import BaseList from '@/shared/ui/list/BaseList.vue';
+
+type SettingsSection = 'general' | 'globals';
+
+const sections: ReadonlyArray<{ id: SettingsSection; icon: Component }> = [
+  { id: 'general', icon: markRaw(IconGear) },
+  { id: 'globals', icon: markRaw(IconLink) },
+];
+
+const { t } = useI18n();
+const route = useRoute();
+const router = useRouter();
+const controller = useLegacyController();
+
+const section = computed<SettingsSection>({
+  get: () => sections.find((entry) => entry.id === route.query.section)?.id ?? 'general',
+  set: (value) => void router.replace({ query: { ...route.query, section: value } }),
+});
+
+const locale = computed<Locale>({
+  get: () => controller.locale.value,
+  set: (value) => controller.setLocale(value),
+});
+</script>
+
+<template>
+  <div class="settings-page">
+    <BaseList
+      v-model:selected="section"
+      class="settings-page__sections"
+      :items="sections"
+      :item-key="(entry) => entry.id"
+      :aria-label="t('settings.title')"
+    >
+      <template #default="{ item }">
+        <component :is="item.icon" />
+        {{ t(`settings.sections.${item.id}`) }}
+      </template>
+    </BaseList>
+    <section
+      class="settings-page__content"
+      :aria-label="t(`settings.sections.${section}`)"
+    >
+      <template v-if="section === 'general'">
+        <BaseGroupBox :title="t('settings.language.group')">
+          <BaseFormGrid>
+            <BaseFormRow
+              for="settings-language"
+              :label="t('settings.language.label')"
+              :hint="t('settings.language.hint')"
+            >
+              <LanguageSelect
+                id="settings-language"
+                v-model="locale"
+                class="settings-page__control"
+              />
+            </BaseFormRow>
+          </BaseFormGrid>
+        </BaseGroupBox>
+      </template>
+      <BaseGroupBox
+        v-else
+        :title="t('globals.title')"
+        :description="t('globals.hint', { token: '{{ globals.key }}' })"
+      >
+        <RuntimeGlobalsEditor />
+      </BaseGroupBox>
+    </section>
+  </div>
+</template>
+
+<style scoped>
+.settings-page {
+  display: flex;
+  flex: 1;
+  gap: var(--space-4);
+  min-width: 0;
+  min-height: 0;
+  padding: var(--space-4);
+}
+
+.settings-page__sections {
+  flex: none;
+  width: 220px;
+  border: var(--border-width) solid var(--color-border-subtle);
+}
+
+.settings-page__content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-5);
+  min-width: 0;
+  max-width: 880px;
+  overflow-y: auto;
+}
+
+.settings-page__control {
+  max-width: 320px;
+}
+</style>

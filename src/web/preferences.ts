@@ -1,8 +1,8 @@
+import { detectLocale, storeLocale } from '@/shared/i18n/locale-preference.ts';
 import type { Locale } from './i18n.ts';
 
 export type Theme = 'dark' | 'light';
 
-const LOCALE_KEY = 'tiktok-live-locale';
 const THEME_KEY = 'tiktok-live-theme';
 const USERNAME_KEY = 'tiktok-live-username';
 const RECENT_KEY = 'tiktok-live-recents';
@@ -24,10 +24,7 @@ function writePreference(key: string, value: string): void {
 }
 
 export function getInitialLocale(): Locale {
-  const stored = readPreference(LOCALE_KEY);
-  if (stored === 'en' || stored === 'es') return stored;
-
-  return typeof navigator !== 'undefined' && navigator.language.toLowerCase().startsWith('es') ? 'es' : 'en';
+  return detectLocale();
 }
 
 export function getInitialTheme(): Theme {
@@ -40,7 +37,7 @@ export function getInitialTheme(): Theme {
 }
 
 export function saveLocale(locale: Locale): void {
-  writePreference(LOCALE_KEY, locale);
+  storeLocale(locale);
 }
 
 export function saveTheme(theme: Theme): void {

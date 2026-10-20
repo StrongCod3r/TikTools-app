@@ -1,0 +1,110 @@
+import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ref } from 'vue';
+import type { AnalyticsSummaryData, AnalyticsTotals } from '../../../../shared/messages.ts';
+import { legacyControllerKey, type LegacyController } from '@/composables/legacy-controller.ts';
+import { systemDay } from '@/entities/analytics/lib/analytics-range.ts';
+import type { RpcParams } from '@/shared/api/control-client.ts';
+import { createFakeControlClient, storePlugins } from '@/shared/lib/testing/fake-control-client.ts';
+import { mountWithPlugins } from '@/shared/lib/testing/mount.ts';
+import AnalyticsPage from './AnalyticsPage.vue';
+
+enableAutoUnmount(afterEach);
+
+beforeEach(() => {
+  localStorage.clear();
+});
+
+const totals: AnalyticsTotals = {
+  chats: 1520,
+  giftEvents: 12,
+  gifts: 40,
+  diamonds: 900,
+  likeEvents: 30,
+  likes: 6400,
+  joins: 80,
+  follows: 9,
+  shares: 4,
+  peakViewers: 210,
+};
+
+function summaryFor(params: RpcParams | undefined, withData = true): AnalyticsSummaryData {
+  const startDay = Number(params?.startDay);
+  const endDay = Number(params?.endDay);
+  return {
+    creatorUniqueId: 'luna',
+    startDay,
+    endDay,
+    totals: withData ? totals : { ...totals, ...Object.fromEntries(Object.keys(totals).map((key) => [key, 0])) },
+    days: withData ? [{ day: endDay, ...totals }] : [],
+    topViewers: withData
+      ? [
+          { uniqueId: 'pixelpanda', chats: 40, gifts: 2, diamonds: 50, likes: 0, shares: 0, interactions: 42, lastSeen: 0 },
+          { uniqueId: 'mango', chats: 12, gifts: 9, diamonds: 400, likes: 0, shares: 0, interactions: 21, lastSeen: 0 },
+        ]
+      : [],
+    sessions: withData ? 3 : 0,
+    hours: [],
+  };
+}
+
+async function mountPage(withData = true) {
+  const { client, calls } = createFakeControlClient((_, params) => ({ summary: summaryFor(params, withData) }));
+  const controller = { activeCreator: ref('luna') } as unknown as LegacyController;
+  const wrapper = mountWithPlugins(AnalyticsPage, {
+    attachTo: document.body,
+    global: { plugins: storePlugins(client), provide: { [legacyControllerKey as symbol]: controller } },
+  });
+  await flushPromises();
+  return { wrapper, calls };
+}
+
+describe('AnalyticsPage', () => {
+  it('loads the last seven days for the active creator', async () => {
+    const { calls } = await mountPage();
+    const today = systemDay(Date.now());
+    expect(calls[0]?.params).toMatchObject({ creatorUniqueId: 'luna', startDay: today - 6, endDay: today });
+  });
+
+  it('shows metric totals, session facts and contributors', async () => {
+    const { wrapper } = await mountPage();
+    const tiles = wrapper.findAll('[role="radio"][aria-checked]').filter((tile) => tile.classes('metric-strip__tile'));
+    expect(tiles.map((tile) => tile.text())).toEqual([
+      'Chats1,520',
+      'Gifts40',
+      'Likes6,400',
+      'Diamonds900',
+      'Peak viewers210',
+    ]);
+    expect(wrapper.text()).toContain('Sessions3');
+    expect(wrapper.findAll('tbody tr')).toHaveLength(2);
+  });
+
+  it('switches the charted metric from the strip', async () => {
+    const { wrapper } = await mountPage();
+    expect(wrapper.get('svg[role="img"]').attributes('aria-label')).toMatch(/^Chats:/);
+    await wrapper.findAll('.metric-strip__tile')[3]!.trigger('click');
+    expect(wrapper.get('svg[role="img"]').attributes('aria-label')).toMatch(/^Diamonds:/);
+  });
+
+  it('requests a new span when the range changes', async () => {
+    const { wrapper, calls } = await mountPage();
+    const today = systemDay(Date.now());
+    await wrapper.findAll('.base-segmented__option')[0]!.trigger('click');
+    await flushPromises();
+    expect(calls.at(-1)?.params).toMatchObject({ startDay: today, endDay: today });
+    expect(wrapper.text()).toContain('Today timeline');
+  });
+
+  it('filters contributors from the panel search', async () => {
+    const { wrapper } = await mountPage();
+    await wrapper.get('input[type="search"]').setValue('man');
+    expect(wrapper.findAll('tbody tr').map((row) => row.text())).toEqual([expect.stringContaining('@mango')]);
+  });
+
+  it('explains when there is no data', async () => {
+    const { wrapper } = await mountPage(false);
+    expect(wrapper.text()).toContain('No analytics yet');
+    expect(wrapper.find('.metric-strip').exists()).toBe(false);
+  });
+});

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
 import type { HostMessage } from '../../shared/messages.ts';
-import type { ControlClient, PushHandler, TopicHandler } from '../platform/control-client.ts';
+import type { ControlClient, PushHandler, TopicHandler } from '@/shared/api/control-client.ts';
 import { useAutomation } from './automation.ts';
 
 function fakeControl(): {

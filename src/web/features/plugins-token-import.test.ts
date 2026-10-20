@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
 import { usePlugins } from './plugins.ts';
-import type { ControlClient, RpcParams } from '../platform/control-client.ts';
+import type { ControlClient, RpcParams } from '@/shared/api/control-client.ts';
 
 function harness(result: Promise<unknown>) {
   const calls: Array<{method: string; params?: RpcParams}> = [];

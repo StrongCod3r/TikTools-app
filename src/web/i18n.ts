@@ -1,6 +1,7 @@
 import type { TranslationCatalog } from '../automation/behavior/types.ts';
 import { BEHAVIOR_UI_TRANSLATIONS } from './behavior-i18n.ts';
 import { english, type TranslationKey } from './i18n-en.ts';
+import { mergePluginMessages } from '@/shared/i18n/i18n.ts';
 import { spanish } from './i18n-es.ts';
 
 export const supportedLocales = ['en', 'es'] as const;
@@ -20,6 +21,7 @@ let pluginDictionary: TranslationCatalog = {};
  */
 export function setPluginTranslations(catalog: TranslationCatalog | undefined): void {
   pluginDictionary = catalog ?? {};
+  mergePluginMessages(pluginDictionary);
 }
 
 /** Resolve host or plugin metadata using `{ default, i18key }`. */

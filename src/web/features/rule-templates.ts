@@ -7,8 +7,8 @@
 
 import { ref } from 'vue';
 
-import type { ControlClient } from '../platform/control-client.ts';
-import { errorMessage } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
+import { errorMessage } from '@/shared/api/control-client.ts';
 import {
   BUILTIN_RULE_TEMPLATES,
   MAX_RULE_TEMPLATE_BYTES,

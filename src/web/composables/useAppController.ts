@@ -3,16 +3,15 @@ import { onMounted, onUnmounted, ref, watch } from 'vue';
 
 import type { PluginPageDescriptor } from '../../automation/behavior/types.ts';
 import { parsePluginNavId } from '../../automation/plugins/declarative.ts';
-import { useAnalytics } from '../features/analytics.ts';
 import { useAutomation } from '../features/automation.ts';
 import { useConnection } from '../features/connection.ts';
 import { useCreators } from '../features/creators.ts';
-import { useDiscovery } from '../features/discovery.ts';
-import { useLive } from '../features/live.ts';
+import { useDiscoveryStore } from '@/entities/live-room/model/discovery-store.ts';
+import { useLiveFeedStore } from '@/entities/live-event/model/live-feed-store.ts';
 import { useMedia } from '../features/media.ts';
 import { usePlugins } from '../features/plugins.ts';
-import { usePoints } from '../features/points.ts';
-import { useProcessors } from '../features/processors.ts';
+import { usePointsStore } from '@/entities/points/model/points-store.ts';
+import { useProcessorsStore } from '@/entities/processor/model/processors-store.ts';
 import { useWidgets } from '../features/widgets.ts';
 import { useRuleTemplates } from '../features/rule-templates.ts';
 import {
@@ -21,9 +20,12 @@ import {
   useRuleProfiles,
   type RuleProfile,
 } from '../features/rule-profiles.ts';
-import { useGlobals } from '../features/globals.ts';
+import { storeToRefs } from 'pinia';
+import { useGlobalsStore } from '@/entities/runtime-global/model/globals-store.ts';
 import { loadViewState, saveViewState } from '../features/view-state.ts';
-import { createControlClient, errorMessage } from '../platform/control-client.ts';
+import { errorMessage } from '@/shared/api/control-client.ts';
+import { useControlClient } from '@/shared/api/use-control-client.ts';
+import { activateLocale } from '@/shared/i18n/i18n.ts';
 import type { AppliedRuleTemplate } from '../views/behavior/rule-templates.ts';
 import {
   controlBackend,
@@ -42,7 +44,6 @@ import type { AppTab, LiveChannel } from '../types.ts';
 import { createInitialPluginInstallState, pluginPickerOptions } from './plugin-install.ts';
 
 export type { PluginInstallState } from './plugin-install.ts';
-export { defaultPointsConfig } from '../features/points.ts';
 
 export const initialPluginInstallState = createInitialPluginInstallState();
 
@@ -57,7 +58,7 @@ const initialTheme = getInitialTheme();
  * App.vue consumes.
  */
 export function useAppController() {
-  const control = createControlClient();
+  const control = useControlClient();
   // Restored from the window-state blob; a stored plugin
   // page tab self-heals via the behavior watcher below.
   const activeTab = ref<AppTab>((loadViewState().tab as AppTab) ?? 'feed');
@@ -67,7 +68,6 @@ export function useAppController() {
   const translate = (key: string): string => t(locale.value, key);
 
   applyTheme(initialTheme);
-  document.documentElement.lang = initialLocale;
 
   const connection = useConnection(control, {
     goFeed: () => {
@@ -76,17 +76,23 @@ export function useAppController() {
     resetFeed: () => live.resetEvents(),
     translate,
   });
-  const points = usePoints(control);
+  const pointsStore = usePointsStore();
+  const points = {
+    ...storeToRefs(pointsStore),
+    refresh: pointsStore.refresh,
+    setPresentationActive: pointsStore.setPresentationActive,
+    dispose: pointsStore.dispose,
+  };
   const creators = useCreators(control, {
     noteCreatorSeen: (clean, persist) => connection.noteCreatorSeen(clean, persist),
     mergeRecentNames: (names) => connection.mergeRecentNames(names),
   });
-  const analytics = useAnalytics(control, () => connection.activeCreator.value);
   const automation = useAutomation(control);
   const widgets = useWidgets(control);
   const ruleTemplates = useRuleTemplates(control);
   const ruleProfiles = useRuleProfiles(control);
-  const globals = useGlobals(control);
+  const globalsStore = useGlobalsStore();
+  const globals = storeToRefs(globalsStore);
   const plugins = usePlugins(control, {
     translate,
     refreshBehavior: () => automation.refresh(),
@@ -110,25 +116,24 @@ export function useAppController() {
       );
     },
   });
-  const processors = useProcessors(control);
+  const processors = useProcessorsStore();
   const media = useMedia(control);
-  // Speech is plugin-owned now: the TTS plugin backend subscribes to chat
-  // events and speaks them. The main frontend renders chat only.
-  const live = useLive(control, {
-    systemAuthor: () => translate('system'),
-    discontinuityText: () => translate('feedResumed'),
-  });
-  const discovery = useDiscovery(control, {
-    translate,
-    currentCreator: () => connection.activeCreator.value,
-  });
+  const liveStore = useLiveFeedStore();
+  const live = {
+    ...storeToRefs(liveStore),
+    resetEvents: liveStore.resetEvents,
+    setPresentationActive: liveStore.setPresentationActive,
+    scrollToBottom: liveStore.scrollToBottom,
+    handleToggleAutoScroll: liveStore.handleToggleAutoScroll,
+    setFilter: liveStore.setFilter,
+    setSearchQuery: liveStore.setSearchQuery,
+    setStreamContainerRef: liveStore.setStreamContainerRef,
+    refresh: liveStore.refresh,
+    diagnostics: liveStore.diagnostics,
+    dispose: liveStore.dispose,
+  };
+  const discovery = useDiscoveryStore();
 
-  /**
-   * Connects to a room chosen in the LIVE explorer through the existing
-   * `live.connect`. A stale listing is refreshed first instead of
-   * connecting to a room that may have ended, and the choice is never
-   * applied automatically.
-   */
   const handleConnectRoom = (room: LiveChannel): void => {
     if (discovery.isStale()) {
       discovery.markStale();
@@ -152,7 +157,7 @@ export function useAppController() {
     resyncAgain = false;
     void Promise.allSettled([
       connection.refreshStatus(), points.refresh(), creators.refresh(),
-      automation.refresh(), live.refresh(), globals.loadGlobals(), ruleProfiles.loadProfiles(),
+      automation.refresh(), live.refresh(), globalsStore.load(), ruleProfiles.loadProfiles(),
     ]).finally(() => {
       resyncInFlight = false;
       if (resyncAgain) resync();
@@ -161,7 +166,7 @@ export function useAppController() {
   control.onGap(resync);
 
   watch(locale, (value) => {
-    document.documentElement.lang = value;
+    void activateLocale(value);
     saveLocale(value);
   });
 
@@ -243,7 +248,7 @@ export function useAppController() {
     if (activeTab.value !== 'behavior') void automation.refresh();
     void live.refresh();
     void processors.refresh();
-    void globals.loadGlobals();
+    void globalsStore.load();
     void ruleProfiles.loadProfiles();
 
     // Keep the saved username in the connect form, but wait for an explicit
@@ -278,7 +283,7 @@ export function useAppController() {
     const images = Array.from(document.images);
     const intervals = [...frameIntervals].sort((a, b) => a - b);
     const percentile = (q: number): number | null => intervals.length > 0 ? intervals[Math.min(intervals.length - 1, Math.floor(intervals.length * q))] ?? null : null;
-    return { renderedFeedRows: document.querySelectorAll('.tiktok-chat-row').length, frameCallbacks: measuredFrames, frameIntervalSamples: intervals.length,
+    return { renderedFeedRows: document.querySelectorAll('.event-row').length, frameCallbacks: measuredFrames, frameIntervalSamples: intervals.length,
       frameIntervalP95Ms: percentile(.95), frameIntervalP99Ms: percentile(.99),
       pageVisibility: document.visibilityState, domNodes: document.querySelectorAll('*').length,
       imageCount: images.length, loadedImages: images.filter((image) => image.complete && image.naturalWidth > 0).length,
@@ -546,8 +551,6 @@ export function useAppController() {
     hotkeyStatus: automation.hotkeyStatus,
     lastHotkeyEvent: automation.lastHotkeyEvent,
     pluginSettings: plugins.pluginSettings,
-    processors: processors.processors,
-    processorTest: processors.processorTest,
     actionOptions: plugins.actionOptions,
     actionOptionErrors: plugins.actionOptionErrors,
     pluginConnections: plugins.pluginConnections,
@@ -574,26 +577,10 @@ export function useAppController() {
     handleDisconnect: connection.handleDisconnect,
     handleReconnect: connection.handleReconnect,
     handleSelectRecent: connection.handleSelectRecent,
-    discoveryOpen: discovery.open,
-    discoveryKeyword: discovery.keyword,
-    discoveryRooms: discovery.rooms,
-    discoveryStatus: discovery.status,
-    discoveryError: discovery.error,
-    discoveryRandom: discovery.randomCandidate,
-    discoveryHasMore: discovery.hasMore,
-    toggleDiscovery: discovery.toggle,
-    setDiscoveryKeyword: discovery.setKeyword,
-    refreshDiscovery: discovery.refresh,
-    loadMoreDiscovery: discovery.loadMore,
-    pickRandomRoom: discovery.pickRandom,
-    clearRandomRoom: discovery.clearRandom,
     handleConnectRoom,
     handleToggleAutoScroll: live.handleToggleAutoScroll,
     handleThemeToggle,
     handleLocaleToggle,
-    handleUpdatePointsConfig: points.handleUpdatePointsConfig,
-    handleResetPoints: points.handleResetPoints,
-    handleAdjustPoints: points.handleAdjustPoints,
     handleSaveAction: handleSaveBehaviorAction,
     handleApplyRuleTemplate: automation.handleApplyRuleTemplate,
     ruleTemplateCustom: ruleTemplates.custom,
@@ -614,8 +601,8 @@ export function useAppController() {
     globals: globals.globals,
     globalsLoading: globals.loading,
     globalsError: globals.error,
-    loadGlobals: globals.loadGlobals,
-    saveGlobals: globals.saveGlobals,
+    loadGlobals: globalsStore.load,
+    saveGlobals: globalsStore.save,
     handleDeleteAction: automation.handleDeleteAction,
     handleSetActionEnabled: automation.handleSetActionEnabled,
     handleTestAction: automation.handleTestAction,
@@ -631,8 +618,6 @@ export function useAppController() {
     handleSetPluginEnabled: plugins.handleSetPluginEnabled,
     handleGetPluginSettings: plugins.handleGetPluginSettings,
     handleSavePluginSettings: plugins.handleSavePluginSettings,
-    handleGetProcessorStatus: processors.handleGetProcessorStatus,
-    handleTestProcessor: processors.handleTestProcessor,
     handleGetActionOptions: plugins.handleGetActionOptions,
     handleTestPluginConnection: plugins.handleTestPluginConnection,
     pluginProvision: plugins.pluginProvision,
@@ -640,8 +625,6 @@ export function useAppController() {
     handleImportPluginToken: plugins.handleImportPluginToken,
     executePluginAction: plugins.executeAction,
     actionOptionSelected: plugins.actionOptionSelected,
-    analyticsSummary: analytics.analyticsSummary,
-    handleGetAnalyticsRange: analytics.handleGetAnalyticsRange,
     pluginInstallState: plugins.pluginInstallState,
     handleInstallPlugin: plugins.handleInstallPlugin,
     handleConfirmPluginReplace: plugins.handleConfirmPluginReplace,

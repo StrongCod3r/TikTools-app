@@ -13,8 +13,8 @@
 import { ref } from 'vue';
 
 import type { JsonObject } from '../../automation/types.ts';
-import type { ControlClient } from '../platform/control-client.ts';
-import { ControlCallError, errorMessage } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
+import { ControlCallError, errorMessage } from '@/shared/api/control-client.ts';
 import {
   applyRuleTemplate,
   parseRuleTemplate,

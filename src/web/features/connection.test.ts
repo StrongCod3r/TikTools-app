@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { ControlClient, RpcParams } from '../platform/control-client.ts';
-import { ControlCallError } from '../platform/control-client.ts';
+import type { ControlClient, RpcParams } from '@/shared/api/control-client.ts';
+import { ControlCallError } from '@/shared/api/control-client.ts';
 import { useConnection } from './connection.ts';
 
 function stubControl(overrides?: Partial<ControlClient>): ControlClient & {

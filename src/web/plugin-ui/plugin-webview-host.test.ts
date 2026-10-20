@@ -1,4 +1,4 @@
-import { createControlClient } from '../platform/control-client.ts';
+import { createControlClient } from '@/shared/api/control-client.ts';
 import { expect, test } from 'bun:test';
 
 import {

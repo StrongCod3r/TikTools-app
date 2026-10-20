@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 
-import type { ControlClient } from '../platform/control-client.ts';
-import { ControlCallError } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
+import { ControlCallError } from '@/shared/api/control-client.ts';
 import {
   buildRedactedObsUrl,
   buildWidgetPreviewUrl,

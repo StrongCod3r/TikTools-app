@@ -15,7 +15,7 @@ import {
 } from './icons/index.ts';
 import { defineVueComponent } from '../vue/component.ts';
 import { t, type Locale } from '../i18n.ts';
-import { errorMessage } from '../platform/control-client.ts';
+import { errorMessage } from '@/shared/api/control-client.ts';
 import WidgetHost from '../../widgets/sdk/WidgetHost.vue';
 import { widgetTemplates, type WidgetKind } from '../../widgets/sdk/templates.ts';
 import { defaultWidgetLayers, updateWidgetLayer } from '../../widgets/sdk/layers.ts';

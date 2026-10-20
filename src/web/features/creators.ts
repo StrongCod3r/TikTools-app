@@ -1,7 +1,7 @@
 import { ref } from 'vue';
 
-import type { ControlClient } from '../platform/control-client.ts';
-import { errorMessage } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
+import { errorMessage } from '@/shared/api/control-client.ts';
 import type { CreatorRecord } from '../types.ts';
 
 export interface CreatorsCallbacks {

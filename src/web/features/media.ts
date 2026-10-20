@@ -3,8 +3,8 @@ import type {
   MediaSelection,
   MediaSelectionHandler,
 } from '../../shared/messages.ts';
-import type { ControlClient } from '../platform/control-client.ts';
-import { ControlCallError, errorMessage } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
+import { ControlCallError, errorMessage } from '@/shared/api/control-client.ts';
 
 export interface MediaPickResult {
   selection: MediaSelection | null;

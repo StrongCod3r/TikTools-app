@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { ControlClient, PushHandler, TopicHandler } from '../platform/control-client.ts';
+import type { ControlClient, PushHandler, TopicHandler } from '@/shared/api/control-client.ts';
 import { usePlugins } from './plugins.ts';
 import { useAutomation } from './automation.ts';
 

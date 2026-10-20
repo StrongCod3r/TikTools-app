@@ -13,8 +13,8 @@ import {
   createInitialPluginInstallState,
   type PluginInstallState,
 } from '../composables/plugin-install.ts';
-import type { ControlClient } from '../platform/control-client.ts';
-import { errorMessage } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
+import { errorMessage } from '@/shared/api/control-client.ts';
 import type { PluginSettingsState } from '../types.ts';
 
 export interface PluginSettingsResult {

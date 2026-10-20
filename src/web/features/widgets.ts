@@ -13,8 +13,8 @@ import { ref } from 'vue';
 import type { WidgetStyle } from '../../widgets/sdk/template.ts';
 import { normalizeDesign, parseDesign } from '../../widgets/sdk/design.ts';
 
-import type { ControlClient } from '../platform/control-client.ts';
-import { errorMessage } from '../platform/control-client.ts';
+import type { ControlClient } from '@/shared/api/control-client.ts';
+import { errorMessage } from '@/shared/api/control-client.ts';
 
 export const GATEWAY_PLUGIN_ID = 'tiktools.event-gateway';
 export const GATEWAY_DEFAULT_HOST = '127.0.0.1';
