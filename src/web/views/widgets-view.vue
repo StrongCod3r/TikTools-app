@@ -11,6 +11,7 @@ import { Button } from '../components/ui/Button.vue';
 import { Card } from '../components/ui/Card.vue';
 import WidgetHost from '../../widgets/sdk/WidgetHost.vue';
 import WidgetStyleEditor from '../components/WidgetStyleEditor.vue';
+import UniversalWidgetPanel from '../../widgets/sdk/UniversalWidgetPanel.vue';
 import type { WidgetStyle } from '../../widgets/sdk/template.ts';
 import { widgetTemplates } from '../../widgets/sdk/templates.ts';
 import { loadViewState, saveViewState } from '../features/view-state.ts';
@@ -384,6 +385,7 @@ export const WidgetsView = defineVueComponent<WidgetsViewProps>(
               previewNonce.value += 1;
             },
           })}
+          <UniversalWidgetPanel locale={locale}/>
         </Page>
       );
     };
