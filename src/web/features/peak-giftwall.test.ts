@@ -8,16 +8,62 @@ test('PEAK giftwall imports safely and exposes editable live catalog actions', (
   expect(parsed.ok).toBe(true);
   if (!parsed.ok) return;
   const rules = instantiateProfile(parsed.profile);
-  expect(rules).toHaveLength(10);
+  expect(rules).toHaveLength(12);
   for (const entry of parsed.profile.templates) {
-    expect(entry.template.event.enabled).toBe(false);
+    expect(entry.template.event.enabled).toBe(true);
     expect(entry.template.event.cooldownMs).toBeGreaterThanOrEqual(5000);
     for (const action of entry.template.actions) {
       const descriptor = manifest.actionTypes.find((a) => a.id === action.typeId);
       expect(descriptor).toBeDefined();
       expect(Number(action.config.quantity)).toBeLessThanOrEqual(5);
+      expect(Number(action.config.quantity)).toBeGreaterThanOrEqual(1);
     }
   }
+});
+
+test('every PEAK giftwall rule names catalog content, not a blank id', () => {
+  const parsed = parseRuleProfile(profile);
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) return;
+  for (const entry of parsed.profile.templates) {
+    for (const action of entry.template.actions) {
+      const config = action.config;
+      const id =
+        typeof config.itemId === 'string'
+          ? config.itemId
+          : typeof config.entityId === 'string'
+            ? config.entityId
+            : typeof config.hazardId === 'string'
+              ? config.hazardId
+              : '';
+      // A blank id would be a rule that can only fail: the catalog ids come
+      // from the running game and are filled in on purpose.
+      expect(id.length).toBeGreaterThan(0);
+      expect(action.config.positionMode).toBe('random_player');
+    }
+  }
+});
+
+test('entities and hazards of the giftwall carry a bounded lifetime', () => {
+  const parsed = parseRuleProfile(profile);
+  expect(parsed.ok).toBe(true);
+  if (!parsed.ok) return;
+  let entities = 0;
+  let hazards = 0;
+  for (const entry of parsed.profile.templates) {
+    for (const action of entry.template.actions) {
+      if (action.typeId === 'peak.game.spawn-entity') entities += 1;
+      if (action.typeId === 'peak.game.spawn-hazard') hazards += 1;
+      if (action.typeId !== 'peak.game.spawn-entity' && action.typeId !== 'peak.game.spawn-hazard') {
+        continue;
+      }
+      const lifetime = Number(action.config.lifetimeSeconds);
+      expect(lifetime).toBeGreaterThanOrEqual(1);
+      expect(lifetime).toBeLessThanOrEqual(300);
+    }
+  }
+  expect(entities).toBeGreaterThan(0);
+  expect(hazards).toBeGreaterThan(0);
 });
 
 test('all PEAK actions opt into authenticated idempotent JSON requests', () => {

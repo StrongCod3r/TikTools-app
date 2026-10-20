@@ -106,12 +106,35 @@ selecting it will not work.
 
 ## Gift wall profile
 
-`examples/profiles/peak-giftwall.tikprofile.json` contains ten example rules.
-Every rule is **disabled** when the profile is imported. Import it, pick the
-catalog entries in the action editor, then enable the rules you want.
+`examples/profiles/peak-giftwall.tikprofile.json` is a ready-made rule pack:
+twelve rules that turn gifts, follows and shares into things in the level.
 
-The gift names in the profile are editable examples. They are not a statement
-about which gifts exist in your region or what they cost.
+| Gift | Effect |
+|---|---|
+| Rose | 1 hot dog |
+| Finger Heart | 1 scout cookies |
+| TikTok | 2 trail mix |
+| Doughnut | 2 marshmallows |
+| Perfume | 2 energy drinks |
+| Heart Me | 1 first aid kit |
+| Hand Hearts | 3 granola bars |
+| Galaxy | 1 bee swarm (60 s) |
+| Large gift | 2 scorpions (60 s) |
+| Rocket | 1 tumbleweed (30 s) |
+| Follow | 1 sports drink |
+| Share | 1 lantern |
+
+Every item, entity and hazard id is taken from the catalog of the running
+game, and every rule is **enabled** when the profile is imported. The gift
+names are editable examples: they are not a statement about which gifts exist
+in your region or what they cost.
+
+```bash
+tiktools template profile-import examples/profiles/peak-giftwall.tikprofile.json
+```
+
+The rules need a level with the local peer as the host. PEAKapi refuses the
+mutations otherwise with `409 GAME_NOT_READY` or `409 HOST_REQUIRED`.
 
 ## Privacy
 
