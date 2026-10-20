@@ -7,8 +7,9 @@ const props = withDefaults(
     min?: number;
     max?: number;
     step?: number;
+    sized?: 'start' | 'end';
   }>(),
-  { orientation: 'horizontal', min: 80, max: Infinity, step: 16 },
+  { orientation: 'horizontal', min: 80, max: Infinity, step: 16, sized: 'start' },
 );
 
 const size = defineModel<number>('size', { default: 240 });
@@ -16,6 +17,7 @@ const container = useTemplateRef('container');
 const dragging = ref(false);
 
 const horizontal = computed(() => props.orientation === 'horizontal');
+const direction = computed(() => (props.sized === 'end' ? -1 : 1));
 
 function available(): number {
   const rect = container.value?.getBoundingClientRect();
@@ -36,7 +38,7 @@ function onPointerDown(event: PointerEvent): void {
   const initial = size.value;
   const onMove = (move: PointerEvent): void => {
     const position = horizontal.value ? move.clientX : move.clientY;
-    size.value = clampSize(initial + position - origin);
+    size.value = clampSize(initial + (position - origin) * direction.value);
   };
   const onUp = (): void => {
     dragging.value = false;
@@ -50,7 +52,8 @@ function onPointerDown(event: PointerEvent): void {
 }
 
 function onKeydown(event: KeyboardEvent): void {
-  const [grow, shrink] = horizontal.value ? ['ArrowRight', 'ArrowLeft'] : ['ArrowDown', 'ArrowUp'];
+  const [forward, backward] = horizontal.value ? ['ArrowRight', 'ArrowLeft'] : ['ArrowDown', 'ArrowUp'];
+  const [grow, shrink] = direction.value > 0 ? [forward, backward] : [backward, forward];
   const targets: Record<string, () => number> = {
     [grow]: () => size.value + props.step,
     [shrink]: () => size.value - props.step,
@@ -72,7 +75,8 @@ function onKeydown(event: KeyboardEvent): void {
   >
     <div
       class="base-splitter__pane"
-      :style="{ flexBasis: `${size}px` }"
+      :class="{ 'base-splitter__pane--fill': sized === 'end' }"
+      :style="sized === 'start' ? { flexBasis: `${size}px` } : undefined"
     >
       <slot name="start" />
     </div>
@@ -87,7 +91,11 @@ function onKeydown(event: KeyboardEvent): void {
       @pointerdown="onPointerDown"
       @keydown="onKeydown"
     />
-    <div class="base-splitter__pane base-splitter__pane--fill">
+    <div
+      class="base-splitter__pane"
+      :class="{ 'base-splitter__pane--fill': sized === 'start' }"
+      :style="sized === 'end' ? { flexBasis: `${size}px` } : undefined"
+    >
       <slot name="end" />
     </div>
   </div>

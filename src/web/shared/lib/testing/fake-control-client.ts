@@ -1,5 +1,5 @@
-import { createPinia } from 'pinia';
-import type { Plugin } from 'vue';
+import { createPinia, setActivePinia } from 'pinia';
+import { createApp, type Plugin } from 'vue';
 import type { ControlClient, RpcParams } from '@/shared/api/control-client.ts';
 import { controlClientKey } from '@/shared/api/use-control-client.ts';
 
@@ -27,4 +27,13 @@ export function createFakeControlClient(handler: (method: string, params: RpcPar
 
 export function storePlugins(client: ControlClient): Plugin[] {
   return [createPinia(), { install: (app) => void app.provide(controlClientKey, client) }];
+}
+
+export function createStoreHarness(client: ControlClient) {
+  const pinia = createPinia();
+  const host = createApp({ render: () => null });
+  host.use(pinia).provide(controlClientKey, client);
+  setActivePinia(pinia);
+  const plugins: Plugin[] = [pinia, { install: (app) => void app.provide(controlClientKey, client) }];
+  return { plugins, use: <T>(factory: () => T): T => host.runWithContext(factory) };
 }
