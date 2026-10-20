@@ -7,10 +7,7 @@ export default mergeConfig(
     test: {
       root: process.cwd(),
       environment: 'happy-dom',
-      include: [
-        'src/web/{app,pages,widgets,entities,shared}/**/*.test.ts',
-        'src/web/features/*/**/*.test.ts',
-      ],
+      include: ['src/web/**/*.test.ts'],
       restoreMocks: true,
     },
   }),

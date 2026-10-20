@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { storeToRefs } from 'pinia';
 import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
-import { useLegacyController } from '@/composables/legacy-controller.ts';
+import { useConnectionStore } from '@/entities/connection/model/connection-store.ts';
 import { useLiveFeedStore } from '@/entities/live-event/model/live-feed-store.ts';
 import { usePointsStore } from '@/entities/points/model/points-store.ts';
 import { enrichViewer, sameHandle, type ViewerIdentity } from '@/entities/viewer/lib/viewer-profile.ts';
-import { loadViewState, saveViewState } from '@/features/view-state.ts';
+import { loadViewState, saveViewState } from '@/shared/lib/view-state.ts';
 import type { DisplayEvent } from '@/types.ts';
 import type { InspectorTab } from '@/widgets/feed-inspector/model/inspector-tab.ts';
 import FeedInspector from '@/widgets/feed-inspector/ui/FeedInspector.vue';
@@ -13,7 +13,7 @@ import LiveFeedPanel from '@/widgets/live-feed/ui/LiveFeedPanel.vue';
 
 const MESSAGE_HISTORY_LIMIT = 20;
 
-const controller = useLegacyController();
+const connection = useConnectionStore();
 const liveStore = useLiveFeedStore();
 const { events, topViewers, liveViewers, imagesEnabled } = storeToRefs(liveStore);
 const { leaderboard } = storeToRefs(usePointsStore());
@@ -51,7 +51,7 @@ function openViewer(identity: ViewerIdentity): void {
 watch(inspectorOpen, (open) => saveViewState('aside', { open }));
 
 watch(
-  () => controller.activeCreator.value,
+  () => connection.activeCreator,
   () => {
     selectedEventId.value = null;
     selectedViewer.value = null;

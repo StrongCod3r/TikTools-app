@@ -1,11 +1,11 @@
 import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { nextTick, ref } from 'vue';
+import { nextTick } from 'vue';
 import type { ViewerRecord } from '../../../../shared/messages.ts';
-import { legacyControllerKey, type LegacyController } from '@/composables/legacy-controller.ts';
+import { useConnectionStore } from '@/entities/connection/model/connection-store.ts';
 import { defaultPointsConfig } from '@/entities/points/model/default-config.ts';
 import { usePointsStore } from '@/entities/points/model/points-store.ts';
-import { createFakeControlClient, storePlugins } from '@/shared/lib/testing/fake-control-client.ts';
+import { createFakeControlClient, createStoreHarness } from '@/shared/lib/testing/fake-control-client.ts';
 import { mountWithPlugins } from '@/shared/lib/testing/mount.ts';
 import type { ConnectionStatus } from '@/types.ts';
 import PointsPage from './PointsPage.vue';
@@ -38,16 +38,11 @@ async function mountPage(status: ConnectionStatus = 'idle') {
     if (method === 'points.leaderboard') return { viewers: [viewer('luna', 420), viewer('mango', 150)] };
     return {};
   });
-  const controller = { status: ref(status) } as unknown as LegacyController;
-  const plugins = storePlugins(client);
-  const wrapper = mountWithPlugins(PointsPage, {
-    attachTo: document.body,
-    global: { plugins, provide: { [legacyControllerKey as symbol]: controller } },
-  });
+  const stores = createStoreHarness(client);
+  stores.use(() => useConnectionStore()).status = status;
+  const wrapper = mountWithPlugins(PointsPage, { attachTo: document.body, global: { plugins: stores.plugins } });
   await wrapper.vm.$nextTick();
-  const store = (wrapper.vm.$ as unknown as { appContext: { app: { runWithContext: <T>(fn: () => T) => T } } }).appContext.app.runWithContext(() =>
-    usePointsStore(),
-  );
+  const store = stores.use(() => usePointsStore());
   await store.refresh();
   await flushPromises();
   return { wrapper, calls };

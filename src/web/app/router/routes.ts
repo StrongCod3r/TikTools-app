@@ -1,5 +1,5 @@
 import type { RouteRecordRaw } from 'vue-router';
-import { loadViewState } from '@/features/view-state.ts';
+import { loadViewState } from '@/shared/lib/view-state.ts';
 import type { AppTab } from '@/types.ts';
 import { pluginPageRouteName, tabLocation } from './tab-routes.ts';
 

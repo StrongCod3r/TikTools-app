@@ -2,7 +2,7 @@
 import { computed, markRaw, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
-import { useLegacyController } from '@/composables/legacy-controller.ts';
+import { useLocaleStore } from '@/shared/i18n/locale-store.ts';
 import LanguageSelect from '@/features/change-language/ui/LanguageSelect.vue';
 import RuntimeGlobalsEditor from '@/features/edit-runtime-globals/ui/RuntimeGlobalsEditor.vue';
 import type { Locale } from '@/shared/i18n/i18n.ts';
@@ -23,7 +23,7 @@ const sections: ReadonlyArray<{ id: SettingsSection; icon: Component }> = [
 const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
-const controller = useLegacyController();
+const localeStore = useLocaleStore();
 
 const section = computed<SettingsSection>({
   get: () => sections.find((entry) => entry.id === route.query.section)?.id ?? 'general',
@@ -31,8 +31,8 @@ const section = computed<SettingsSection>({
 });
 
 const locale = computed<Locale>({
-  get: () => controller.locale.value,
-  set: (value) => controller.setLocale(value),
+  get: () => localeStore.locale,
+  set: (value) => void localeStore.setLocale(value),
 });
 </script>
 

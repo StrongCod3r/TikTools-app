@@ -1,11 +1,11 @@
 import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ref } from 'vue';
+
 import type { AnalyticsSummaryData, AnalyticsTotals } from '../../../../shared/messages.ts';
-import { legacyControllerKey, type LegacyController } from '@/composables/legacy-controller.ts';
+import { useConnectionStore } from '@/entities/connection/model/connection-store.ts';
 import { systemDay } from '@/entities/analytics/lib/analytics-range.ts';
 import type { RpcParams } from '@/shared/api/control-client.ts';
-import { createFakeControlClient, storePlugins } from '@/shared/lib/testing/fake-control-client.ts';
+import { createFakeControlClient, createStoreHarness } from '@/shared/lib/testing/fake-control-client.ts';
 import { mountWithPlugins } from '@/shared/lib/testing/mount.ts';
 import AnalyticsPage from './AnalyticsPage.vue';
 
@@ -50,11 +50,9 @@ function summaryFor(params: RpcParams | undefined, withData = true): AnalyticsSu
 
 async function mountPage(withData = true) {
   const { client, calls } = createFakeControlClient((_, params) => ({ summary: summaryFor(params, withData) }));
-  const controller = { activeCreator: ref('luna') } as unknown as LegacyController;
-  const wrapper = mountWithPlugins(AnalyticsPage, {
-    attachTo: document.body,
-    global: { plugins: storePlugins(client), provide: { [legacyControllerKey as symbol]: controller } },
-  });
+  const stores = createStoreHarness(client);
+  stores.use(() => useConnectionStore()).activeCreator = 'luna';
+  const wrapper = mountWithPlugins(AnalyticsPage, { attachTo: document.body, global: { plugins: stores.plugins } });
   await flushPromises();
   return { wrapper, calls };
 }

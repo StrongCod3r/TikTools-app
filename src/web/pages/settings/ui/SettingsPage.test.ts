@@ -1,9 +1,9 @@
 import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { defineComponent, ref } from 'vue';
+import { defineComponent } from 'vue';
 import { createMemoryHistory, createRouter } from 'vue-router';
-import { legacyControllerKey, type LegacyController } from '@/composables/legacy-controller.ts';
 import { createFakeControlClient, storePlugins } from '@/shared/lib/testing/fake-control-client.ts';
+import { activateLocale, i18n } from '@/shared/i18n/i18n.ts';
 import { mountWithPlugins } from '@/shared/lib/testing/mount.ts';
 import SettingsPage from './SettingsPage.vue';
 
@@ -15,19 +15,15 @@ async function mountPage(query = '') {
     routes: [{ path: '/settings', component: defineComponent({ render: () => null }) }],
   });
   await router.push(`/settings${query}`);
-  const locale = ref<'en' | 'es'>('en');
-  const setLocale = vi.fn((value: 'en' | 'es') => (locale.value = value));
-  const controller = { locale, setLocale } as unknown as LegacyController;
   const { client } = createFakeControlClient(() => ({ globals: { commandPort: '46665' } }));
   const wrapper = mountWithPlugins(SettingsPage, {
     attachTo: document.body,
     global: {
       plugins: [router, ...storePlugins(client)],
-      provide: { [legacyControllerKey as symbol]: controller },
     },
   });
   await flushPromises();
-  return { wrapper, router, setLocale };
+  return { wrapper, router };
 }
 
 describe('SettingsPage', () => {
@@ -53,12 +49,13 @@ describe('SettingsPage', () => {
   });
 
   it('changes the application language', async () => {
-    const { wrapper, setLocale } = await mountPage();
+    const { wrapper } = await mountPage();
     await wrapper.get('#settings-language').trigger('click');
     document.querySelectorAll<HTMLElement>('[role="option"]').forEach((option) => {
       if (option.textContent?.trim() === 'Español') option.click();
     });
-    await flushPromises();
-    expect(setLocale).toHaveBeenCalledWith('es');
+    await vi.waitFor(() => expect(i18n.global.locale.value).toBe('es'));
+    expect(localStorage.getItem('tiktok-live-locale')).toBe('es');
+    await activateLocale('en');
   });
 });

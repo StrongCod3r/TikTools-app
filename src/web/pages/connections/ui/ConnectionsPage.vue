@@ -1,25 +1,37 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { useLegacyController } from '@/composables/legacy-controller.ts';
+import type { LiveChannel } from '@/types.ts';
+import { useConnectionStore } from '@/entities/connection/model/connection-store.ts';
+import { useDiscoveryStore } from '@/entities/live-room/model/discovery-store.ts';
 import LiveConnectPanel from '@/features/connect-live/ui/LiveConnectPanel.vue';
 import LiveExplorerPanel from '@/features/explore-live-rooms/ui/LiveExplorerPanel.vue';
-import { debounce, loadViewState, saveViewState } from '@/features/view-state.ts';
+import { debounce, loadViewState, saveViewState } from '@/shared/lib/view-state.ts';
 import PluginServersPanel from '@/widgets/plugin-servers/ui/PluginServersPanel.vue';
 
-const controller = useLegacyController();
+const connection = useConnectionStore();
+const discovery = useDiscoveryStore();
 const saved = loadViewState().connections;
-const useCookie = ref(saved?.showCookie ?? Boolean(controller.cookie.value));
+const useCookie = ref(saved?.showCookie ?? Boolean(connection.cookie));
 const expandedServers = ref<Record<string, boolean>>(saved?.openServers ?? {});
 
 const handle = computed({
-  get: () => controller.uniqueId.value,
-  set: (value: string) => controller.setUniqueId(value),
+  get: () => connection.uniqueId,
+  set: (value: string) => connection.setUniqueId(value),
 });
 
 const cookie = computed({
-  get: () => controller.cookie.value,
-  set: (value: string) => controller.setCookie(value),
+  get: () => connection.cookie,
+  set: (value: string) => connection.setCookie(value),
 });
+
+function connectRoom(room: LiveChannel): void {
+  if (discovery.isStale()) {
+    discovery.markStale();
+    discovery.refresh();
+    return;
+  }
+  connection.handleConnectRoom(room.uniqueId, room.roomId);
+}
 
 const persist = debounce(() => {
   saveViewState('connections', { showCookie: useCookie.value, openServers: expandedServers.value });
@@ -35,22 +47,22 @@ watch([useCookie, expandedServers], persist, { deep: true });
         v-model:cookie="cookie"
         v-model:use-cookie="useCookie"
         class="connections-page__live"
-        :status="controller.status.value"
-        :creator="controller.activeCreator.value"
-        :recents="controller.recents.value"
-        :error="controller.error.value"
-        :reconnect-attempt="controller.reconnectAttempt.value"
-        :max-reconnect-attempts="controller.maxReconnectAttempts"
-        @connect="controller.handleConnect()"
-        @disconnect="controller.handleDisconnect()"
-        @reconnect="controller.handleReconnect()"
-        @pick-random="controller.handlePickLive()"
-        @select-recent="controller.handleSelectRecent"
+        :status="connection.status"
+        :creator="connection.activeCreator"
+        :recents="connection.recents"
+        :error="connection.error"
+        :reconnect-attempt="connection.reconnectAttempt"
+        :max-reconnect-attempts="connection.maxReconnectAttempts"
+        @connect="connection.handleConnect()"
+        @disconnect="connection.handleDisconnect()"
+        @reconnect="connection.handleReconnect()"
+        @pick-random="connection.handlePickLive()"
+        @select-recent="connection.handleSelectRecent"
       />
       <LiveExplorerPanel
         class="connections-page__explorer"
-        :current-creator="controller.activeCreator.value"
-        @connect="controller.handleConnectRoom"
+        :current-creator="connection.activeCreator"
+        @connect="connectRoom"
       />
     </div>
     <PluginServersPanel v-model:expanded="expandedServers" />

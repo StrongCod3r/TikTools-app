@@ -1,14 +1,13 @@
 import { createPinia } from 'pinia';
 import { createApp, type App as VueApp } from 'vue';
-import { installControlEventBridge } from '@/components/ui/control-events.ts';
 import { createControlClient, notifyFrontendReady } from '@/shared/api/control-client.ts';
 import { controlClientKey } from '@/shared/api/use-control-client.ts';
 import { activateLocale, i18n } from '@/shared/i18n/i18n.ts';
 import { detectLocale } from '@/shared/i18n/locale-preference.ts';
 import App from './App.vue';
 import { createAppRouter } from './router/router.ts';
-import '@/styles.css';
 import './styles/tokens.css';
+import './styles/base.css';
 
 declare global {
   interface Window {
@@ -29,7 +28,6 @@ async function mountApp(): Promise<VueApp> {
   return app;
 }
 
-installControlEventBridge();
 let app = await mountApp();
 
 if (import.meta.env.DEV || import.meta.env.VITE_TIKTOOLS_DIAGNOSTICS === '1') {

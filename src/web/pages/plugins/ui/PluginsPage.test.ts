@@ -1,10 +1,11 @@
-import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { nextTick, ref } from 'vue';
-import type { ActionTypeDefinition, LiveAction, PluginStatus } from '../../../../automation/behavior/types.ts';
+import { enableAutoUnmount, flushPromises, type VueWrapper } from '@vue/test-utils';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { nextTick } from 'vue';
+import type { ActionTypeDefinition, BehaviorSnapshot, LiveAction, PluginStatus } from '../../../../automation/behavior/types.ts';
 import type { ProcessorStatusEntry } from '../../../../shared/messages.ts';
-import { legacyControllerKey, type LegacyController } from '@/composables/legacy-controller.ts';
-import { createFakeControlClient, storePlugins } from '@/shared/lib/testing/fake-control-client.ts';
+import { useAutomationStore } from '@/entities/automation/model/automation-store.ts';
+import { usePluginsStore } from '@/entities/plugin/model/plugins-store.ts';
+import { createFakeControlClient, createStoreHarness } from '@/shared/lib/testing/fake-control-client.ts';
 import { mountWithPlugins } from '@/shared/lib/testing/mount.ts';
 import PluginsPage from './PluginsPage.vue';
 
@@ -63,52 +64,26 @@ const processor: ProcessorStatusEntry = {
   },
 } as ProcessorStatusEntry;
 
-function fakeController(plugins: PluginStatus[]) {
-  return {
-    behavior: ref({ plugins, actions, actionTypes }),
-    behaviorError: ref(''),
-    pluginSettings: ref({}),
-    pluginConnections: ref({}),
-    pluginProvision: ref({}),
-    actionOptions: ref({}),
-    pluginInstallState: ref({ installing: false, error: '', success: '', pendingPath: '', needsReplace: false }),
-    openMediaPicker: vi.fn(),
-    handleGetPluginSettings: vi.fn(),
-    handleSavePluginSettings: vi.fn(),
-    handleGetActionOptions: vi.fn(),
-    handleTestPluginConnection: vi.fn(),
-    handleImportPluginToken: vi.fn(),
-    handleProvisionPluginToken: vi.fn(),
-    handleSetPluginInstalled: vi.fn(),
-    handleSetPluginEnabled: vi.fn(),
-    handleUninstallPlugin: vi.fn(),
-    handleInstallPlugin: vi.fn(),
-    handleConfirmPluginReplace: vi.fn(),
-    handleCancelPluginReplace: vi.fn(),
-  };
-}
-
 async function mountPage(plugins: PluginStatus[] = [plugin('deck'), plugin('tts', { installed: false, enabled: false })]) {
-  const controller = fakeController(plugins);
   const { client, calls } = createFakeControlClient((method) => {
     if (method === 'processors.status') return { processors: [processor] };
     if (method === 'processors.test') {
       return { pluginId: 'deck', processorId: 'enrich', ok: true, durationMs: 3, result: { enriched: true } };
     }
+    if (method === 'media.pick') return { selection: { type: 'file', file: { path: 'C:/x.plugin', name: 'x.plugin' } } };
+    if (method === 'plugins.install') throw new Error('plugin already installed');
     return {};
   });
-  const wrapper = mountWithPlugins(PluginsPage, {
-    attachTo: document.body,
-    global: {
-      plugins: storePlugins(client),
-      provide: { [legacyControllerKey as symbol]: controller as unknown as LegacyController },
-    },
-  });
+  const stores = createStoreHarness(client);
+  const automation = stores.use(() => useAutomationStore()) as unknown as { behavior: BehaviorSnapshot };
+  automation.behavior = { plugins, actions, actionTypes, events: [], translations: {} };
+  const pluginsStore = stores.use(() => usePluginsStore());
+  const wrapper = mountWithPlugins(PluginsPage, { attachTo: document.body, global: { plugins: stores.plugins } });
   await flushPromises();
-  return { wrapper, controller, calls };
+  return { wrapper, calls, pluginsStore };
 }
 
-type Wrapper = Awaited<ReturnType<typeof mountPage>>['wrapper'];
+type Wrapper = VueWrapper;
 
 function buttonByText(wrapper: Wrapper, text: string) {
   return wrapper.findAll('button').find((button) => button.text() === text)!;
@@ -136,43 +111,47 @@ describe('PluginsPage', () => {
   });
 
   it('shows details and toggles the plugin', async () => {
-    const { wrapper, controller } = await mountPage();
+    const { wrapper, calls } = await mountPage();
     expect(wrapper.text()).toContain('Select a plugin to see its details.');
     await selectPlugin(wrapper, 'DECK');
     expect(wrapper.get('.plugin-details__name').text()).toBe('DECK');
     expect(wrapper.find('.base-markdown strong').text()).toBe('deck');
     expect(wrapper.text()).toContain('Switch scene');
     await wrapper.get('.plugin-details__controls input[type="checkbox"]').setValue(false);
-    expect(controller.handleSetPluginEnabled).toHaveBeenCalledWith('deck', false);
+    await flushPromises();
+    expect(calls.find((call) => call.method === 'plugins.disable')?.params).toEqual({ pluginId: 'deck' });
   });
 
   it('confirms uninstall with the action usage', async () => {
-    const { wrapper, controller } = await mountPage();
+    const { wrapper, calls } = await mountPage();
     await selectPlugin(wrapper, 'DECK');
     await buttonByText(wrapper, 'Uninstall…').trigger('click');
     await nextTick();
     expect(document.body.textContent).toContain('2 actions use it and will stop working.');
     const confirm = Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent?.trim() === 'Uninstall')!;
     confirm.click();
-    expect(controller.handleUninstallPlugin).toHaveBeenCalledWith('deck');
+    await flushPromises();
+    expect(calls.find((call) => call.method === 'plugins.uninstall')?.params).toEqual({ pluginId: 'deck' });
   });
 
   it('installs an available plugin', async () => {
-    const { wrapper, controller } = await mountPage();
+    const { wrapper, calls } = await mountPage();
     await buttonByText(wrapper, 'Available (1)').trigger('click');
     await selectPlugin(wrapper, 'TTS');
     await buttonByText(wrapper, 'Activate').trigger('click');
-    expect(controller.handleSetPluginInstalled).toHaveBeenCalledWith('tts', true);
+    await flushPromises();
+    expect(calls.find((call) => call.method === 'plugins.install.set')?.params).toEqual({ pluginId: 'tts', installed: true });
   });
 
   it('asks before replacing an installed package', async () => {
-    const { wrapper, controller } = await mountPage();
+    const { wrapper, calls } = await mountPage();
     await buttonByText(wrapper, 'Install .plugin…').trigger('click');
-    expect(controller.handleInstallPlugin).toHaveBeenCalled();
-    controller.pluginInstallState.value = { ...controller.pluginInstallState.value, needsReplace: true, pendingPath: 'x.plugin' };
-    await nextTick();
+    await flushPromises();
+    expect(calls.find((call) => call.method === 'plugins.install')?.params).toEqual({ path: 'C:/x.plugin', replaceExisting: false });
+    expect(wrapper.text()).toContain('This plugin is already installed. Replace it with the selected package?');
     await buttonByText(wrapper, 'Replace').trigger('click');
-    expect(controller.handleConfirmPluginReplace).toHaveBeenCalled();
+    await flushPromises();
+    expect(calls.filter((call) => call.method === 'plugins.install').at(-1)?.params).toEqual({ path: 'C:/x.plugin', replaceExisting: true });
   });
 
   it('shows processor metrics and runs a test', async () => {

@@ -1,8 +1,8 @@
 import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createApp, nextTick, ref } from 'vue';
+import { createApp, nextTick } from 'vue';
 import type { UiEvent } from '../../../../shared/messages.ts';
-import { legacyControllerKey, type LegacyController } from '@/composables/legacy-controller.ts';
+import { useConnectionStore } from '@/entities/connection/model/connection-store.ts';
 import { useLiveFeedStore } from '@/entities/live-event/model/live-feed-store.ts';
 import type { ControlClient, TopicHandler } from '@/shared/api/control-client.ts';
 import { controlClientKey } from '@/shared/api/use-control-client.ts';
@@ -43,12 +43,12 @@ async function mountFeed() {
   const app = createApp({});
   app.use(pinia).provide(controlClientKey, client);
   const store = app.runWithContext(() => useLiveFeedStore());
-  const controller = { activeCreator: ref('luna') } as unknown as LegacyController;
+  app.runWithContext(() => useConnectionStore()).activeCreator = 'luna';
   const wrapper = mountWithPlugins(FeedPage, {
     attachTo: document.body,
     global: {
       plugins: [pinia],
-      provide: { [controlClientKey as symbol]: client, [legacyControllerKey as symbol]: controller },
+      provide: { [controlClientKey as symbol]: client },
     },
   });
   const push = async (event: UiEvent) => {

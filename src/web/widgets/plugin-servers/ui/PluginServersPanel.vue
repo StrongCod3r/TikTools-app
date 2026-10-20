@@ -3,7 +3,7 @@ import { computed, type ComputedRef } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRouter } from 'vue-router';
 import type { PluginConnectionState } from '../../../../automation/plugins/declarative.ts';
-import { useLegacyPlugins } from '@/composables/legacy-plugins.ts';
+import { usePluginControls } from '@/features/manage-plugins/model/use-plugin-controls.ts';
 import PluginConnectionEditor from '@/features/configure-plugin-connection/ui/PluginConnectionEditor.vue';
 import { localizedText } from '@/shared/i18n/i18n.ts';
 import BaseButton from '@/shared/ui/button/BaseButton.vue';
@@ -19,7 +19,7 @@ const expanded = defineModel<Record<string, boolean>>('expanded', { default: () 
 
 const { t } = useI18n();
 const router = useRouter();
-const plugins = useLegacyPlugins();
+const plugins = usePluginControls();
 
 const servers: ComputedRef<ServerEntry[]> = computed(() =>
   serverEntries(plugins.behavior.value.plugins, plugins.connections.value, (plugin) => localizedText(plugin.descriptor.name)),

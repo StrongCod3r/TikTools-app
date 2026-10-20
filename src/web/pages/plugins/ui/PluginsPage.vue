@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useLegacyPlugins } from '@/composables/legacy-plugins.ts';
+import { usePluginControls } from '@/features/manage-plugins/model/use-plugin-controls.ts';
 import type { PluginCatalogTab } from '@/entities/plugin/lib/plugin-catalog.ts';
-import { debounce, loadViewState, saveViewState } from '@/features/view-state.ts';
+import { debounce, loadViewState, saveViewState } from '@/shared/lib/view-state.ts';
 import BaseButton from '@/shared/ui/button/BaseButton.vue';
 import BaseEmptyState from '@/shared/ui/empty-state/BaseEmptyState.vue';
 import IconPlus from '@/shared/ui/icon/icons/IconPlus.vue';
@@ -18,7 +18,7 @@ import ProcessorsPanel from '@/widgets/plugin-processors/ui/ProcessorsPanel.vue'
 type PluginsView = 'plugins' | 'processors';
 
 const { t } = useI18n();
-const plugins = useLegacyPlugins();
+const plugins = usePluginControls();
 const saved = loadViewState().plugins;
 
 const view = ref<PluginsView>(saved?.view ?? 'plugins');

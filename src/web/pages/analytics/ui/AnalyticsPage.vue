@@ -2,7 +2,7 @@
 import { storeToRefs } from 'pinia';
 import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { useLegacyController } from '@/composables/legacy-controller.ts';
+import { useConnectionStore } from '@/entities/connection/model/connection-store.ts';
 import { isAnalyticsMetric, type AnalyticsMetric } from '@/entities/analytics/lib/analytics-metrics.ts';
 import {
   analyticsRangeKeys,
@@ -18,7 +18,7 @@ import { useAnalyticsStore } from '@/entities/analytics/model/analytics-store.ts
 import AnalyticsContributorsTable from '@/entities/analytics/ui/AnalyticsContributorsTable.vue';
 import AnalyticsFacts from '@/entities/analytics/ui/AnalyticsFacts.vue';
 import AnalyticsMetricStrip from '@/entities/analytics/ui/AnalyticsMetricStrip.vue';
-import { debounce, loadViewState, saveViewState } from '@/features/view-state.ts';
+import { debounce, loadViewState, saveViewState } from '@/shared/lib/view-state.ts';
 import AnalyticsRangeBar from '@/features/select-analytics-range/ui/AnalyticsRangeBar.vue';
 import BaseIconButton from '@/shared/ui/button/BaseIconButton.vue';
 import BaseEmptyState from '@/shared/ui/empty-state/BaseEmptyState.vue';
@@ -31,7 +31,7 @@ import BaseTextField from '@/shared/ui/text-field/BaseTextField.vue';
 import AnalyticsActivityPanel from '@/widgets/analytics-activity/ui/AnalyticsActivityPanel.vue';
 
 const { t, locale } = useI18n();
-const controller = useLegacyController();
+const connection = useConnectionStore();
 const store = useAnalyticsStore();
 const { summary, loading, error } = storeToRefs(store);
 
@@ -44,7 +44,7 @@ const customStart = ref(saved?.customStart ?? dayToIsoDate(today - 6));
 const customEnd = ref(saved?.customEnd ?? dayToIsoDate(today));
 const sort = ref<TableSort | null>(null);
 
-const creator = computed(() => controller.activeCreator.value);
+const creator = computed(() => connection.activeCreator);
 const span = computed(() => {
   const now = systemDay(Date.now());
   return resolveAnalyticsRange(range.value, now, {

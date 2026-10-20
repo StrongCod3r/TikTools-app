@@ -64,7 +64,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['src/web/{app,pages,widgets,entities,shared}/**/*.vue', 'src/web/features/*/**/*.vue'],
+    files: ['src/web/**/*.vue'],
     rules: Object.assign({}, ...vue.configs['flat/recommended'].map((config) => config.rules ?? {})),
   },
   {

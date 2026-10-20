@@ -35,7 +35,7 @@
     "lint": "eslint src scripts vite.config.ts vitest.config.ts --max-warnings=0",
     "typecheck": "vue-tsc --noEmit",
     "test": "bun run test:bun && bun run test:web",
-    "test:bun": "bun test src/web src/automation src/plugin-ui src/shared src/widgets scripts --path-ignore-patterns='src/web/{app,pages,widgets,entities,shared}/**' --path-ignore-patterns='src/web/features/*/**'",
+    "test:bun": "bun test src/automation src/plugin-ui src/shared src/widgets scripts",
     "test:web": "vitest run",
     "test:web:watch": "vitest",
     "contracts:generate": "bun run scripts/generate-contracts.ts",

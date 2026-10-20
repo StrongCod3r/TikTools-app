@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { useLegacyController } from '@/composables/legacy-controller.ts';
+import { useConnectionStore } from '@/entities/connection/model/connection-store.ts';
 import { isConnectionBusy } from '@/entities/connection/lib/connection-status.ts';
-import { debounce, loadViewState, saveViewState, type PointsViewState } from '@/features/view-state.ts';
+import { debounce, loadViewState, saveViewState, type PointsViewState } from '@/shared/lib/view-state.ts';
 import PointsRulesPanel from '@/features/configure-points/ui/PointsRulesPanel.vue';
 import type { TableSort } from '@/shared/ui/table/table-types.ts';
 import PointsLeaderboardPanel from '@/widgets/points-leaderboard/ui/PointsLeaderboardPanel.vue';
@@ -23,13 +23,13 @@ function storedSort(sort: TableSort | null): Pick<PointsViewState, 'sortBy' | 's
   return entry && sort ? { sortBy: entry[0] as PointsViewState['sortBy'], sortDir: sort.direction } : {};
 }
 
-const controller = useLegacyController();
+const connection = useConnectionStore();
 const saved = loadViewState().points;
 const query = ref(saved?.searchQuery ?? '');
 const sort = ref<TableSort | null>(savedSort(saved));
 
 const locked = computed(() => {
-  const status = controller.status.value;
+  const status = connection.status;
   return status === 'connected' || isConnectionBusy(status);
 });
 

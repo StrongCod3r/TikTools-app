@@ -1,14 +1,16 @@
 <script setup lang="ts">
-import { computed, markRaw, provide, reactive, watch, type Component } from 'vue';
+import { storeToRefs } from 'pinia';
+import { computed, markRaw, watch, type Component } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { useRoute, useRouter } from 'vue-router';
-import type { PluginPageDescriptor } from '../../../automation/behavior/types.ts';
 import { isConnectionOnlyPage, pluginNavId } from '../../../automation/plugins/declarative.ts';
-import PluginProgressNotification from '@/components/plugin-progress-notification.vue';
-import DialogHost from '@/components/ui/dialog-host.vue';
-import { legacyControllerKey } from '@/composables/legacy-controller.ts';
-import { useAppController } from '@/composables/useAppController.ts';
-import { i18nText } from '@/i18n.ts';
+import { useAutomationStore } from '@/entities/automation/model/automation-store.ts';
+import { useConnectionStore } from '@/entities/connection/model/connection-store.ts';
+import { useLiveFeedStore } from '@/entities/live-event/model/live-feed-store.ts';
+import { usePluginsStore } from '@/entities/plugin/model/plugins-store.ts';
+import { localizedText } from '@/shared/i18n/i18n.ts';
+import { useLocaleStore } from '@/shared/i18n/locale-store.ts';
+import { useNavigationStore } from '@/shared/model/navigation-store.ts';
 import IconChart from '@/shared/ui/icon/icons/IconChart.vue';
 import IconChat from '@/shared/ui/icon/icons/IconChat.vue';
 import IconCoins from '@/shared/ui/icon/icons/IconCoins.vue';
@@ -22,16 +24,28 @@ import AppMenuBar from '@/widgets/app-menu-bar/ui/AppMenuBar.vue';
 import type { NavigationItem, NavigationSection } from '@/widgets/app-navigation/model/navigation-types.ts';
 import AppNavigation from '@/widgets/app-navigation/ui/AppNavigation.vue';
 import AppStatusBar from '@/widgets/app-status-bar/ui/AppStatusBar.vue';
+import PluginProgressToast from '@/widgets/plugin-progress/ui/PluginProgressToast.vue';
+import { useAppRuntime } from '../model/use-app-runtime.ts';
 import { tabFromRoute, tabLocation } from '../router/tab-routes.ts';
 
-const controller = useAppController();
-provide(legacyControllerKey, controller);
-controller.setTheme('dark');
+useAppRuntime();
 
-const app = reactive(controller);
 const { t } = useI18n();
 const route = useRoute();
 const router = useRouter();
+const navigation = useNavigationStore();
+const { activeTab } = storeToRefs(navigation);
+const connection = useConnectionStore();
+const { status, activeCreator, uniqueId, reconnectAttempt } = storeToRefs(connection);
+const { liveViewers } = storeToRefs(useLiveFeedStore());
+const plugins = usePluginsStore();
+const { pluginProgress } = storeToRefs(plugins);
+const { pluginPages } = storeToRefs(useAutomationStore());
+const localeStore = useLocaleStore();
+const { locale } = storeToRefs(localeStore);
+
+document.documentElement.dataset.theme = 'dark';
+document.documentElement.style.colorScheme = 'dark';
 
 const builtinPages: ReadonlyArray<{ tab: BuiltinAppTab; label: string; icon: Component }> = [
   { tab: 'feed', label: 'navigation.feed', icon: IconChat },
@@ -53,41 +67,32 @@ const builtinItems = computed<NavigationItem[]>(() =>
   })),
 );
 
-const pluginItems = computed<NavigationItem[]>(() => {
-  const pages: PluginPageDescriptor[] = controller.pluginPages.value;
-  return pages
+const pluginItems = computed<NavigationItem[]>(() =>
+  pluginPages.value
     .filter((page) => !isConnectionOnlyPage(page))
     .map((page) => {
       const tab = pluginNavId(page.pluginId, page.id);
-      return {
-        id: tab,
-        label: i18nText(controller.locale.value, page.title),
-        icon: markRaw(IconPuzzle),
-        to: tabLocation(tab),
-      };
-    });
-});
+      return { id: tab, label: localizedText(page.title), icon: markRaw(IconPuzzle), to: tabLocation(tab) };
+    }),
+);
 
 const sections = computed<NavigationSection[]>(() => [
   { id: 'workspace', label: t('navigation.sections.workspace'), items: builtinItems.value },
-  ...(pluginItems.value.length
-    ? [{ id: 'plugins', label: t('navigation.sections.plugins'), items: pluginItems.value }]
-    : []),
+  ...(pluginItems.value.length ? [{ id: 'plugins', label: t('navigation.sections.plugins'), items: pluginItems.value }] : []),
 ]);
 
 const menuPages = computed(() => sections.value.flatMap((section) => section.items));
-
 const routeTab = computed(() => tabFromRoute(route));
 
 watch(
   routeTab,
   (tab) => {
-    if (tab && tab !== controller.activeTab.value) controller.setActiveTab(tab);
+    if (tab) navigation.open(tab);
   },
   { immediate: true },
 );
 
-watch(controller.activeTab, (tab) => {
+watch(activeTab, (tab) => {
   if (tab !== routeTab.value) void router.push(tabLocation(tab));
 });
 
@@ -96,28 +101,27 @@ function navigate(tab: string): void {
 }
 
 function connect(): void {
-  if (controller.uniqueId.value || controller.activeCreator.value) controller.handleConnect();
+  if (uniqueId.value || activeCreator.value) connection.handleConnect();
   else navigate('connect');
 }
 </script>
 
 <template>
   <div class="app-layout">
-    <DialogHost :locale="app.locale" />
-    <PluginProgressNotification
-      v-if="app.pluginProgress"
-      :notification="app.pluginProgress"
-      :on-dismiss="app.dismissPluginProgress"
+    <PluginProgressToast
+      v-if="pluginProgress"
+      :progress="pluginProgress"
+      @dismiss="plugins.dismissPluginProgress()"
     />
     <AppMenuBar
-      :status="app.status"
-      :locale="app.locale"
+      :status="status"
+      :locale="locale"
       :pages="menuPages"
       @connect="connect"
-      @disconnect="app.handleDisconnect"
-      @reconnect="app.handleReconnect"
+      @disconnect="connection.handleDisconnect()"
+      @reconnect="connection.handleReconnect()"
       @navigate="navigate"
-      @change-locale="app.setLocale"
+      @change-locale="localeStore.setLocale"
     />
     <div class="app-layout__body">
       <AppNavigation
@@ -129,14 +133,14 @@ function connect(): void {
       </main>
     </div>
     <AppStatusBar
-      :status="app.status"
-      :creator="app.activeCreator"
-      :viewers="app.liveViewers"
-      :reconnect-attempt="app.reconnectAttempt"
-      :max-reconnect-attempts="app.maxReconnectAttempts"
+      :status="status"
+      :creator="activeCreator"
+      :viewers="liveViewers"
+      :reconnect-attempt="reconnectAttempt"
+      :max-reconnect-attempts="connection.maxReconnectAttempts"
       @connect="connect"
-      @disconnect="app.handleDisconnect"
-      @reconnect="app.handleReconnect"
+      @disconnect="connection.handleDisconnect()"
+      @reconnect="connection.handleReconnect()"
     />
   </div>
 </template>

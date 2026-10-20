@@ -2,7 +2,7 @@
 import { computed, ref, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import type { ActionTypeDefinition, LiveAction, PluginStatus } from '../../../../automation/behavior/types.ts';
-import { useLegacyPlugins } from '@/composables/legacy-plugins.ts';
+import { usePluginControls } from '@/features/manage-plugins/model/use-plugin-controls.ts';
 import { pluginActionUsage, pluginState } from '@/entities/plugin/lib/plugin-catalog.ts';
 import PluginStateBadge from '@/entities/plugin/ui/PluginStateBadge.vue';
 import PluginConnectionEditor from '@/features/configure-plugin-connection/ui/PluginConnectionEditor.vue';
@@ -26,7 +26,7 @@ const props = defineProps<{
 const tab = defineModel<PluginDetailsTab>('tab', { required: true });
 
 const { t } = useI18n();
-const plugins = useLegacyPlugins();
+const plugins = usePluginControls();
 const uninstallOpen = ref(false);
 
 const descriptor = computed(() => props.plugin.descriptor);
