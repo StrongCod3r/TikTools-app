@@ -32,9 +32,12 @@
     "build:widgets:test": "VITE_TIKTOOLS_WIDGET_TEST_HOOK=1 bun run build:widgets",
     "sync:gateway-widgets": "bun run scripts/sync-gateway-widgets.ts",
     "test:widgets-e2e": "playwright test --config src/widgets/playwright.config.ts && playwright test --config src/widgets/playwright.gateway.config.ts",
-    "lint": "eslint src scripts vite.config.ts --max-warnings=0",
+    "lint": "eslint src scripts vite.config.ts vitest.config.ts --max-warnings=0",
     "typecheck": "vue-tsc --noEmit",
-    "test": "bun test src/web src/automation src/plugin-ui src/shared src/widgets scripts",
+    "test": "bun run test:bun && bun run test:web",
+    "test:bun": "bun test src/web src/automation src/plugin-ui src/shared src/widgets scripts --path-ignore-patterns='src/web/{app,pages,widgets,entities,shared}/**' --path-ignore-patterns='src/web/features/*/**'",
+    "test:web": "vitest run",
+    "test:web:watch": "vitest",
     "contracts:generate": "bun run scripts/generate-contracts.ts",
     "contracts:check": "bun run scripts/generate-contracts.ts --check",
     "deps:check": "bun run scripts/check-tiktok-signer-revision.ts",
@@ -61,16 +64,22 @@
     "@types/bun": "1.4.2",
     "@vitejs/plugin-vue": "^6.0.8",
     "@vitejs/plugin-vue-jsx": "^5.1.6",
+    "@vue/test-utils": "^2.5.1",
     "eslint": "^10.10.0",
     "eslint-plugin-vue": "^10.10.0",
     "globals": "^17.12.0",
+    "happy-dom": "^21.0.3",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.69.0",
     "vite": "^8.2.2",
+    "vitest": "^5.0.5",
     "vue-eslint-parser": "^10.4.1",
     "vue-tsc": "^3.3.11"
   },
   "dependencies": {
-    "vue": "^3.5.42"
+    "pinia": "^4.1.0",
+    "vue": "^3.5.42",
+    "vue-i18n": "^11.4.16",
+    "vue-router": "^5.4.0"
   }
 }

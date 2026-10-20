@@ -35,6 +35,10 @@ export default tseslint.config(
     languageOptions: {
       globals: globals.browser,
     },
+    rules: {
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      '@typescript-eslint/no-empty-object-type': ['error', { allowInterfaces: 'with-single-extends' }],
+    },
   },
   {
     files: ['plugins/sonicboom/ui/src/**/*.{ts,tsx,vue}', 'plugins/sonicboom/ui/tests/**/*.ts'],
@@ -51,13 +55,17 @@ export default tseslint.config(
     },
   },
   {
-    files: ['scripts/**/*.{js,mjs,cjs,ts,tsx,jsx}', 'vite.config.ts'],
+    files: ['scripts/**/*.{js,mjs,cjs,ts,tsx,jsx}', 'vite.config.ts', 'vitest.config.ts'],
     languageOptions: {
       globals: {
         ...globals.node,
         Bun: 'readonly',
       },
     },
+  },
+  {
+    files: ['src/web/{app,pages,widgets,entities,shared}/**/*.vue', 'src/web/features/*/**/*.vue'],
+    rules: Object.assign({}, ...vue.configs['flat/recommended'].map((config) => config.rules ?? {})),
   },
   {
     files: ['**/*.vue'],
