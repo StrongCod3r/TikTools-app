@@ -4,7 +4,7 @@ import type { GiftCatalogEntry, UiEvent } from '../../../../shared/messages.ts';
 import type { ControlClient } from '@/shared/api/control-client.ts';
 import { errorMessage } from '@/shared/api/control-client.ts';
 import type { DisplayEvent, EventFilter, TopViewerPayload } from '@/types.ts';
-import { debounce, loadViewState, saveViewState, type DebouncedCallback } from '@/features/view-state.ts';
+import { debounce, loadViewState, saveViewState, type DebouncedCallback } from '@/shared/lib/view-state.ts';
 
 export interface LiveFeedCallbacks {
   systemAuthor: () => string;
