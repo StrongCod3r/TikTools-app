@@ -16,8 +16,8 @@ export function moderationConditionTemplates(): ConditionTemplate[] {
   const thresholdParam = (fallback: string): ConditionTemplate['params'] => [
     {
       key: 'threshold',
-      label: { default: 'Repetition threshold', i18key: 'condition.moderationThreshold' },
-      hint: { default: 'Scores at or above this value pass.', i18key: 'condition.moderationThresholdHint' },
+      label: { default: 'Repetition threshold', i18key: 'automations.moderation.threshold' },
+      hint: { default: 'Scores at or above this value pass.', i18key: 'automations.moderation.thresholdHint' },
       kind: 'number',
       default: fallback,
       min: 0,
@@ -29,24 +29,24 @@ export function moderationConditionTemplates(): ConditionTemplate[] {
   return [
     {
       id: 'moderation-low',
-      title: { default: 'Moderation: Low', i18key: 'condition.moderationLow' },
-      description: { default: 'Only blatant repetition trips this level.', i18key: 'condition.moderationLowDesc' },
+      title: { default: 'Moderation: Low', i18key: 'automations.moderation.low' },
+      description: { default: 'Only blatant repetition trips this level.', i18key: 'automations.moderation.lowDesc' },
       triggers: ['tiktok.chat'],
       params: thresholdParam('0.9'),
       rows: [{ ...repetitionRow }],
     },
     {
       id: 'moderation-medium',
-      title: { default: 'Moderation: Medium', i18key: 'condition.moderationMedium' },
-      description: { default: 'Balanced: catches likely spam.', i18key: 'condition.moderationMediumDesc' },
+      title: { default: 'Moderation: Medium', i18key: 'automations.moderation.medium' },
+      description: { default: 'Balanced: catches likely spam.', i18key: 'automations.moderation.mediumDesc' },
       triggers: ['tiktok.chat'],
       params: thresholdParam('0.7'),
       rows: [{ ...repetitionRow }],
     },
     {
       id: 'moderation-high',
-      title: { default: 'Moderation: High', i18key: 'condition.moderationHigh' },
-      description: { default: 'Strict: low threshold plus flagged spam.', i18key: 'condition.moderationHighDesc' },
+      title: { default: 'Moderation: High', i18key: 'automations.moderation.high' },
+      description: { default: 'Strict: low threshold plus flagged spam.', i18key: 'automations.moderation.highDesc' },
       triggers: ['tiktok.chat'],
       params: thresholdParam('0.5'),
       rows: [

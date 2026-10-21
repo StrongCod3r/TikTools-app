@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import WidgetStage from '../sdk/WidgetStage.vue';
 import WidgetLayerStack from '../sdk/WidgetLayerStack.vue';
-import ChatRichText from '../../web/components/chat-rich-text.vue';
+import ChatRichText from '../../web/entities/live-event/ui/ChatRichText.vue';
 import { canRenderLegacyLayers } from '../sdk/layers.ts';
 import { useWidgetText, useWidgetTextOrder, widgetDesignKey } from '../sdk/text.ts';
 const text = useWidgetText('chat');

@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test';
 import {
   assertNoUnhandledCalls,
   installFakeHost,
+  waitForFrontend,
   readHostState,
 } from './fixtures/tiktools-host.ts';
 import { installPluginUiOverride, routePluginFixture } from './fixtures/plugin-frame.ts';
@@ -11,21 +12,22 @@ import { optionFailureState, ttsPageState, webviewPageState } from './fixtures/s
 test('navigation exposes named buttons and the active tab marker', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, ttsPageState());
   await page.goto('/');
+  await waitForFrontend(page);
 
   const nav = page.getByRole('navigation', { name: 'Main Navigation' });
   await expect(nav).toBeVisible();
-  const buttons = nav.getByRole('button');
+  const buttons = nav.getByRole('link');
   expect(await buttons.count()).toBeGreaterThanOrEqual(7);
   for (const name of [
-    'Live Stream Feed',
-    'Points System',
+    'Live feed',
+    'Points',
     'Connections',
     'Plugins',
     'Text to Speech',
   ]) {
-    await expect(nav.getByRole('button', { name })).toBeVisible();
+    await expect(nav.getByRole('link', { name })).toBeVisible();
   }
-  await expect(nav.getByRole('button', { name: 'Live Stream Feed' })).toHaveAttribute(
+  await expect(nav.getByRole('link', { name: 'Live feed' })).toHaveAttribute(
     'aria-current',
     'page',
   );
@@ -39,9 +41,10 @@ test('inline plugin frame exposes a keyboard-operable pop-out', async ({ page })
   await installPluginUiOverride(page);
   await routePluginFixture(page);
   await page.goto('/');
-  await page.getByRole('button', { name: 'Text to Speech' }).click();
+  await waitForFrontend(page);
+  await page.getByRole('link', { name: 'Text to Speech' }).click();
 
-  const frame = page.frameLocator('.plg-frame');
+  const frame = page.frameLocator('.plugin-frame');
   await expect(frame.locator('#server')).toHaveText('http://127.0.0.1:17842', { timeout: 10_000 });
 
   // Keyboard: the pop-out action is reachable and operable by keyboard.
@@ -60,9 +63,10 @@ test('inline plugin frame exposes a keyboard-operable pop-out', async ({ page })
 test('option errors expose status semantics', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, optionFailureState());
   await page.goto('/');
-  await page.getByRole('button', { name: 'Voices' }).click();
+  await waitForFrontend(page);
+  await page.getByRole('link', { name: 'Voices' }).click();
 
-  const status = page.getByRole('status');
+  const status = page.getByRole('status').filter({ hasText: 'option source exploded' });
   await expect(status).toContainText('option source exploded');
 
   await assertNoUnhandledCalls(page);

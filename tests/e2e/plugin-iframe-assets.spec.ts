@@ -18,6 +18,7 @@ import type { Page } from '@playwright/test';
 import {
   assertNoUnhandledCalls,
   installFakeHost,
+  waitForFrontend,
 } from './fixtures/tiktools-host.ts';
 import {
   installPluginUiOverride,
@@ -78,19 +79,20 @@ test('inline tab renders the real compiled SonicBoom bundle', async ({ page }) =
   await installPluginUiOverride(page);
   await routeCompiledPluginUi(page);
   await page.goto('/');
+  await waitForFrontend(page);
 
-  const tab = page.getByRole('button', { name: 'Text to Speech' });
+  const tab = page.getByRole('link', { name: 'Text to Speech' });
   await expect(tab).toBeVisible();
   await tab.click();
   await expect(page.getByRole('heading', { name: 'Text to Speech' }).first()).toBeVisible();
 
-  const frame = page.frameLocator('.plg-frame');
+  const frame = page.frameLocator('.plugin-frame');
   await expect(frame.getByLabel('Default voice')).toBeVisible({ timeout: 20_000 });
   await expect(frame.getByLabel('Audio output').first()).toBeVisible({ timeout: 10_000 });
   await expect(frame.getByRole('button', { name: 'Play' })).toBeVisible();
 
   // The iframe fills the tab area instead of a fixed-height box.
-  const frameBox = await page.locator('.plg-frame').boundingBox();
+  const frameBox = await page.locator('.plugin-frame').boundingBox();
   expect(frameBox?.height).toBeGreaterThan(500);
 
   await assertNoUnhandledCalls(page);
@@ -122,13 +124,14 @@ async function expectScrollableInlineUi(
   await installPluginUiOverride(page);
   await routeCompiledPluginUi(page);
   await page.goto('/');
+  await waitForFrontend(page);
 
-  const tab = page.getByRole('button', { name: 'Text to Speech' });
+  const tab = page.getByRole('link', { name: 'Text to Speech' });
   await expect(tab).toBeVisible();
   await tab.click();
   await expect(page.getByRole('heading', { name: 'Text to Speech' }).first()).toBeVisible();
 
-  const frame = page.frameLocator('.plg-frame');
+  const frame = page.frameLocator('.plugin-frame');
   await expect(frame.getByLabel('Default voice')).toBeVisible({ timeout: 20_000 });
 
   // The plugin document is the single content scroller: at these sizes
@@ -170,8 +173,8 @@ async function expectScrollableInlineUi(
   expect(bottom.top).toBeGreaterThanOrEqual(bottom.max - 2);
 
   // The iframe keeps a usable height and still fills the tab area.
-  const frameBox = await page.locator('.plg-frame').boundingBox();
-  const scrollBox = await page.locator('.plg-scroll--webview').boundingBox();
+  const frameBox = await page.locator('.plugin-frame').boundingBox();
+  const scrollBox = await page.locator('.plugin-page__panel .base-panel__body').boundingBox();
   expect(frameBox?.height).toBeGreaterThan(options.minFrameHeight ?? 0);
   expect(Math.abs((frameBox?.height ?? 0) - (scrollBox?.height ?? 0))).toBeLessThan(40);
 

@@ -15,7 +15,7 @@ import type { PluginEventType } from './behavior/types.ts';
  * `src/web`. It exposes registry fields (path, TS type, kind, labels, live
  * sample) and sample events. Every autocomplete list, condition field and
  * sample event in the app derives from here — see
- * `web/components/node-editor/template-suggestions.ts` and
+ * `web/entities/automation/lib/template-variables.ts` and
  * `automation/behavior/fields.ts`.
  *
  * Field listings hide paths owned by unavailable plugins (see
