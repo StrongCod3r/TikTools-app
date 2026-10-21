@@ -3,6 +3,7 @@ import { expect, test } from '@playwright/test';
 import {
   assertNoUnhandledCalls,
   installFakeHost,
+  waitForFrontend,
   readHostState,
 } from './fixtures/tiktools-host.ts';
 import { SONICBOOM_ID, VOICES_SOURCE } from './fixtures/plugins.ts';
@@ -14,7 +15,7 @@ import {
 } from './fixtures/states.ts';
 
 async function openPluginTab(page: Parameters<typeof installFakeHost>[0], name: string) {
-  const tab = page.getByRole('button', { name });
+  const tab = page.getByRole('link', { name });
   await expect(tab).toBeVisible();
   await tab.click();
   await expect(tab).toHaveAttribute('aria-current', 'page');
@@ -23,6 +24,7 @@ async function openPluginTab(page: Parameters<typeof installFakeHost>[0], name: 
 test('declarative form page renders and saves settings', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, formPageState());
   await page.goto('/');
+  await waitForFrontend(page);
   await openPluginTab(page, 'Server settings');
 
   await expect(page.getByRole('heading', { name: 'Server settings' }).first()).toBeVisible();
@@ -49,6 +51,7 @@ test('declarative form page renders and saves settings', async ({ page }) => {
 test('dynamic list page renders rows and refreshes', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, listPageState());
   await page.goto('/');
+  await waitForFrontend(page);
   await openPluginTab(page, 'Voices');
 
   await expect(page.getByRole('heading', { name: 'Voices' }).first()).toBeVisible();
@@ -73,6 +76,7 @@ test('dynamic list page renders rows and refreshes', async ({ page }) => {
 test('text page renders manifest copy as plain text', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, textPageState());
   await page.goto('/');
+  await waitForFrontend(page);
   await openPluginTab(page, 'About');
 
   await expect(page.getByText('SonicBoom renders chat to speech on this machine.')).toBeVisible();
@@ -84,10 +88,11 @@ test('text page renders manifest copy as plain text', async ({ page }) => {
 test('option-source failure shows an error but keeps the page usable', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, optionFailureState());
   await page.goto('/');
+  await waitForFrontend(page);
   await openPluginTab(page, 'Voices');
 
   await expect(page.getByRole('heading', { name: 'Voices' }).first()).toBeVisible();
-  await expect(page.getByRole('status')).toContainText('option source exploded');
+  await expect(page.getByRole('status').filter({ hasText: 'option source exploded' })).toContainText('option source exploded');
   // Refresh stays available; the rest of the page did not crash.
   await expect(page.getByRole('button', { name: 'Refresh' })).toBeEnabled();
 

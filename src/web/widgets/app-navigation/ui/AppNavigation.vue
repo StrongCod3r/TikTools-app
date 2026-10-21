@@ -1,0 +1,121 @@
+<script setup lang="ts">
+import { useI18n } from 'vue-i18n';
+import type { NavigationSection } from '../model/navigation-types.ts';
+
+defineProps<{
+  sections: readonly NavigationSection[];
+}>();
+
+const { t } = useI18n();
+</script>
+
+<template>
+  <nav
+    class="app-navigation"
+    :aria-label="t('navigation.label')"
+  >
+    <section
+      v-for="section in sections"
+      :key="section.id"
+      class="app-navigation__section"
+      :aria-labelledby="`navigation-${section.id}`"
+    >
+      <h2
+        :id="`navigation-${section.id}`"
+        class="app-navigation__heading"
+      >
+        {{ section.label }}
+      </h2>
+      <ul class="app-navigation__list">
+        <li
+          v-for="item in section.items"
+          :key="item.id"
+        >
+          <RouterLink
+            class="app-navigation__link"
+            exact-active-class="app-navigation__link--active"
+            :to="item.to"
+          >
+            <component
+              :is="item.icon"
+              class="app-navigation__icon"
+            />
+            <span class="app-navigation__label">{{ item.label }}</span>
+          </RouterLink>
+        </li>
+      </ul>
+    </section>
+  </nav>
+</template>
+
+<style scoped>
+.app-navigation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  height: 100%;
+  padding: var(--space-3) var(--space-2);
+  overflow-y: auto;
+  background: var(--color-bg-panel);
+  font-family: var(--font-family);
+  font-size: var(--font-size-md);
+}
+
+.app-navigation__heading {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text-subtle);
+  font-size: var(--font-size-xs);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.app-navigation__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.app-navigation__link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--control-height-lg);
+  padding: 0 var(--space-4);
+  border: var(--border-width) solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  text-decoration: none;
+  outline: none;
+}
+
+.app-navigation__link:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text);
+}
+
+.app-navigation__link:focus-visible {
+  border-color: var(--color-border-focus);
+}
+
+.app-navigation__link--active,
+.app-navigation__link--active:hover {
+  border-color: var(--color-border-selected);
+  background: var(--color-bg-selected);
+  color: var(--color-text-on-accent);
+}
+
+.app-navigation__icon {
+  flex: none;
+}
+
+.app-navigation__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+</style>

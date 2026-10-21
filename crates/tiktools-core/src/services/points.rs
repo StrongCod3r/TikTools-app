@@ -1546,6 +1546,38 @@ mod tests {
     }
 
     #[test]
+    fn rule_updates_apply_to_next_award_without_recreating_service() {
+        let service = PointsService::default();
+        let first = service
+            .award_points("alice", PointAction::Chat, AwardOptions::default())
+            .expect("award");
+        assert_eq!(first.delta, 1.0);
+
+        let update = serde_json::from_value(serde_json::json!({
+            "pointsPerChat": 7.0,
+            "currencyName": "Gems"
+        }))
+        .expect("partial config");
+        service.update_config(update);
+        let second = service
+            .award_points("alice", PointAction::Chat, AwardOptions::default())
+            .expect("award");
+        assert_eq!(second.delta, 7.0);
+        assert_eq!(second.total_points, 8.0);
+        assert_eq!(service.config().currency_name, "Gems");
+
+        service.update_config(
+            serde_json::from_value(serde_json::json!({ "pointsPerChatEnabled": false }))
+                .expect("partial config"),
+        );
+        let disabled = service
+            .award_points("alice", PointAction::Chat, AwardOptions::default())
+            .expect("viewer counters still update");
+        assert_eq!(disabled.delta, 0.0);
+        assert_eq!(disabled.total_points, 8.0);
+    }
+
+    #[test]
     fn reset_keeps_viewers_and_counters_but_zeroes_points() {
         let service = PointsService::default();
         service.award_points("alice", PointAction::Chat, AwardOptions::default());

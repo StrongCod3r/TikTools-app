@@ -1,0 +1,19 @@
+.base-tooltip {
+  position: fixed;
+  z-index: var(--z-tooltip);
+  max-width: 320px;
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-overlay);
+  box-shadow: var(--shadow-popup);
+  color: var(--color-text);
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-normal);
+  pointer-events: none;
+}
+
+.base-tooltip[hidden] {
+  display: none;
+}

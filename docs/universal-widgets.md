@@ -1,6 +1,6 @@
 # Universal widgets and the optional OBS bridge
 
-The Widgets page now embeds a portable package panel via
+The Overlays page opens a portable package panel from its toolbar via
 `src/widgets/sdk/UniversalWidgetPanel.vue`. It consumes the exact shared SDK
 vendored under `src/universal`; `vendor-lock.json` records its version and hashes.
 `node scripts/check-universal.mjs` verifies the installed copy without another
@@ -36,7 +36,7 @@ contract/security tests run with:
 ```text
 cargo test --manifest-path examples/event-gateway-process-plugin/Cargo.toml --locked
 bun run universal:check
-bun test src/widgets/shared/universal.test.ts src/web/components/widgets-editor/history.test.ts
+bun test src/widgets/shared/universal.test.ts src/web/entities/overlay/lib/editor-history.test.ts
 ```
 
 See the OBS repository's `docs/architecture/current-state.md`,

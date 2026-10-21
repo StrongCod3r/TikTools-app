@@ -1,11 +1,12 @@
 import { expect, test } from '@playwright/test';
 
-import { assertNoUnhandledCalls, emitTopic, installFakeHost } from './fixtures/tiktools-host.ts';
+import { assertNoUnhandledCalls, emitTopic, installFakeHost, waitForFrontend } from './fixtures/tiktools-host.ts';
 import { emptyState } from './fixtures/states.ts';
 
 test('feed rows stay badge-free and open details in the shared panel', async ({ page }) => {
   const capture = await installFakeHost(page, emptyState());
   await page.goto('/');
+  await waitForFrontend(page);
 
   await emitTopic(page, 'live.ui-event', {
     event: {
@@ -20,23 +21,23 @@ test('feed rows stay badge-free and open details in the shared panel', async ({ 
     },
   });
 
-  const row = page.locator('.tiktok-chat-row').first();
+  const row = page.locator('.event-row').first();
   await expect(row).toBeVisible();
   // Level and points are details, not row decoration.
   await expect(row.locator('.tt-badge-level')).toHaveCount(0);
   await expect(row.locator('.tt-points-badge')).toHaveCount(0);
   // The timestamp is always visible, even when points were earned.
-  await expect(row.locator('.tt-timestamp')).toBeVisible();
+  await expect(row.locator('.event-row__time')).toBeVisible();
 
-  await row.locator('.tt-row-content').click();
-  await expect(page.locator('.feed-details')).toBeVisible();
-  await expect(page.locator('.feed-details')).toContainText('Level');
-  await expect(page.locator('.feed-details')).toContainText('Points earned');
-  await expect(page.locator('.feed-details')).toContainText('Rose');
+  await row.locator('.event-row__content').click();
+  await expect(page.locator('.event-details')).toBeVisible();
+  await expect(page.locator('.event-details')).toContainText('Level');
+  await expect(page.locator('.event-details')).toContainText('Points earned');
+  await expect(page.locator('.event-details')).toContainText('Rose');
 
   // Escape closes the panel and returns focus to the row's control.
   await page.keyboard.press('Escape');
-  await expect(page.locator('.feed-details')).toHaveCount(0);
+  await expect(page.locator('.event-details')).toHaveCount(0);
 
   await assertNoUnhandledCalls(page);
   capture.assertClean();
@@ -45,14 +46,15 @@ test('feed rows stay badge-free and open details in the shared panel', async ({ 
 test('the avatar opens the user profile in the same panel', async ({ page }) => {
   const capture = await installFakeHost(page, emptyState());
   await page.goto('/');
+  await waitForFrontend(page);
 
   await emitTopic(page, 'live.ui-event', {
     event: { kind: 'chat', author: 'alice', nickname: 'Alice', text: 'hola', msgId: 'aside-chat-1' },
   });
 
-  await page.locator('.tiktok-chat-row').first().locator('.tt-user-chip').click();
-  await expect(page.locator('.feed-aside .tt-user-card')).toBeVisible();
-  await expect(page.locator('.feed-aside')).toContainText('@alice');
+  await page.locator('.event-row').first().locator('.event-row__author').click();
+  await expect(page.locator('.feed-inspector .viewer-profile')).toBeVisible();
+  await expect(page.locator('.feed-inspector')).toContainText('@alice');
 
   await assertNoUnhandledCalls(page);
   capture.assertClean();

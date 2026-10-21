@@ -409,3 +409,11 @@ export async function emitPush(page: Page, message: Record<string, unknown>): Pr
     window.__webview_on_message__?.(JSON.stringify(message));
   }, message);
 }
+
+/** Lazy route modules can finish mounting after the document load event. */
+export async function waitForFrontend(page: Page): Promise<void> {
+  await page.waitForFunction(() => {
+    const scope = window as unknown as { __TIKTOOLS_E2E_STATE__: E2EHostState };
+    return scope.__TIKTOOLS_E2E_STATE__.frontendReady;
+  });
+}

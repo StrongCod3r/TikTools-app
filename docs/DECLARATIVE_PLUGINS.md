@@ -285,6 +285,14 @@ plugin automatically (`bun run prepare:dev-plugins`).
 rule pack on top of it: 14 gift rules plus follow/share announcements,
 every rule flashing a `/title` + subtitle.
 
+`examples/peak-game/plugin.json` drives PEAK through PEAKapi, the local
+BepInEx REST API of the game (spawn item, entity and hazard, despawn one
+API-owned object, clear them all). It reads the item, entity and hazard
+catalogs as dynamic selects, probes `/health` for the `gameplayReady`
+readiness signal, and imports the token and the API port from the game's
+own `BepInEx/config/org.peak.rest-api.cfg`, so the connection card can
+find the installation by itself.
+
 ## Templates
 
 ```json
@@ -467,11 +475,11 @@ The UI reloads masked settings and tests the connection after success; it blocks
 import during pending edits and removes the settings form while importing to
 avoid racing autosaves with the new secret.
 
-Only `examples/repo-game/plugin.json` opts in initially. SonicBoom retains its
-admin login flow and Minecraft stays unchanged. A future plugin with an INI token
-can opt in with its own filename/section/key and secret token setting, using the
-same connection UI and executor. Token import does not disable authentication or
-modify the source server configuration.
+`examples/repo-game/plugin.json` and `examples/peak-game/plugin.json` opt in.
+SonicBoom retains its admin login flow and Minecraft stays unchanged. A future
+plugin with an INI token can opt in with its own filename/section/key and secret
+token setting, using the same connection UI and executor. Token import does not
+disable authentication or modify the source server configuration.
 
 ### Automatic connection and game-folder setup
 
@@ -495,7 +503,7 @@ how to import its endpoint:
 These keys live inside `http.tokenImport`. Paths must be relative, at most eight
 components, without traversal, and end in `fileName`. Steam/mod-manager game names
 must be single folder names. The URL destination must be a declared URI setting.
-Only R.E.P.O. opts in initially; SonicBoom's admin login and Minecraft are unchanged.
+R.E.P.O. and PEAK opt in; SonicBoom's admin login and Minecraft are unchanged.
 
 `plugins.token.import` retains its file-picker default and supports:
 

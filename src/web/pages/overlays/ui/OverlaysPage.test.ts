@@ -1,0 +1,98 @@
+import { enableAutoUnmount, flushPromises } from '@vue/test-utils';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { nextTick } from 'vue';
+import { createFakeControlClient, storePlugins } from '@/shared/lib/testing/fake-control-client.ts';
+import { mountWithPlugins } from '@/shared/lib/testing/mount.ts';
+import OverlaysPage from './OverlaysPage.vue';
+
+enableAutoUnmount(afterEach);
+
+beforeEach(() => {
+  localStorage.clear();
+});
+
+async function mountPage() {
+  const { client, calls } = createFakeControlClient((method) => {
+    if (method === 'widgets.status') return { state: 'ready', port: 19999, error: null };
+    if (method === 'app.state.get') return { state: { 'widgets.design.follow': '{"radius":24}' } };
+    if (method === 'widgets.copyObsUrl') return { ok: true };
+    return { ok: true };
+  });
+  const wrapper = mountWithPlugins(OverlaysPage, { attachTo: document.body, global: { plugins: storePlugins(client) } });
+  await flushPromises();
+  return { wrapper, calls };
+}
+
+type Wrapper = Awaited<ReturnType<typeof mountPage>>['wrapper'];
+
+function buttonByText(wrapper: Wrapper, text: string) {
+  return wrapper.findAll('button').find((button) => button.text() === text)!;
+}
+
+async function selectKind(wrapper: Wrapper, name: string) {
+  await wrapper.findAll('.overlays-page__kinds [role="option"]').find((item) => item.text().includes(name))!.trigger('pointerdown');
+  await nextTick();
+}
+
+describe('OverlaysPage', () => {
+  it('shows the gateway status and the redacted source url', async () => {
+    const { wrapper } = await mountPage();
+    expect(wrapper.get('.overlays-page__gateway').text()).toContain('Ready on port 19999');
+    expect((wrapper.get('#overlay-source-url').element as HTMLInputElement).value).toBe(
+      'http://127.0.0.1:19999/widgets/follow/#token=••••••••',
+    );
+  });
+
+  it('opens portable packages and returns to the existing design', async () => {
+    const { wrapper } = await mountPage();
+    const source = (wrapper.get('#overlay-source-url').element as HTMLInputElement).value;
+    await buttonByText(wrapper, 'Portable packages').trigger('click');
+    expect(wrapper.find('.overlays-page__portable').exists()).toBe(true);
+    expect(wrapper.get('.overlays-page__workspace').isVisible()).toBe(false);
+    await buttonByText(wrapper, 'Portable packages').trigger('click');
+    expect(wrapper.find('.overlays-page__portable').exists()).toBe(false);
+    expect(wrapper.get('.overlays-page__workspace').isVisible()).toBe(true);
+    expect((wrapper.get('#overlay-source-url').element as HTMLInputElement).value).toBe(source);
+  });
+
+  it('copies the source url through the host', async () => {
+    const { wrapper, calls } = await mountPage();
+    await buttonByText(wrapper, 'Copy URL').trigger('click');
+    await flushPromises();
+    expect(calls.find((call) => call.method === 'widgets.copyObsUrl')?.params).toEqual({ widget: 'follow' });
+    expect(buttonByText(wrapper, 'Copied').exists()).toBe(true);
+  });
+
+  it('edits and saves the selected design', async () => {
+    const { wrapper, calls } = await mountPage();
+    expect(buttonByText(wrapper, 'Save design').attributes('disabled')).toBeDefined();
+    await buttonByText(wrapper, 'Card').trigger('click');
+    const shadow = wrapper.findAll('.design-inspector input[type="checkbox"]')[0]!;
+    await shadow.setValue(false);
+    expect(buttonByText(wrapper, 'Save design').attributes('disabled')).toBeUndefined();
+    await buttonByText(wrapper, 'Save design').trigger('click');
+    await flushPromises();
+    const saved = calls.find((call) => call.method === 'app.state.set');
+    expect(saved?.params).toMatchObject({ key: 'widgets.design.follow' });
+    expect(JSON.parse(String(saved?.params?.value))).toMatchObject({ radius: 24 });
+    expect(wrapper.text()).toContain('Design saved.');
+  });
+
+  it('asks before switching away from unsaved changes', async () => {
+    const { wrapper } = await mountPage();
+    await buttonByText(wrapper, 'Card').trigger('click');
+    await wrapper.findAll('.design-inspector input[type="checkbox"]')[0]!.setValue(false);
+    await selectKind(wrapper, 'Gift alert');
+    expect(document.body.textContent).toContain('Discard design changes?');
+    Array.from(document.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent?.trim() === 'Discard')!.click();
+    await nextTick();
+    expect((wrapper.get('#overlay-source-url').element as HTMLInputElement).value).toContain('/widgets/gift/');
+  });
+
+  it('switches directly when nothing changed and remembers the choice', async () => {
+    const { wrapper } = await mountPage();
+    await selectKind(wrapper, 'Chat overlay');
+    expect((wrapper.get('#overlay-source-url').element as HTMLInputElement).value).toContain('/widgets/chat/');
+    expect(JSON.parse(localStorage.getItem('tiktok-live-view-state') ?? '{}').widgets).toEqual({ selectedKind: 'chat' });
+  });
+});

@@ -1392,6 +1392,7 @@ fn repo_and_reference_manifests_are_valid() {
         include_str!("../../../../examples/repo-game/plugin.json"),
         include_str!("../../../../examples/minecraft-server/plugin.json"),
         include_str!("../../../../examples/sonicboom-server/plugin.json"),
+        include_str!("../../../../examples/peak-game/plugin.json"),
     ] {
         PluginManifest::from_json_str(source).expect("reference declarative manifest");
     }

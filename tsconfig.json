@@ -16,6 +16,9 @@
     "resolveJsonModule": true,
     "verbatimModuleSyntax": true,
     "noEmit": true,
+    "paths": {
+      "@/*": ["./src/web/*"]
+    },
 
     // Best practices
     "strict": true,
@@ -29,5 +32,5 @@
     "noUnusedParameters": true,
     "noPropertyAccessFromIndexSignature": false
   },
-  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts", "playwright.config.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.vue", "vite.config.ts", "vitest.config.ts", "playwright.config.ts", "tests/**/*.ts"]
 }

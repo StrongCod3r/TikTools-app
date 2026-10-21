@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { assertNoUnhandledCalls, emitTopic, installFakeHost } from './fixtures/tiktools-host.ts';
+import { assertNoUnhandledCalls, emitTopic, installFakeHost, waitForFrontend } from './fixtures/tiktools-host.ts';
 import { emptyState } from './fixtures/states.ts';
 
 test('feed appends only format new cards and still update locale, search, and clear', async ({ page }) => {
@@ -20,27 +20,30 @@ test('feed appends only format new cards and still update locale, search, and cl
     });
   });
   await page.goto('/');
-  await expect(page.getByText('No live events yet.')).toBeVisible();
+  await waitForFrontend(page);
+  await expect(page.getByText('No live events yet.', { exact: false })).toBeVisible();
   const emitChat = (index: number) => emitTopic(page, 'live.ui-event', {
     event: { kind: 'chat', author: 'alice', text: `feed message ${index}`, msgId: `feed-${index}` },
   });
   await emitChat(1);
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(1);
+  await expect(page.locator('.event-row')).toHaveCount(1);
   await page.evaluate(() => { (window as typeof window & { feedFormatCalls: number }).feedFormatCalls = 0; });
   await emitChat(2);
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(2);
+  await expect(page.locator('.event-row')).toHaveCount(2);
   expect(await page.evaluate(() => (window as typeof window & { feedFormatCalls: number }).feedFormatCalls)).toBe(1);
 
-  await page.getByRole('button', { name: /Switch Language/ }).click();
+  await page.getByRole('menuitem', { name: 'View', exact: true }).click();
+  await page.getByRole('menuitem', { name: 'Language', exact: true }).hover();
+  await page.getByRole('menuitemcheckbox', { name: 'Español' }).click();
   await expect(page.locator('html')).toHaveAttribute('lang', 'es');
   await expect.poll(() => page.evaluate(() => (window as typeof window & { feedFormatCalls: number }).feedFormatCalls)).toBe(3);
-  await page.locator('.feed-toolbar input').fill('message 2');
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(1);
-  await expect(page.locator('.tiktok-chat-row')).toContainText('feed message 2');
-  await page.locator('.feed-toolbar input').fill('');
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(2);
+  await page.locator('.live-feed__search input').fill('message 2');
+  await expect(page.locator('.event-row')).toHaveCount(1);
+  await expect(page.locator('.event-row')).toContainText('feed message 2');
+  await page.locator('.live-feed__search input').fill('');
+  await expect(page.locator('.event-row')).toHaveCount(2);
   await page.getByRole('button', { name: /Limpiar/ }).click();
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(0);
+  await expect(page.locator('.event-row')).toHaveCount(0);
   await assertNoUnhandledCalls(page);
   capture.assertClean();
 });
@@ -48,13 +51,14 @@ test('feed appends only format new cards and still update locale, search, and cl
 test('hidden feed makes no commits and resumes with a discontinuity', async ({ page }) => {
   const capture = await installFakeHost(page, emptyState());
   await page.goto('/');
+  await waitForFrontend(page);
   await emitTopic(page, 'live.ui-event', { event: { kind: 'chat', author: 'alice', text: 'before', msgId: 'before' } });
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(1);
+  await expect(page.locator('.event-row')).toHaveCount(1);
   await page.evaluate(() => {
     const scope = window as unknown as { __tiktools_benchmark_controls__: { setTab(tab: string): void } };
     scope.__tiktools_benchmark_controls__.setTab('settings');
   });
-  await expect(page.locator('.feed-stream')).toHaveCount(0);
+  await expect(page.locator('.live-feed__stream')).toHaveCount(0);
   const commits = await page.evaluate(() => {
     const scope = window as unknown as { __tiktools_frontend_diagnostics__(): { live: { commits: number } } };
     return scope.__tiktools_frontend_diagnostics__().live.commits;
@@ -72,8 +76,8 @@ test('hidden feed makes no commits and resumes with a discontinuity', async ({ p
   await page.evaluate(() => {
     (window as unknown as { __tiktools_benchmark_controls__: { setTab(tab: string): void } }).__tiktools_benchmark_controls__.setTab('feed');
   });
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(2);
-  await expect(page.locator('.tiktok-chat-row').last()).toContainText('Feed resumed');
+  await expect(page.locator('.event-row')).toHaveCount(2);
+  await expect(page.locator('.event-row').last()).toContainText('Feed resumed');
   await assertNoUnhandledCalls(page);
   capture.assertClean();
 });
@@ -81,14 +85,15 @@ test('hidden feed makes no commits and resumes with a discontinuity', async ({ p
 test('image-disabled diagnostic mode removes avatar and gift image requests', async ({ page }) => {
   const capture = await installFakeHost(page, emptyState());
   await page.goto('/');
+  await waitForFrontend(page);
   await page.evaluate(() => {
     (window as unknown as { __tiktools_benchmark_controls__: { setImagesEnabled(enabled: boolean): void } }).__tiktools_benchmark_controls__.setImagesEnabled(false);
   });
   await emitTopic(page, 'live.ui-event', { event: { kind: 'gift', author: 'alice', text: 'gift', msgId: 'gift-image-ab',
     avatarUrl: 'https://example.invalid/avatar.png', giftDetails: { name: 'Rose', count: 1, diamonds: 1, imageUrl: 'https://example.invalid/gift.png' } } });
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(1);
-  await expect(page.locator('.tiktok-chat-row img')).toHaveCount(0);
-  await expect(page.locator('.tt-gift-icon')).toBeVisible();
+  await expect(page.locator('.event-row')).toHaveCount(1);
+  await expect(page.locator('.event-row img')).toHaveCount(0);
+  await expect(page.locator('.event-row__text')).toHaveText('gift');
   await assertNoUnhandledCalls(page);
   capture.assertClean();
 });
@@ -96,24 +101,25 @@ test('image-disabled diagnostic mode removes avatar and gift image requests', as
 test('autoscroll and paused position survive feed navigation', async ({ page }) => {
   const capture = await installFakeHost(page, emptyState());
   await page.goto('/');
+  await waitForFrontend(page);
   await page.evaluate(() => {
     const batch = Array.from({ length: 100 }, (_, index) => JSON.stringify({ method: 'event', params: { topic: 'live.ui-event',
       data: { event: { kind: 'chat', author: 'alice', text: `scroll ${index}`, msgId: `scroll-${index}` } } } }));
     window.__tiktools_receive_batch__?.(batch);
   });
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(100);
-  const bottomDistance = () => page.locator('.feed-stream').evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+  await expect(page.locator('.event-row')).toHaveCount(100);
+  const bottomDistance = () => page.locator('.live-feed__stream').evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
   await expect.poll(bottomDistance).toBeLessThan(2);
-  await page.locator('.feed-footer-info button').first().click();
-  await page.locator('.feed-stream').evaluate((node) => { node.scrollTop = 100; });
+  await page.getByRole('button', { name: /auto-scroll/ }).click();
+  await page.locator('.live-feed__stream').evaluate((node) => { node.scrollTop = 100; });
   await emitTopic(page, 'live.ui-event', { event: { kind: 'chat', author: 'alice', text: 'paused', msgId: 'paused-scroll' } });
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(101);
-  expect(await page.locator('.feed-stream').evaluate((node) => node.scrollTop)).toBe(100);
+  await expect(page.locator('.event-row')).toHaveCount(101);
+  expect(await page.locator('.live-feed__stream').evaluate((node) => node.scrollTop)).toBe(100);
   await page.evaluate(() => (window as unknown as { __tiktools_benchmark_controls__: { setTab(tab: string): void } }).__tiktools_benchmark_controls__.setTab('settings'));
-  await expect(page.locator('.feed-stream')).toHaveCount(0);
+  await expect(page.locator('.live-feed__stream')).toHaveCount(0);
   await page.evaluate(() => (window as unknown as { __tiktools_benchmark_controls__: { setTab(tab: string): void } }).__tiktools_benchmark_controls__.setTab('feed'));
-  await expect.poll(() => page.locator('.feed-stream').evaluate((node) => node.scrollTop)).toBe(100);
-  await page.locator('.feed-footer-info button').first().click();
+  await expect.poll(() => page.locator('.live-feed__stream').evaluate((node) => node.scrollTop)).toBe(100);
+  await page.getByRole('button', { name: /auto-scroll/ }).click();
   await expect.poll(bottomDistance).toBeLessThan(2);
   await assertNoUnhandledCalls(page);
   capture.assertClean();
@@ -122,20 +128,21 @@ test('autoscroll and paused position survive feed navigation', async ({ page }) 
 test('pinned feed renders 100 while pause and search expose all 300 buffered events', async ({ page }) => {
   const capture = await installFakeHost(page, emptyState());
   await page.goto('/');
+  await waitForFrontend(page);
   await page.evaluate(() => {
     window.__tiktools_receive_batch__?.(Array.from({ length: 300 }, (_, index) => JSON.stringify({ method: 'event', params: { topic: 'live.ui-event',
       data: { event: { kind: 'chat', author: 'alice', text: `buffer ${index}`, msgId: `buffer-${index}` } } } })));
   });
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(100);
-  await expect(page.locator('.feed-window-hint')).toContainText('newest 100 shown');
-  await page.locator('.feed-toolbar input').fill('buffer 0');
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(1);
-  await expect(page.locator('.tiktok-chat-row')).toContainText('buffer 0');
-  await page.locator('.feed-toolbar input').fill('');
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(100);
-  await page.locator('.feed-footer-info button').first().click();
-  await expect(page.locator('.tiktok-chat-row')).toHaveCount(300);
-  await expect(page.locator('.feed-window-hint')).toHaveCount(0);
+  await expect(page.locator('.event-row')).toHaveCount(100);
+  await expect(page.locator('.live-feed__hint')).toContainText('newest 100 shown');
+  await page.locator('.live-feed__search input').fill('buffer 0');
+  await expect(page.locator('.event-row')).toHaveCount(1);
+  await expect(page.locator('.event-row')).toContainText('buffer 0');
+  await page.locator('.live-feed__search input').fill('');
+  await expect(page.locator('.event-row')).toHaveCount(100);
+  await page.getByRole('button', { name: /auto-scroll/ }).click();
+  await expect(page.locator('.event-row')).toHaveCount(300);
+  await expect(page.locator('.live-feed__hint')).toHaveCount(0);
   await assertNoUnhandledCalls(page);
   capture.assertClean();
 });

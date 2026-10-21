@@ -1,0 +1,444 @@
+{
+  "profileVersion": 1,
+  "id": "peak-giftwall",
+  "name": "PEAK giftwall",
+  "description": "Listo para tu directo: cada regalo conocido invoca algo en PEAK. Requiere el plugin peak.game, PEAKapi en marcha y una partida con nivel activo en la que seas el anfitrión. Los IDs de item, entidad y peligro salen del catalogo de PEAKapi (/api/catalog/items, /api/catalog/entities, /api/catalog/hazards) y las entidades y peligros se mandan con tiempo de vida, asi que se limpian solos. Edita los filtros de regalo si en tu region tienen otro nombre.",
+  "params": {},
+  "templates": [
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-rose",
+        "title": "Rosa → perrito caliente",
+        "description": "Rosa (1 moneda) deja 1 perrito caliente a un jugador al azar.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar perrito",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "Glizzy",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Rosa",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Rose"
+            }
+          ],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-finger-heart",
+        "title": "Corazon con dedos → galletas",
+        "description": "Finger Heart (1 moneda) deja 1 galletas de explorador a un jugador al azar.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar galletas",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "ScoutCookies",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Finger Heart",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Finger Heart"
+            }
+          ],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-tiktok",
+        "title": "TikTok → mezcla de frutos secos",
+        "description": "TikTok (1 moneda) deja 2 mezclas de frutos secos a un jugador al azar.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar mezcla",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "TrailMix",
+              "quantity": 2,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "TikTok",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "TikTok"
+            }
+          ],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-doughnut",
+        "title": "Dona → malvaviscos",
+        "description": "Doughnut (5 monedas) deja 2 malvaviscos a un jugador al azar.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar malvaviscos",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "Marshmallow",
+              "quantity": 2,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Doughnut",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Doughnut"
+            }
+          ],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-perfume",
+        "title": "Perfume → bebida energetica",
+        "description": "Perfume (10 monedas) deja 2 bebidas energeticas a un jugador al azar.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar bebida",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "Energy Drink",
+              "quantity": 2,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Perfume",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Perfume"
+            }
+          ],
+          "cooldownMs": 15000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-heart-me",
+        "title": "Heart Me → botiquin",
+        "description": "Heart Me (10 monedas) deja 1 botiquin de primeros auxilios a un jugador al azar.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar botiquin",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "FirstAidKit",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Heart Me",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Heart Me"
+            }
+          ],
+          "cooldownMs": 15000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-hand-hearts",
+        "title": "Manitas → barrita de granola",
+        "description": "Hand Hearts (5 monedas) deja 3 barritas de granola a un jugador al azar.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar barritas",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "Granola Bar",
+              "quantity": 3,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Hand Hearts",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Hand Hearts"
+            }
+          ],
+          "cooldownMs": 15000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-galaxy",
+        "title": "Galaxia → enjambre de abejas",
+        "description": "Galaxy (100 monedas) invoca 1 enjambre de abejas que desaparece solo a los 60 segundos.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar enjambre",
+            "typeId": "peak.game.spawn-entity",
+            "enabled": true,
+            "config": {
+              "entityId": "bee_swarm",
+              "quantity": 1,
+              "lifetimeSeconds": 60,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Galaxy",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Galaxy"
+            }
+          ],
+          "cooldownMs": 30000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-large",
+        "title": "Regalo grande → escorpiones",
+        "description": "Large gift invoca 2 escorpiones que desaparecen solos a los 60 segundos.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar escorpiones",
+            "typeId": "peak.game.spawn-entity",
+            "enabled": true,
+            "config": {
+              "entityId": "scorpion",
+              "quantity": 2,
+              "lifetimeSeconds": 60,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Large gift",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Large gift"
+            }
+          ],
+          "cooldownMs": 30000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-gift-rocket",
+        "title": "Cohete → tumbleweed",
+        "description": "Rocket invoca 1 tumbleweed que se desvanece a los 30 segundos.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar tumbleweed",
+            "typeId": "peak.game.spawn-hazard",
+            "enabled": true,
+            "config": {
+              "hazardId": "tumbleweed",
+              "quantity": 1,
+              "lifetimeSeconds": 30,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Rocket",
+          "enabled": true,
+          "trigger": "tiktok.gift",
+          "filters": [
+            {
+              "path": "event.data.giftName",
+              "operator": "eq",
+              "value": "Rocket"
+            }
+          ],
+          "cooldownMs": 30000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-follow",
+        "title": "Seguimiento → bebida deportiva",
+        "description": "Cada nuevo seguidor deja 1 bebida deportiva a un jugador al azar.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar bebida deportiva",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "Sports Drink",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Follow",
+          "enabled": true,
+          "trigger": "tiktok.follow",
+          "filters": [],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    },
+    {
+      "template": {
+        "templateVersion": 1,
+        "id": "peak-share",
+        "title": "Share → farol",
+        "description": "Cada vez que comparten el stream aparece 1 farol para un jugador al azar.",
+        "icon": "gift",
+        "actions": [
+          {
+            "name": "Invocar farol",
+            "typeId": "peak.game.spawn-item",
+            "enabled": true,
+            "config": {
+              "itemId": "Lantern",
+              "quantity": 1,
+              "positionMode": "random_player"
+            }
+          }
+        ],
+        "event": {
+          "name": "Share",
+          "enabled": true,
+          "trigger": "tiktok.share",
+          "filters": [],
+          "cooldownMs": 10000,
+          "cooldownScope": "global",
+          "runMode": "all"
+        }
+      },
+      "params": {}
+    }
+  ]
+}
