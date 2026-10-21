@@ -4,6 +4,7 @@ import {
   assertNoUnhandledCalls,
   emitTopic,
   installFakeHost,
+  waitForFrontend,
   readHostState,
 } from './fixtures/tiktools-host.ts';
 import { SONICBOOM_ID, SPEAK_ACTION } from './fixtures/plugins.ts';
@@ -11,7 +12,7 @@ import { installPluginUiOverride, routePluginFixture } from './fixtures/plugin-f
 import { ttsPageState, webviewPageState } from './fixtures/states.ts';
 
 async function openTts(page: Parameters<typeof installFakeHost>[0]) {
-  const tab = page.getByRole('button', { name: 'Text to Speech' });
+  const tab = page.getByRole('link', { name: 'Text to Speech' });
   await expect(tab).toBeVisible();
   await tab.click();
   await expect(page.getByRole('heading', { name: 'Text to Speech' }).first()).toBeVisible();
@@ -23,6 +24,7 @@ test('legacy TTS section degrades to a status note without plugin UI', async ({ 
   // load in the main frontend.
   const consoleCapture = await installFakeHost(page, ttsPageState());
   await page.goto('/');
+  await waitForFrontend(page);
   await openTts(page);
 
   await expect(page.getByText('This panel moved to the plugin view.')).toBeVisible();
@@ -30,7 +32,7 @@ test('legacy TTS section degrades to a status note without plugin UI', async ({ 
   await expect(page.getByLabel('Voice', { exact: true })).toHaveCount(0);
   await expect(page.getByLabel('Text', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Play' })).toHaveCount(0);
-  await expect(page.locator('iframe.plg-frame')).toHaveCount(0);
+  await expect(page.locator('iframe.plugin-frame')).toHaveCount(0);
 
   await assertNoUnhandledCalls(page);
   consoleCapture.assertClean();
@@ -41,9 +43,10 @@ test('plugin UI renders inline and round-trips through the broker', async ({ pag
   await installPluginUiOverride(page);
   await routePluginFixture(page);
   await page.goto('/');
+  await waitForFrontend(page);
   await openTts(page);
 
-  const frame = page.frameLocator('.plg-frame');
+  const frame = page.frameLocator('.plugin-frame');
   // Settings flow from the fake host into the frame through the real shim.
   await expect(frame.locator('#server')).toHaveText('http://127.0.0.1:17842', { timeout: 10_000 });
 
@@ -75,9 +78,10 @@ test('inline page pops out through desktop host messages', async ({ page }) => {
   await installPluginUiOverride(page);
   await routePluginFixture(page);
   await page.goto('/');
+  await waitForFrontend(page);
   await openTts(page);
 
-  const frame = page.frameLocator('.plg-frame');
+  const frame = page.frameLocator('.plugin-frame');
   await expect(frame.locator('#server')).toHaveText('http://127.0.0.1:17842', { timeout: 10_000 });
 
   await page.getByRole('button', { name: 'Open in separate window' }).click();

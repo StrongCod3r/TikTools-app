@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue';
 import { useI18n } from 'vue-i18n';
 import WidgetHost from '../../../../widgets/sdk/WidgetHost.vue';
 import type { WidgetStyle } from '../../../../widgets/sdk/template.ts';
@@ -27,6 +27,16 @@ const replay = ref(0);
 const copied = ref(false);
 const copyError = ref<string | null>(null);
 let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+const canvas = useTemplateRef('canvas');
+const previewScale = ref(1);
+let resizeObserver: ResizeObserver | null = null;
+
+onMounted(() => {
+  resizeObserver = new ResizeObserver(([entry]) => {
+    if (entry) previewScale.value = Math.min(entry.contentRect.width / 640, entry.contentRect.height / 360);
+  });
+  if (canvas.value) resizeObserver.observe(canvas.value);
+});
 
 const template = computed(() => widgetTemplates[props.kind]);
 const port = computed(() => store.status?.port ?? GATEWAY_DEFAULT_PORT);
@@ -59,7 +69,10 @@ watch(
   },
 );
 
-onBeforeUnmount(clearCopied);
+onBeforeUnmount(() => {
+  clearCopied();
+  resizeObserver?.disconnect();
+});
 </script>
 
 <template>
@@ -79,14 +92,22 @@ onBeforeUnmount(clearCopied);
       </BaseIconButton>
     </template>
     <div class="overlay-preview__workarea">
-      <div class="overlay-preview__canvas">
-        <WidgetHost
-          :key="kind"
-          :template="template"
-          mode="preview"
-          :design="design"
-          :replay-key="replay"
-        />
+      <div
+        ref="canvas"
+        class="overlay-preview__canvas"
+      >
+        <div
+          class="overlay-preview__stage"
+          :style="{ transform: `translate(-50%, -50%) scale(${previewScale})` }"
+        >
+          <WidgetHost
+            :key="kind"
+            :template="template"
+            mode="preview"
+            :design="design"
+            :replay-key="replay"
+          />
+        </div>
       </div>
     </div>
     <template #footer>
@@ -164,6 +185,14 @@ onBeforeUnmount(clearCopied);
   gap: var(--space-2);
   min-width: 0;
   padding: var(--space-2);
+}
+
+.overlay-preview__stage {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 640px;
+  height: 360px;
 }
 
 .overlay-preview__label {

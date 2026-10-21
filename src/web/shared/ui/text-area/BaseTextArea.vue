@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { useTemplateRef } from 'vue';
+import { useSplitAttrs } from '@/shared/lib/use-split-attrs.ts';
+
+defineOptions({ inheritAttrs: false });
 
 withDefaults(
   defineProps<{
@@ -15,6 +18,7 @@ withDefaults(
 );
 
 const model = defineModel<string>({ default: '' });
+const { rootAttrs, controlAttrs } = useSplitAttrs();
 const area = useTemplateRef('area');
 
 defineExpose({ focus: () => area.value?.focus() });
@@ -22,11 +26,13 @@ defineExpose({ focus: () => area.value?.focus() });
 
 <template>
   <span
+    v-bind="rootAttrs"
     class="base-text-area"
     :class="{ 'base-text-area--invalid': invalid, 'base-text-area--disabled': disabled }"
   >
     <textarea
       ref="area"
+      v-bind="controlAttrs"
       v-model="model"
       class="base-text-area__input"
       :class="{ 'base-text-area__input--mono': monospace }"

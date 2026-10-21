@@ -335,4 +335,20 @@ onBeforeUnmount(() => store.dispose());
     grid-row: span 2;
   }
 }
+
+@media (width < 800px) {
+  .overlays-page {
+    overflow-y: auto;
+  }
+
+  .overlays-page__workspace {
+    flex: none;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 320px minmax(400px, auto);
+  }
+
+  .overlays-page__list {
+    grid-row: auto;
+  }
+}
 </style>
