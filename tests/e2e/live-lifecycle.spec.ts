@@ -1,12 +1,13 @@
 import { expect, test } from '@playwright/test';
 import { createWriteStream } from 'node:fs';
-import { assertNoUnhandledCalls, installFakeHost } from './fixtures/tiktools-host.ts';
+import { assertNoUnhandledCalls, installFakeHost, waitForFrontend } from './fixtures/tiktools-host.ts';
 import { emptyState } from './fixtures/states.ts';
 
 test('100 actual Vue root remounts return listeners, timers and DOM to baseline', async ({ page }, testInfo) => {
   test.setTimeout(120_000);
   const capture = await installFakeHost(page, emptyState());
   await page.goto('/');
+  await waitForFrontend(page);
   const cdp = await page.context().newCDPSession(page);
   await cdp.send('HeapProfiler.enable');
   const snapshot = async (name: string): Promise<void> => {
@@ -64,7 +65,8 @@ test('100 Feed to Plugins navigation cycles actually mount both views and releas
   test.setTimeout(120_000);
   const capture = await installFakeHost(page, emptyState());
   await page.goto('/');
-  await expect(page.locator('.feed-stream')).toBeVisible();
+  await waitForFrontend(page);
+  await expect(page.locator('.live-feed__stream')).toBeVisible();
   const read = () => page.evaluate(() => (window as unknown as {
     __tiktools_frontend_diagnostics__(): {
       ownedTimers: number; iframeCount: number; domNodes: number;
@@ -73,19 +75,25 @@ test('100 Feed to Plugins navigation cycles actually mount both views and releas
     };
   }).__tiktools_frontend_diagnostics__());
   await expect.poll(async () => (await read()).control.pending).toBe(0);
+  // Warm the lazy route's development styles before measuring retained DOM.
+  await page.getByRole('link', { name: 'Plugins', exact: true }).click();
+  await expect(page.locator('.plugins-page')).toBeVisible();
+  await page.getByRole('link', { name: 'Live feed', exact: true }).click();
+  await expect(page.locator('.live-feed__stream')).toBeVisible();
+  await expect.poll(async () => (await read()).control.pending).toBe(0);
   const baseline = await read();
   for (let i = 0; i < 100; i += 1) {
     await page.evaluate(() => (window as unknown as {
       __tiktools_benchmark_controls__: { setTab(tab: string): void };
     }).__tiktools_benchmark_controls__.setTab('plugins'));
-    await expect(page.locator('.plg')).toBeVisible();
-    await expect(page.locator('.feed-stream')).toHaveCount(0);
+    await expect(page.locator('.plugins-page')).toBeVisible();
+    await expect(page.locator('.live-feed__stream')).toHaveCount(0);
     expect((await read()).live.presentationActive).toBe(false);
     await page.evaluate(() => (window as unknown as {
       __tiktools_benchmark_controls__: { setTab(tab: string): void };
     }).__tiktools_benchmark_controls__.setTab('feed'));
-    await expect(page.locator('.feed-stream')).toBeVisible();
-    await expect(page.locator('.plg')).toHaveCount(0);
+    await expect(page.locator('.live-feed__stream')).toBeVisible();
+    await expect(page.locator('.plugins-page')).toHaveCount(0);
   }
   await expect.poll(async () => (await read()).control.pending).toBe(0);
   const final = await read();

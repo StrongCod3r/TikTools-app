@@ -4,6 +4,7 @@ import {
   assertNoUnhandledCalls,
   emitTopic,
   installFakeHost,
+  waitForFrontend,
   readHostState,
   writeHostState,
 } from './fixtures/tiktools-host.ts';
@@ -12,13 +13,14 @@ import { emptyState, ttsPageState } from './fixtures/states.ts';
 test('boots to the feed with named navigation and an active tab marker', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, emptyState());
   await page.goto('/');
+  await waitForFrontend(page);
 
   await expect(page.getByRole('navigation', { name: 'Main Navigation' })).toBeVisible();
-  const feedTab = page.getByRole('button', { name: 'Live Stream Feed' });
+  const feedTab = page.getByRole('link', { name: 'Live feed' });
   await expect(feedTab).toBeVisible();
   await expect(feedTab).toHaveAttribute('aria-current', 'page');
-  await expect(page.getByRole('button', { name: 'Plugins' })).toBeVisible();
-  await expect(page.getByText('No live events yet.')).toBeVisible();
+  await expect(page.getByRole('link', { name: 'Plugins' })).toBeVisible();
+  await expect(page.getByText('No live events yet.', { exact: false })).toBeVisible();
 
   const state = await readHostState(page);
   expect(state.frontendReady).toBe(true);
@@ -29,9 +31,10 @@ test('boots to the feed with named navigation and an active tab marker', async (
 test('dynamic plugin tab appears, renders, and falls back when removed', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, ttsPageState());
   await page.goto('/');
+  await waitForFrontend(page);
 
   // Host snapshot contains the plugin page → tab appears.
-  const ttsTab = page.getByRole('button', { name: 'Text to Speech' });
+  const ttsTab = page.getByRole('link', { name: 'Text to Speech' });
   await expect(ttsTab).toBeVisible();
 
   // Click tab → correct plugin page renders.
@@ -46,8 +49,8 @@ test('dynamic plugin tab appears, renders, and falls back when removed', async (
   snapshot.plugins = [];
   await writeHostState(page, dropped);
   await emitTopic(page, 'plugin.uninstalled', { pluginId: 'sonicboom.server' });
-  await expect(page.getByRole('button', { name: 'Text to Speech' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Plugins' })).toHaveAttribute(
+  await expect(page.getByRole('link', { name: 'Text to Speech' })).toHaveCount(0);
+  await expect(page.getByRole('link', { name: 'Plugins' })).toHaveAttribute(
     'aria-current',
     'page',
   );

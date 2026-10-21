@@ -1,0 +1,15 @@
+<script setup lang="ts">
+import BaseIcon from '../BaseIcon.vue';
+</script>
+
+<template>
+  <BaseIcon>
+    <circle
+      cx="8"
+      cy="8"
+      r="5.75"
+    />
+    <path d="M2.25 8h11.5" />
+    <path d="M8 2.25c1.6 1.6 2.4 3.5 2.4 5.75S9.6 12.15 8 13.75C6.4 12.15 5.6 10.25 5.6 8S6.4 3.85 8 2.25z" />
+  </BaseIcon>
+</template>

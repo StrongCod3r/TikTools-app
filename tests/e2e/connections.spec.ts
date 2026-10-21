@@ -4,6 +4,7 @@ import { expect, test } from '@playwright/test';
 import {
   assertNoUnhandledCalls,
   installFakeHost,
+  waitForFrontend,
 } from './fixtures/tiktools-host.ts';
 import {
   emptyState,
@@ -12,7 +13,7 @@ import {
 } from './fixtures/states.ts';
 
 async function openConnections(page: Parameters<typeof installFakeHost>[0]) {
-  const tab = page.getByRole('button', { name: 'Connections' });
+  const tab = page.getByRole('link', { name: 'Connections' });
   await expect(tab).toBeVisible();
   await tab.click();
   await expect(tab).toHaveAttribute('aria-current', 'page');
@@ -21,6 +22,7 @@ async function openConnections(page: Parameters<typeof installFakeHost>[0]) {
 test('connections page shows empty servers state without plugins', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, emptyState());
   await page.goto('/');
+  await waitForFrontend(page);
   await openConnections(page);
 
   await expect(page.getByText('No server connections yet')).toBeVisible();
@@ -32,6 +34,7 @@ test('connections page shows empty servers state without plugins', async ({ page
 test('server connection success shows latency and stays editable', async ({ page }) => {
   const consoleCapture = await installFakeHost(page, sonicboomConnectedState());
   await page.goto('/');
+  await waitForFrontend(page);
   await openConnections(page);
 
   const server = page.getByRole('button', { name: /SonicBoom Server/ });
@@ -64,6 +67,7 @@ test('server connection failure shows the error without an app-wide crash', asyn
 }) => {
   const consoleCapture = await installFakeHost(page, sonicboomDisconnectedState());
   await page.goto('/');
+  await waitForFrontend(page);
   await openConnections(page);
 
   const server = page.getByRole('button', { name: /SonicBoom Server/ });
@@ -74,12 +78,12 @@ test('server connection failure shows the error without an app-wide crash', asyn
   // host error on the server head (accessible name) plus a status line.
   await page.getByRole('button', { name: 'Test connection' }).click();
   await expect(page.getByRole('button', { name: /connection refused/ })).toBeVisible();
-  await expect(page.getByText('Connection failed.').first()).toBeVisible();
+  await expect(page.getByText('connection refused', { exact: false }).first()).toBeVisible();
 
   // Settings remain editable after a failed probe.
   const urlField = page.locator('input').first();
   await expect(urlField).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Connections' })).toHaveAttribute(
+  await expect(page.getByRole('link', { name: 'Connections' })).toHaveAttribute(
     'aria-current',
     'page',
   );
@@ -105,6 +109,7 @@ test('REPO imports a token through the shared card without showing the secret', 
   state.pluginHealth[id] = { ok: false, latencyMs: 1, error: 'API token missing.' };
   const capture = await installFakeHost(page, state);
   await page.goto('/');
+  await waitForFrontend(page);
   await openConnections(page);
   await page.getByRole('button', { name: /R.E.P.O. Game/ }).click();
   const importButton = page.getByRole('button', { name: 'Import token from configuration…' });
@@ -112,7 +117,7 @@ test('REPO imports a token through the shared card without showing the secret', 
   await expect(page.getByRole('button', { name: 'Get API token…' })).toHaveCount(0);
   await importButton.click();
   await expect(page.getByText('API token imported and saved.')).toBeVisible();
-  await expect(page.getByText('API token imported and saved.')).toHaveClass(/plg-alert--ok/);
+  await expect(page.getByText('API token imported and saved.')).toHaveClass(/connection-editor__details--ok/);
   await expect(page.getByText('Connected to http://127.0.0.1:17453').first()).toBeVisible();
   await page.getByRole('button', { name: 'Edit settings' }).click();
   await expect(page.locator('input[type="password"]')).toHaveValue('••••••••');
@@ -146,18 +151,19 @@ test('automatic REPO setup chooses a profile and distinguishes API availability 
   state.pluginSetupHealth = { 'repo.game': { ok: false, reachable: true, gameplayReady: false, latencyMs: 1, error: 'API reachable; gameplay unavailable.' } };
   const capture = await installFakeHost(page, state);
   await page.goto('/');
+  await waitForFrontend(page);
   await openConnections(page);
   await page.getByRole('button', { name: /R.E.P.O. Game/ }).click();
   await page.getByRole('button', { name: 'Connect automatically', exact: true }).click();
   await expect(page.getByText('Steam — Local installation')).toBeVisible();
   await expect(page.getByText('Mod profile: Stream')).toBeVisible();
   await expect(page.getByText('API token imported and saved.')).toHaveCount(0);
-  await page.getByRole('listitem').filter({ hasText: 'Mod profile: Stream' }).getByRole('button', { name: 'Use this configuration' }).click();
+  await page.locator('.connection-editor__candidate-list li').filter({ hasText: 'Mod profile: Stream' }).getByRole('button', { name: 'Use this configuration' }).click();
   await expect(page.getByText('API token imported and saved.')).toBeVisible();
-  await expect(page.getByText('API token imported and saved.')).toHaveClass(/plg-alert--ok/);
-  await expect(page.getByText('API connected · Gameplay not ready', { exact: true }).first()).toBeVisible();
+  await expect(page.getByText('API token imported and saved.')).toHaveClass(/connection-editor__details--ok/);
+  await expect(page.getByText('API connected · gameplay not ready', { exact: true }).first()).toBeVisible();
   await expect(page.locator('input[type="password"]')).toHaveValue('••••••••');
-  await expect(page.locator('.plg-connect input').first()).toHaveValue('http://127.0.0.1:18053');
+  await expect(page.locator('.connection-editor input').first()).toHaveValue('http://127.0.0.1:18053');
   await assertNoUnhandledCalls(page);
   capture.assertClean();
 });
@@ -166,13 +172,14 @@ test('REPO setup offers a folder picker when automatic discovery finds nothing',
   const state = await repoAutomaticState();
   const capture = await installFakeHost(page, state);
   await page.goto('/');
+  await waitForFrontend(page);
   await openConnections(page);
   await page.getByRole('button', { name: /R.E.P.O. Game/ }).click();
   await page.getByRole('button', { name: 'Connect automatically', exact: true }).click();
   await expect(page.getByText('No configuration found. Select the game folder.')).toBeVisible();
   await page.getByRole('button', { name: 'Select game folder…' }).click();
   await expect(page.getByText('API token imported and saved.')).toBeVisible();
-  await expect(page.getByText('API token imported and saved.')).toHaveClass(/plg-alert--ok/);
+  await expect(page.getByText('API token imported and saved.')).toHaveClass(/connection-editor__details--ok/);
   await expect(page.getByText('Connected to http://127.0.0.1:17453').first()).toBeVisible();
   await assertNoUnhandledCalls(page);
   capture.assertClean();

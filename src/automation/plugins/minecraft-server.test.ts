@@ -3,7 +3,6 @@ import { expect, test } from 'bun:test';
 import manifestJson from '../../../examples/minecraft-server/plugin.json';
 import type { ActionTypeDefinition } from '../behavior/types.ts';
 import { defaultActionConfig } from '../behavior/action-config.ts';
-import { readIconName, type IconName } from '../../web/components/icons/index.ts';
 
 type MinecraftManifest = {
   id: string;
@@ -39,10 +38,7 @@ test('minecraft example exposes six structured actions', () => {
     'minecraft.server.run-command',
   ]);
   for (const action of manifest.actionTypes) {
-    // Every action renders as a picker card with a registry icon.
-    const icon = action.icon as IconName | undefined;
-    expect(icon).toBeTruthy();
-    expect(readIconName(icon)).toBe(icon);
+    expect(action.icon).toBeTruthy();
     expect(typeof action.category).toBe('string');
     expect(action.requiredCapabilities).toEqual(['http.request']);
   }

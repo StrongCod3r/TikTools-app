@@ -99,6 +99,14 @@ function pluginAssetServer(): Plugin {
 export default defineConfig({
   root,
   plugins: [vue(), vueJsx(), pluginAssetServer()],
+  resolve: {
+    alias: { '@': root },
+  },
+  define: {
+    __VUE_I18N_FULL_INSTALL__: true,
+    __VUE_I18N_LEGACY_API__: false,
+    __INTLIFY_PROD_DEVTOOLS__: false,
+  },
   build: {
     outDir: resolve(process.cwd(), 'dist/web'),
     emptyOutDir: true,
