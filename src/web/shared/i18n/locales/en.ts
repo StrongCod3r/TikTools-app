@@ -137,7 +137,6 @@ export default {
   points: {
     rules: {
       title: 'Point rules',
-      locked: 'Rules are locked while LIVE. Disconnect to edit them.',
       currency: 'Currency name',
       source: 'Source',
       rate: '{currency} awarded',

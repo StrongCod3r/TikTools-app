@@ -139,7 +139,6 @@ export default {
   points: {
     rules: {
       title: 'Reglas de puntos',
-      locked: 'Las reglas se bloquean durante el LIVE. Desconecta para editarlas.',
       currency: 'Nombre de la moneda',
       source: 'Fuente',
       rate: '{currency} otorgados',

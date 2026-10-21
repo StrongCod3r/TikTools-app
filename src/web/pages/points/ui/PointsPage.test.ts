@@ -45,7 +45,7 @@ async function mountPage(status: ConnectionStatus = 'idle') {
   const store = stores.use(() => usePointsStore());
   await store.refresh();
   await flushPromises();
-  return { wrapper, calls };
+  return { wrapper, calls, store };
 }
 
 function button(wrapper: Awaited<ReturnType<typeof mountPage>>['wrapper'], label: string) {
@@ -78,11 +78,30 @@ describe('PointsPage', () => {
     expect(wrapper.findAll('th').map((th) => th.text())).toContain('Gems');
   });
 
-  it('locks the rules while live', async () => {
-    const { wrapper } = await mountPage('connected');
-    expect(wrapper.text()).toContain('Rules are locked while LIVE');
-    expect(wrapper.get('#points-currency').attributes('disabled')).toBeDefined();
+  it.each<ConnectionStatus>(['connected', 'connecting', 'retrying'])('saves rules during %s without reconnecting', async (status) => {
+    const { wrapper, calls } = await mountPage(status);
+    expect(wrapper.get('#points-currency').attributes('disabled')).toBeUndefined();
+    await wrapper.get('#points-currency').setValue('Live Gems');
+    await button(wrapper, 'Save rules').trigger('click');
+    await flushPromises();
+    expect(calls.filter((call) => call.method === 'points.config.set')).toHaveLength(1);
+    expect(calls.find((call) => call.method === 'points.config.set')?.params).toMatchObject({ currencyName: 'Live Gems' });
+    expect(wrapper.findAll('th').map((th) => th.text())).toContain('Live Gems');
+    expect(calls.some((call) => call.method.startsWith('live.'))).toBe(false);
     expect(button(wrapper, 'Reset all points').attributes('disabled')).toBeDefined();
+  });
+
+  it('reloads clean rules from the store and preserves unsaved edits', async () => {
+    const { wrapper, store } = await mountPage('connected');
+    store.pointsConfig = { ...store.pointsConfig, currencyName: 'Coins' };
+    await nextTick();
+    expect((wrapper.get('#points-currency').element as HTMLInputElement).value).toBe('Coins');
+    await wrapper.get('#points-currency').setValue('Draft Gems');
+    store.pointsConfig = { ...store.pointsConfig, currencyName: 'Stars' };
+    await nextTick();
+    expect((wrapper.get('#points-currency').element as HTMLInputElement).value).toBe('Draft Gems');
+    await button(wrapper, 'Discard').trigger('click');
+    expect((wrapper.get('#points-currency').element as HTMLInputElement).value).toBe('Stars');
   });
 
   it('deducts points for a viewer from the row menu', async () => {

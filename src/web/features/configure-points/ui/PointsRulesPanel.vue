@@ -8,16 +8,11 @@ import BaseButton from '@/shared/ui/button/BaseButton.vue';
 import BaseCheckbox from '@/shared/ui/checkbox/BaseCheckbox.vue';
 import BaseFormGrid from '@/shared/ui/form/BaseFormGrid.vue';
 import BaseFormRow from '@/shared/ui/form/BaseFormRow.vue';
-import IconLock from '@/shared/ui/icon/icons/IconLock.vue';
 import BasePanel from '@/shared/ui/panel/BasePanel.vue';
 import BaseSpinBox from '@/shared/ui/spin-box/BaseSpinBox.vue';
 import BaseTextField from '@/shared/ui/text-field/BaseTextField.vue';
 import { vTooltip } from '@/shared/ui/tooltip/v-tooltip.ts';
 import { isConfigDirty, MIN_POINTS_PER_LEVEL, normalizePointsConfig, pointsRules } from '../model/points-rules.ts';
-
-const props = defineProps<{
-  locked: boolean;
-}>();
 
 const { t } = useI18n();
 const store = usePointsStore();
@@ -27,10 +22,10 @@ const saving = ref(false);
 const saved = ref(false);
 
 const dirty = computed(() => isConfigDirty(draft.value, pointsConfig.value));
-const editable = computed(() => !props.locked && !saving.value);
+const editable = computed(() => !saving.value);
 
-watch(pointsConfig, (config) => {
-  if (!dirty.value || props.locked) draft.value = { ...config };
+watch(pointsConfig, (config, previous) => {
+  if (!isConfigDirty(draft.value, previous)) draft.value = { ...config };
 });
 
 function discard(): void {
@@ -57,14 +52,6 @@ async function save(): Promise<void> {
     class="points-rules"
     :title="t('points.rules.title')"
   >
-    <p
-      v-if="locked"
-      class="points-rules__locked"
-      role="status"
-    >
-      <IconLock />
-      {{ t('points.rules.locked') }}
-    </p>
     <form
       class="points-rules__form"
       @submit.prevent="save"
@@ -179,17 +166,6 @@ async function save(): Promise<void> {
 </template>
 
 <style scoped>
-.points-rules__locked {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  margin: 0 0 var(--space-4);
-  padding: var(--space-3) var(--space-4);
-  border: var(--border-width) solid var(--color-warning);
-  border-radius: var(--radius-sm);
-  color: var(--color-warning);
-}
-
 .points-rules__form {
   display: flex;
   flex-direction: column;

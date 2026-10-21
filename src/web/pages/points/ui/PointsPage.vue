@@ -43,7 +43,6 @@ watch([query, sort], persist);
   <div class="points-page">
     <PointsRulesPanel
       class="points-page__rules"
-      :locked="locked"
     />
     <PointsLeaderboardPanel
       v-model:query="query"
